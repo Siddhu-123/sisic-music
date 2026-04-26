@@ -107,7 +107,10 @@ export function useAuth() {
       await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
     } catch (e) {
       console.error('Sync failed:', e);
-      const message = e instanceof Error ? e.message : 'Sync failed.';
+      let message = e instanceof Error ? e.message : 'Sync failed.';
+      if (message.includes('Spotify library file failed: Drive API 404')) {
+        message = 'Spotify library file was not found for this Google account. Check VITE_SPOTIFY_JSON_FILE_ID, sign in with the Drive account that owns the file, or share spotify_data.json with that account.';
+      }
       setError(message);
       setSyncStatus('Sync failed.');
     } finally {

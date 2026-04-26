@@ -55,18 +55,28 @@ class GoogleDriveService {
   }
 
   /** Generic Drive API GET */
-  async driveGet(url) {
+  async driveGet(url, label = 'Drive request') {
     const resp = await fetch(url, {
       headers: { Authorization: `Bearer ${this.accessToken}` },
     });
-    if (!resp.ok) throw new Error(`Drive API error: ${resp.status}`);
+    if (!resp.ok) {
+      let details = '';
+      try {
+        const body = await resp.json();
+        details = body.error?.message ? ` ${body.error.message}` : '';
+      } catch {
+        details = resp.statusText ? ` ${resp.statusText}` : '';
+      }
+      throw new Error(`${label} failed: Drive API ${resp.status}.${details}`);
+    }
     return resp;
   }
 
   /** Fetch spotify_data.json from Drive by file ID */
   async fetchSpotifyLibrary(fileId) {
     const resp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`
+      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+      'Spotify library file'
     );
     return await resp.json();
   }
@@ -79,7 +89,8 @@ class GoogleDriveService {
     const safe = songTitle.replace(/'/g, "\\'").substring(0, 40);
     const q = `name contains '${safe}' and '${folderId}' in parents and trashed=false`;
     const resp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
+      'Drive song search'
     );
     const data = await resp.json();
     return data.files?.[0] || null;
@@ -88,7 +99,8 @@ class GoogleDriveService {
   /** Download an MP3 file as a Blob for local caching */
   async downloadFileAsBlob(fileId) {
     const resp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`
+      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+      'Drive audio download'
     );
     return await resp.blob();
   }
@@ -99,14 +111,16 @@ class GoogleDriveService {
   async readQueue(folderId) {
     const q = `name='queue.json' and '${folderId}' in parents and trashed=false`;
     const listResp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`,
+      'Drive queue lookup'
     );
     const listData = await listResp.json();
     const file = listData.files?.[0];
     if (!file) return { queueFileId: null, queue: [] };
 
     const contentResp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
+      `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+      'Drive queue file'
     );
     const queue = await contentResp.json();
     return { queueFileId: file.id, queue: Array.isArray(queue) ? queue : [] };
