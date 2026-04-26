@@ -1,23 +1,36 @@
-// Google Drive Service for Sisic Music Web
-// Uses Google Identity Services (GIS) for OAuth, then Google Drive REST API
+import { asSongRecord, canonicalAudioFilename, getSongKey, jobFilePrefix } from '../songIdentity';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/drive.file',   // needed to write queue.json
+  'https://www.googleapis.com/auth/drive.file',
 ].join(' ');
 
 const TOKEN_STORAGE_KEY = 'sisic_access_token';
 const EXPIRY_STORAGE_KEY = 'sisic_token_expiry';
+const JOB_MIME_TYPE = 'application/json';
+const JOB_FILE_FIELDS = 'files(id,name,modifiedTime,appProperties)';
+
+function escapeDriveQuery(value = '') {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function normalizeJob(raw, file = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    ...raw,
+    jobFileId: file.id || raw.jobFileId || '',
+    jobFileName: file.name || raw.jobFileName || '',
+    updatedAt: raw.updatedAt || file.modifiedTime || raw.createdAt || new Date().toISOString(),
+  };
+}
 
 class GoogleDriveService {
   constructor() {
     this.tokenClient = null;
-    // Restore token from localStorage so refresh doesn't lose login
     this.accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) || null;
     this.tokenExpiry = Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || null;
   }
 
-  /** Save token to localStorage for persistence across refreshes */
   _persistToken(token, expiry) {
     this.accessToken = token;
     this.tokenExpiry = expiry;
@@ -30,7 +43,6 @@ class GoogleDriveService {
     }
   }
 
-  /** Call once after window.google is loaded */
   initTokenClient(clientId) {
     if (!window.google?.accounts?.oauth2) {
       console.error('Google Identity Services not loaded yet');
@@ -46,7 +58,6 @@ class GoogleDriveService {
     });
   }
 
-  /** Opens Google sign-in popup */
   requestToken() {
     return new Promise((resolve, reject) => {
       if (!this.tokenClient) {
@@ -66,10 +77,9 @@ class GoogleDriveService {
   }
 
   get isAuthenticated() {
-    return !!this.accessToken && Date.now() < (this.tokenExpiry || 0);
+    return Boolean(this.accessToken && Date.now() < (this.tokenExpiry || 0));
   }
 
-  /** Generic Drive API GET */
   async driveGet(url, label = 'Drive request') {
     const resp = await fetch(url, {
       headers: { Authorization: `Bearer ${this.accessToken}` },
@@ -87,7 +97,19 @@ class GoogleDriveService {
     return resp;
   }
 
-  /** Fetch spotify_data.json from Drive by file ID */
+  async driveList(query, fields = JOB_FILE_FIELDS, pageSize = 100) {
+    const params = new URLSearchParams({
+      q: query,
+      fields,
+      pageSize: String(pageSize),
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
+    });
+    const resp = await this.driveGet(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, 'Drive file list');
+    const data = await resp.json();
+    return data.files || [];
+  }
+
   async fetchSpotifyLibrary(fileId) {
     const resp = await this.driveGet(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
@@ -96,26 +118,28 @@ class GoogleDriveService {
     return await resp.json();
   }
 
-  /**
-   * Find an audio file on Drive by exact canonical filename: "Artist - Track.mp3"
-   * Matches the Mac worker's naming convention.
-   */
-  async findSongFile(songTitle, folderId, artist = '') {
-    // Build canonical filename: "Artist - Track.mp3"
-    const label = artist ? `${artist} - ${songTitle}` : songTitle;
-    // eslint-disable-next-line no-control-regex
-    const safeName = label.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
-    const escaped = `${safeName}.mp3`.replace(/'/g, "\\'");
-    const q = `name='${escaped}' and '${folderId}' in parents and trashed=false`;
-    const resp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
-      'Drive song search'
-    );
-    const data = await resp.json();
-    return data.files?.[0] || null;
+  async findSongFile(songOrTitle, folderId, maybeArtist = '') {
+    const song = typeof songOrTitle === 'object'
+      ? asSongRecord(songOrTitle)
+      : asSongRecord({ track: songOrTitle, artist: maybeArtist });
+    const songKey = getSongKey(song);
+    const escapedFolder = escapeDriveQuery(folderId);
+    const escapedKey = escapeDriveQuery(songKey);
+
+    const metadataQuery = [
+      `'${escapedFolder}' in parents`,
+      'trashed=false',
+      `appProperties has { key='sisicSongKey' and value='${escapedKey}' }`,
+    ].join(' and ');
+    const metadataMatches = await this.driveList(metadataQuery, 'files(id,name,appProperties)', 10);
+    if (metadataMatches[0]) return metadataMatches[0];
+
+    const escapedName = escapeDriveQuery(canonicalAudioFilename(song));
+    const filenameQuery = `name='${escapedName}' and '${escapedFolder}' in parents and trashed=false`;
+    const filenameMatches = await this.driveList(filenameQuery, 'files(id,name,appProperties)', 10);
+    return filenameMatches[0] || null;
   }
 
-  /** Download an MP3 file as a Blob for local caching */
   async downloadFileAsBlob(fileId) {
     const resp = await this.driveGet(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
@@ -124,91 +148,106 @@ class GoogleDriveService {
     return await resp.blob();
   }
 
-  // ─── Queue Signaling ──────────────────────────────────────────────────────
-
-  /** Read the current queue.json from Drive. Returns [] if not found. */
-  async readQueue(folderId) {
-    const q = `name='queue.json' and '${folderId}' in parents and trashed=false`;
-    const listResp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`,
-      'Drive queue lookup'
-    );
-    const listData = await listResp.json();
-    const file = listData.files?.[0];
-    if (!file) return { queueFileId: null, queue: [] };
-
-    const contentResp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
-      'Drive queue file'
-    );
-    const queue = await contentResp.json();
-    return { queueFileId: file.id, queue: Array.isArray(queue) ? queue : [] };
+  async readJsonFile(fileId, label = 'Drive JSON file') {
+    const resp = await this.driveGet(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, label);
+    return await resp.json();
   }
 
-  /** Write an updated queue array back to queue.json on Drive */
-  async writeQueue(queueFileId, folderId, queueArray) {
-    const content = JSON.stringify(queueArray);
-    const blob = new Blob([content], { type: 'application/json' });
-
-    if (queueFileId) {
-      // Update existing file
-      const resp = await fetch(
-        `https://www.googleapis.com/upload/drive/v3/files/${queueFileId}?uploadType=media`,
-        {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: blob,
-        }
-      );
-      if (!resp.ok) {
-        throw new Error(`Drive queue update failed: ${resp.status} ${await resp.text()}`);
-      }
-    } else {
-      // Create new queue.json
-      const metadata = { name: 'queue.json', parents: [folderId] };
-      const form = new FormData();
-      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-      form.append('file', blob);
-      const resp = await fetch(
-        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${this.accessToken}` },
-          body: form,
-        }
-      );
-      if (!resp.ok) {
-        throw new Error(`Drive queue create failed: ${resp.status} ${await resp.text()}`);
+  async listDownloadJobs(folderId) {
+    const escapedFolder = escapeDriveQuery(folderId);
+    const q = `name contains 'sisic-job-' and '${escapedFolder}' in parents and trashed=false`;
+    const files = await this.driveList(q, JOB_FILE_FIELDS, 100);
+    const jobs = [];
+    for (const file of files) {
+      try {
+        const content = await this.readJsonFile(file.id, 'Drive job file');
+        const job = normalizeJob(content, file);
+        if (job) jobs.push(job);
+      } catch (error) {
+        console.error('Failed to read Drive job file:', file.name, error);
       }
     }
+    return jobs.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
-  /** Add a song to the Mac worker's download queue */
-  async requestSongDownload(song, folderId, sourceUrl = '') {
-    const { queueFileId, queue } = await this.readQueue(folderId);
-    const alreadyQueued = queue.some(
-      e => e.track === song.track && e.artist === song.artist
-    );
-    if (alreadyQueued) {
-      return { queued: false, alreadyQueued: true };
+  async findDownloadJob(song, folderId) {
+    const songKey = getSongKey(song);
+    const escapedFolder = escapeDriveQuery(folderId);
+    const escapedKey = escapeDriveQuery(songKey);
+    const q = [
+      `name contains 'sisic-job-'`,
+      `'${escapedFolder}' in parents`,
+      'trashed=false',
+      `appProperties has { key='sisicSongKey' and value='${escapedKey}' }`,
+    ].join(' and ');
+    const files = await this.driveList(q, JOB_FILE_FIELDS, 20);
+    const jobs = [];
+    for (const file of files) {
+      try {
+        const content = await this.readJsonFile(file.id, 'Drive job file');
+        const job = normalizeJob(content, file);
+        if (job) jobs.push(job);
+      } catch (error) {
+        console.error('Failed to read Drive job file:', file.name, error);
+      }
+    }
+    return jobs.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0] || null;
+  }
+
+  async createJobFile(job, folderId) {
+    const content = JSON.stringify(job, null, 2);
+    const metadata = {
+      name: `${jobFilePrefix(job.songKey)}-${job.jobId}.json`,
+      parents: [folderId],
+      mimeType: JOB_MIME_TYPE,
+      appProperties: {
+        sisicJob: 'true',
+        sisicSongKey: job.songKey,
+        sisicArtist: job.artist,
+        sisicTrack: job.track,
+      },
+    };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
+    form.append('file', new Blob([content], { type: JOB_MIME_TYPE }));
+    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,appProperties', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+      body: form,
+    });
+    if (!resp.ok) {
+      throw new Error(`Drive job create failed: ${resp.status} ${await resp.text()}`);
+    }
+    const file = await resp.json();
+    return normalizeJob(job, file);
+  }
+
+  async requestSongDownload(songInput, folderId, sourceUrl = '') {
+    const song = asSongRecord(songInput);
+    const existing = await this.findDownloadJob(song, folderId);
+    if (existing && ['queued', 'downloading', 'done'].includes(existing.status)) {
+      return { queued: false, alreadyQueued: existing.status !== 'done', job: existing };
     }
 
-    if (!alreadyQueued) {
-      queue.push({
-        id: crypto.randomUUID(),
-        track: song.track,
-        artist: song.artist,
-        album: song.album,
-        playlistName: song.playlistName,
-        sourceUrl,
-        createdAt: new Date().toISOString(),
-      });
-      await this.writeQueue(queueFileId, folderId, queue);
-    }
-    return { queued: true, alreadyQueued: false };
+    const now = new Date().toISOString();
+    const job = {
+      schemaVersion: 1,
+      jobId: crypto.randomUUID(),
+      songKey: song.songKey,
+      track: song.track,
+      artist: song.artist,
+      album: song.album || '',
+      expectedFilename: canonicalAudioFilename(song),
+      status: 'queued',
+      attempts: 0,
+      lastError: '',
+      createdAt: now,
+      updatedAt: now,
+      uploadedFileId: '',
+      sourceUrl,
+    };
+    const created = await this.createJobFile(job, folderId);
+    return { queued: true, alreadyQueued: false, job: created };
   }
 }
 

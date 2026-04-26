@@ -129,7 +129,13 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  width: 100%;
 }
+
+.playlist-card { border: 0; color: inherit; text-align: left; }
 
 .playlist-item:hover,
 .playlist-item--active { color: var(--text); background: rgba(255,255,255,0.06); }
@@ -258,6 +264,31 @@ body {
 .song-card__info { flex: 1; min-width: 0; }
 .song-card__title { font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
 .song-card__artist { color: var(--text-muted); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.song-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  min-height: 20px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.song-status--ready { color: var(--green); background: rgba(29,185,84,0.12); }
+.song-status--queued { color: #f2c94c; background: rgba(242,201,76,0.12); }
+.song-status--downloading { color: #79a7ff; background: rgba(121,167,255,0.12); }
+.song-status--error { color: #ff8f8f; background: rgba(255,143,143,0.12); }
+.song-status--missing { color: var(--text-muted); }
 
 .song-card__dl-btn {
   position: absolute;
@@ -853,6 +884,25 @@ body {
   font-size: 0.85rem;
   padding: 12px 0;
 }
+
+.queue-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.06);
+}
+
+.queue-pill--ready { color: var(--green); background: rgba(29,185,84,0.12); }
+.queue-pill--queued { color: #f2c94c; background: rgba(242,201,76,0.12); }
+.queue-pill--working { color: #79a7ff; background: rgba(121,167,255,0.12); }
+.queue-pill--error { color: #ff8f8f; background: rgba(255,143,143,0.12); }
 
 @media (max-width: 768px) {
   .queue-panel {

@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { driveService } from '../services/GoogleDriveService';
-import { syncLibraryToDb, requestPersistentStorage, db } from '../db';
+import { syncLibraryToDb, requestPersistentStorage } from '../db';
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
@@ -29,12 +29,9 @@ export function useAuth() {
   const [error, setError] = useState(() => missingConfigMessage());
   const hasSyncedOnMount = useRef(false);
 
-  // Init GIS once the script tag has loaded
   useEffect(() => {
     const missing = getMissingConfig();
-    if (missing.length > 0) {
-      return undefined;
-    }
+    if (missing.length > 0) return undefined;
 
     const tryInit = () => {
       if (window.google?.accounts?.oauth2) {
@@ -45,52 +42,46 @@ export function useAuth() {
     };
 
     if (!tryInit()) {
-      // Script might still be loading, poll for it
       const interval = setInterval(() => {
         if (tryInit()) clearInterval(interval);
       }, 300);
       return () => clearInterval(interval);
     }
+    return undefined;
   }, []);
 
-  const syncLibrary = async () => {
+  const syncLibrary = useCallback(async () => {
     setError('');
     if (!SPOTIFY_JSON_FILE_ID) {
       setError('Missing required config: VITE_SPOTIFY_JSON_FILE_ID.');
-      return;
+      return null;
     }
 
     setIsSyncing(true);
-    setSyncStatus('Fetching library from Drive…');
+    setSyncStatus('Fetching library from Drive...');
     try {
       const data = await driveService.fetchSpotifyLibrary(SPOTIFY_JSON_FILE_ID);
-
-      // Flatten: each playlist track gets tagged with its playlist name
       const allSongs = [];
 
-      (data.saved_tracks || []).forEach(t => {
-        allSongs.push({ ...t, playlistName: 'Liked Songs' });
+      (data.saved_tracks || []).forEach(track => {
+        allSongs.push({ ...track, playlistName: 'Liked Songs', source: 'spotify' });
       });
 
-      (data.playlists || []).forEach(pl => {
-        (pl.tracks || []).forEach(t => {
-          allSongs.push({ ...t, playlistName: pl.playlist_name });
+      (data.playlists || []).forEach(playlist => {
+        (playlist.tracks || []).forEach(track => {
+          allSongs.push({ ...track, playlistName: playlist.playlist_name, source: 'spotify' });
         });
       });
 
-      // Import listening history songs (for search/discovery)
-      (data.history_tracks || []).forEach(t => {
-        allSongs.push({
-          ...t,
-          playlistName: 'Listening History',
-        });
+      (data.history_tracks || []).forEach(track => {
+        allSongs.push({ ...track, playlistName: 'Listening History', source: 'spotify-history' });
       });
 
-      const added = await syncLibraryToDb(allSongs);
-      setSyncStatus(`Synced! ${added} new tracks added.`);
-
-      // Save last sync timestamp
-      await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
+      const result = await syncLibraryToDb(allSongs);
+      setSyncStatus(
+        `Synced ${result.totalSongs} tracks across ${result.playlistLinks} playlist links (${result.added} new, ${result.updated} updated).`
+      );
+      return result;
     } catch (e) {
       console.error('Sync failed:', e);
       let message = e instanceof Error ? e.message : 'Sync failed.';
@@ -99,12 +90,13 @@ export function useAuth() {
       }
       setError(message);
       setSyncStatus('Sync failed.');
+      return null;
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, []);
 
-  const login = async () => {
+  const login = useCallback(async () => {
     try {
       setError('');
       const missing = getMissingConfig();
@@ -118,24 +110,20 @@ export function useAuth() {
       }
       await driveService.requestToken();
       setIsAuthenticated(true);
-      // After login, request persistent storage and sync library
       await requestPersistentStorage();
       await syncLibrary();
     } catch (e) {
       console.error('Login failed:', e);
       setError(e instanceof Error ? e.message : 'Login failed.');
     }
-  };
+  }, [syncLibrary]);
 
-  // Auto-sync on mount if already authenticated (token restored from localStorage)
-  // This ensures the library loads immediately on refresh / new device
   useEffect(() => {
     if (isAuthenticated && !hasSyncedOnMount.current && !isSyncing) {
       hasSyncedOnMount.current = true;
       syncLibrary();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated]);
+  }, [isAuthenticated, isSyncing, syncLibrary]);
 
   return { isAuthenticated, isSyncing, syncStatus, error, login, syncLibrary };
 }

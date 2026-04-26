@@ -8,24 +8,19 @@ function driveStreamUrl(fileId, accessToken) {
   return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`;
 }
 
-/**
- * Weighted random pick using logarithmic play count.
- * weight = 1 + ln(1 + playCount)
- * Songs played in current session get deprioritized.
- */
-function smartRandomIndex(songs, currentIndex, playedInSession) {
+function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys) {
   if (songs.length <= 1) return 0;
 
   const weights = songs.map((song, i) => {
-    if (i === currentIndex) return 0; // Don't replay current song
+    if (i === currentIndex) return 0;
+    if (song.songKey && failedSongKeys.has(song.songKey)) return 0;
     const playCount = song.playCount || 0;
-    let w = 1 + Math.log(1 + playCount);
-    // Deprioritize recently played in this session
-    if (playedInSession.has(song.id)) w *= 0.15;
-    return w;
+    let weight = 1 + Math.log(1 + playCount);
+    if (playedInSession.has(song.songKey || song.id)) weight *= 0.15;
+    return weight;
   });
 
-  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   if (totalWeight === 0) return (currentIndex + 1) % songs.length;
 
   let random = Math.random() * totalWeight;
@@ -36,7 +31,6 @@ function smartRandomIndex(songs, currentIndex, playedInSession) {
   return 0;
 }
 
-/** Fisher-Yates shuffle (returns new array). */
 function shuffleArray(arr) {
   const shuffled = [...arr];
   for (let i = shuffled.length - 1; i > 0; i--) {
@@ -52,14 +46,14 @@ export function useAudioPlayer() {
   const [queue, setQueue] = useState([]);
   const [queueIndex, setQueueIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0); // 0-100
+  const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [error, setError] = useState('');
-  const [shuffleMode, setShuffleMode] = useState('off'); // 'off' | 'shuffle' | 'smart'
+  const [shuffleMode, setShuffleMode] = useState('off');
   const blobUrlRef = useRef(null);
   const playedInSessionRef = useRef(new Set());
-  // Store the original (unshuffled) queue so we can restore it
+  const failedSongKeysRef = useRef(new Set());
   const originalQueueRef = useRef([]);
 
   const clearSource = useCallback(() => {
@@ -76,30 +70,29 @@ export function useAudioPlayer() {
     }
   }, []);
 
+  const setPlayerError = useCallback((message) => {
+    setError(message || '');
+  }, []);
+
   const loadAndPlay = useCallback(async (song, accessToken) => {
     const audio = audioRef.current;
     setError('');
 
-    // Revoke old Blob URL to free memory
     if (blobUrlRef.current) {
       URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = null;
     }
 
-    // Properly pause and wait before setting new source — fixes the
-    // "play() request was interrupted by a call to pause()" error
     audio.pause();
     audio.removeAttribute('src');
-    audio.load(); // Reset the element cleanly
+    audio.load();
 
-    if (song.isDownloaded && song.blob) {
-      // Play from local IndexedDB blob — instant, no network needed
+    if ((song.isDownloaded || song.isCached || song.hasBlob) && song.blob) {
       const url = URL.createObjectURL(song.blob);
       blobUrlRef.current = url;
       audio.src = url;
       setCurrentSong(song);
     } else if (song.driveFileId && accessToken) {
-      // Stream directly from Drive
       audio.preload = 'auto';
       audio.src = driveStreamUrl(song.driveFileId, accessToken);
       setCurrentSong(song);
@@ -109,41 +102,46 @@ export function useAudioPlayer() {
       setError(
         song.driveFileId
           ? 'Google Drive sign-in is required before this song can stream.'
-          : `"${song.track}" is not on Drive yet — it's been queued for download.`
+          : `"${song.track}" is queued for download.`
       );
-      return;
+      return false;
     }
 
     audio.volume = volume;
+    if (song.songKey || song.id) playedInSessionRef.current.add(song.songKey || song.id);
 
-    // Track in session history for smart shuffle
-    if (song.id) playedInSessionRef.current.add(song.id);
-
-    // Small delay to let the browser process the source change
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(resolve => setTimeout(resolve, 50));
 
     try {
       await audio.play();
+      if (song.songKey) failedSongKeysRef.current.delete(song.songKey);
+      return true;
     } catch (e) {
-      // AbortError means user/code triggered another action — not a real error
       if (e.name !== 'AbortError') {
         console.error('Playback error:', e);
         setError(e instanceof Error ? e.message : 'Playback failed.');
       }
+      return false;
     }
   }, [clearSource, volume]);
-
-  // ── Next / Prev ────────────────────────────────────────────────────────
 
   const playNext = useCallback(() => {
     if (queue.length === 0) return;
 
     if (shuffleMode === 'smart') {
-      const nextIdx = smartRandomIndex(queue, queueIndex, playedInSessionRef.current);
+      const nextIdx = smartRandomIndex(queue, queueIndex, playedInSessionRef.current, failedSongKeysRef.current);
       setQueueIndex(nextIdx);
-    } else {
-      setQueueIndex(i => (i + 1) % queue.length);
+      return;
     }
+
+    setQueueIndex(current => {
+      for (let step = 1; step <= queue.length; step++) {
+        const next = (current + step) % queue.length;
+        const key = queue[next]?.songKey;
+        if (!key || !failedSongKeysRef.current.has(key)) return next;
+      }
+      return (current + 1) % queue.length;
+    });
   }, [queue, queueIndex, shuffleMode]);
 
   const playPrev = useCallback(() => {
@@ -151,36 +149,28 @@ export function useAudioPlayer() {
     setQueueIndex(i => (i - 1 + queue.length) % queue.length);
   }, [queue.length]);
 
-  // ── Shuffle ────────────────────────────────────────────────────────────
-
   const toggleShuffle = useCallback(() => {
     setShuffleMode(prev => {
       const modes = ['off', 'shuffle', 'smart'];
       const next = modes[(modes.indexOf(prev) + 1) % modes.length];
 
       if (next === 'shuffle' && queue.length > 0) {
-        // Save original order and shuffle
         originalQueueRef.current = [...queue];
         const currentSongObj = queue[queueIndex];
         const rest = queue.filter((_, i) => i !== queueIndex);
-        const shuffled = [currentSongObj, ...shuffleArray(rest)];
-        setQueue(shuffled);
+        setQueue([currentSongObj, ...shuffleArray(rest)]);
         setQueueIndex(0);
       } else if (next === 'off' && originalQueueRef.current.length > 0) {
-        // Restore original order
         const currentSongObj = queue[queueIndex];
         setQueue(originalQueueRef.current);
-        const origIdx = originalQueueRef.current.findIndex(s => s.id === currentSongObj?.id);
+        const origIdx = originalQueueRef.current.findIndex(s => s.songKey === currentSongObj?.songKey);
         setQueueIndex(origIdx >= 0 ? origIdx : 0);
         originalQueueRef.current = [];
       }
-      // 'smart' mode doesn't reorder — it picks randomly at playNext time
 
       return next;
     });
   }, [queue, queueIndex]);
-
-  // ── Audio element event listeners ──────────────────────────────────────
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -190,21 +180,17 @@ export function useAudioPlayer() {
     const onTimeUpdate = () => {
       if (audio.duration) setProgress((audio.currentTime / audio.duration) * 100);
     };
-    const onDurationChange = () => setDuration(audio.duration);
+    const onDurationChange = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onError = () => {
       if (!audio.getAttribute('src')) return;
+      const key = currentSong?.songKey;
       const code = audio.error?.code;
       const msg = audio.error?.message || '';
-      console.error('Audio error:', { code, msg, src: audio.src?.substring(0, 60) });
+      console.error('Audio error:', { code, msg, songKey: key });
       setIsPlaying(false);
-      // MEDIA_ERR_SRC_NOT_SUPPORTED (4) or MEDIA_ERR_NETWORK (2) — stream failed
-      if (code === 4 || code === 2) {
-        setError(`Stream failed for this song — it may not be on Drive yet.`);
-        // Auto-skip to next after a brief delay
-        setTimeout(() => playNext(), 1500);
-      } else {
-        setError('Playback error. Try re-syncing or sign in again.');
-      }
+      if (key) failedSongKeysRef.current.add(key);
+      setError('Stream failed for this song. Skipping to the next playable track.');
+      setTimeout(() => playNext(), 900);
     };
 
     audio.addEventListener('play', onPlay);
@@ -221,7 +207,7 @@ export function useAudioPlayer() {
       audio.removeEventListener('durationchange', onDurationChange);
       audio.removeEventListener('error', onError);
     };
-  }, [playNext]);
+  }, [playNext, currentSong]);
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
@@ -236,9 +222,7 @@ export function useAudioPlayer() {
 
   const seek = useCallback((pct) => {
     const audio = audioRef.current;
-    if (audio.duration) {
-      audio.currentTime = (pct / 100) * audio.duration;
-    }
+    if (audio.duration) audio.currentTime = (pct / 100) * audio.duration;
   }, []);
 
   const changeVolume = useCallback((v) => {
@@ -246,9 +230,7 @@ export function useAudioPlayer() {
     setVolume(v);
   }, []);
 
-  const clearError = useCallback(() => {
-    setError('');
-  }, []);
+  const clearError = useCallback(() => setError(''), []);
 
   const stop = useCallback(() => {
     clearSource();
@@ -257,6 +239,7 @@ export function useAudioPlayer() {
 
   const setQueueAndPlay = useCallback((songs, startIndex = 0) => {
     setError('');
+    failedSongKeysRef.current.clear();
     playedInSessionRef.current.clear();
     originalQueueRef.current = [];
 
@@ -275,6 +258,7 @@ export function useAudioPlayer() {
   return {
     audioRef,
     currentSong,
+    currentSongKey: currentSong?.songKey || null,
     isPlaying,
     progress,
     duration,
@@ -288,6 +272,7 @@ export function useAudioPlayer() {
     seek,
     changeVolume,
     clearError,
+    setPlayerError,
     stop,
     playNext,
     playPrev,
