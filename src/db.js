@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
 
-export const db = new Dexie('SpotiCloneDB');
+export const db = new Dexie('SisicMusicDB');
 
 db.version(1).stores({
   // track & artist for searching; driveFileId & isDownloaded for storage logic

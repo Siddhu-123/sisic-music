@@ -109,8 +109,15 @@ function App() {
         const blob = await driveService.downloadFileAsBlob(fileId);
         await db.songs.update(song.id, { blob, isDownloaded: true, driveFileId: fileId });
       } else {
-        // 3. Not on Drive yet — signal the Mac background worker
-        await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
+        // 3. Not on Drive yet: queue a direct audio source for the Mac worker.
+        const sourceUrl = window.prompt(
+          `Paste a direct audio file URL you have rights to use for "${song.track}".`
+        );
+        if (!sourceUrl?.trim()) {
+          setActionError('Download request cancelled. A direct audio source URL is required for the Mac worker.');
+          return;
+        }
+        await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, sourceUrl.trim());
         alert(`"${song.track}" has been added to the download queue. Your Mac will process it shortly.`);
       }
     } catch (e) {
@@ -154,7 +161,7 @@ function App() {
       {/* ── Desktop Sidebar ── */}
       <aside className="sidebar">
         <div className="sidebar__logo">
-          <span>♪</span> SpotiClone
+          <span>♪</span> Sisic Music
         </div>
 
         <nav className="sidebar__nav" aria-label="Main navigation">

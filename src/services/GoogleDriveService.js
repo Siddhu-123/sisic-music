@@ -162,13 +162,21 @@ class GoogleDriveService {
   }
 
   /** Add a song to the Mac worker's download queue */
-  async requestSongDownload(song, folderId) {
+  async requestSongDownload(song, folderId, sourceUrl = '') {
     const { queueFileId, queue } = await this.readQueue(folderId);
     const alreadyQueued = queue.some(
       e => e.track === song.track && e.artist === song.artist
     );
     if (!alreadyQueued) {
-      queue.push({ track: song.track, artist: song.artist, album: song.album });
+      queue.push({
+        id: crypto.randomUUID(),
+        track: song.track,
+        artist: song.artist,
+        album: song.album,
+        playlistName: song.playlistName,
+        sourceUrl,
+        createdAt: new Date().toISOString(),
+      });
       await this.writeQueue(queueFileId, folderId, queue);
     }
   }
