@@ -28,6 +28,26 @@ body {
 
 #root { height: 100dvh; }
 
+.root-error {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.root-error h1 {
+  font-size: 1.4rem;
+}
+
+.root-error p {
+  color: #ff8f8f;
+  line-height: 1.5;
+}
+
 /* ── App Shell ───────────────────────────────────────────────────────────── */
 .app-shell {
   display: grid;
