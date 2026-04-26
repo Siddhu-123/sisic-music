@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { driveService } from '../services/GoogleDriveService';
 import { syncLibraryToDb, requestPersistentStorage, db } from '../db';
 
@@ -27,50 +27,7 @@ export function useAuth() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
   const [error, setError] = useState(() => missingConfigMessage());
-  const hasAutoSynced = useRef(false);
-
-  const syncLibrary = useCallback(async () => {
-    setError('');
-    if (!SPOTIFY_JSON_FILE_ID) {
-      setError('Missing required config: VITE_SPOTIFY_JSON_FILE_ID.');
-      return;
-    }
-
-    setIsSyncing(true);
-    setSyncStatus('Fetching library from Drive...');
-    try {
-      const data = await driveService.fetchSpotifyLibrary(SPOTIFY_JSON_FILE_ID);
-
-      // Flatten: each playlist track gets tagged with its playlist name
-      const allSongs = [];
-
-      (data.saved_tracks || []).forEach(t => {
-        allSongs.push({ ...t, playlistName: 'Liked Songs' });
-      });
-
-      (data.playlists || []).forEach(pl => {
-        (pl.tracks || []).forEach(t => {
-          allSongs.push({ ...t, playlistName: pl.playlist_name });
-        });
-      });
-
-      const added = await syncLibraryToDb(allSongs);
-      setSyncStatus(`Synced. ${added} new tracks added.`);
-
-      // Save last sync timestamp
-      await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
-    } catch (e) {
-      console.error('Sync failed:', e);
-      let message = e instanceof Error ? e.message : 'Sync failed.';
-      if (message.includes('Spotify library file failed: Drive API 404')) {
-        message = 'Spotify library file was not found for this Google account. Check VITE_SPOTIFY_JSON_FILE_ID, sign in with the Drive account that owns the file, or share spotify_data.json with that account.';
-      }
-      setError(message);
-      setSyncStatus('Sync failed.');
-    } finally {
-      setIsSyncing(false);
-    }
-  }, []);
+  const hasSyncedOnMount = useRef(false);
 
   // Init GIS once the script tag has loaded
   useEffect(() => {
@@ -96,11 +53,56 @@ export function useAuth() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!isAuthenticated || hasAutoSynced.current) return;
-    hasAutoSynced.current = true;
-    syncLibrary();
-  }, [isAuthenticated, syncLibrary]);
+  const syncLibrary = async () => {
+    setError('');
+    if (!SPOTIFY_JSON_FILE_ID) {
+      setError('Missing required config: VITE_SPOTIFY_JSON_FILE_ID.');
+      return;
+    }
+
+    setIsSyncing(true);
+    setSyncStatus('Fetching library from Drive…');
+    try {
+      const data = await driveService.fetchSpotifyLibrary(SPOTIFY_JSON_FILE_ID);
+
+      // Flatten: each playlist track gets tagged with its playlist name
+      const allSongs = [];
+
+      (data.saved_tracks || []).forEach(t => {
+        allSongs.push({ ...t, playlistName: 'Liked Songs' });
+      });
+
+      (data.playlists || []).forEach(pl => {
+        (pl.tracks || []).forEach(t => {
+          allSongs.push({ ...t, playlistName: pl.playlist_name });
+        });
+      });
+
+      // Import listening history songs (for search/discovery)
+      (data.history_tracks || []).forEach(t => {
+        allSongs.push({
+          ...t,
+          playlistName: 'Listening History',
+        });
+      });
+
+      const added = await syncLibraryToDb(allSongs);
+      setSyncStatus(`Synced! ${added} new tracks added.`);
+
+      // Save last sync timestamp
+      await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
+    } catch (e) {
+      console.error('Sync failed:', e);
+      let message = e instanceof Error ? e.message : 'Sync failed.';
+      if (message.includes('Spotify library file failed: Drive API 404')) {
+        message = 'Spotify library file was not found for this Google account. Check VITE_SPOTIFY_JSON_FILE_ID, sign in with the Drive account that owns the file, or share spotify_data.json with that account.';
+      }
+      setError(message);
+      setSyncStatus('Sync failed.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const login = async () => {
     try {
@@ -124,6 +126,16 @@ export function useAuth() {
       setError(e instanceof Error ? e.message : 'Login failed.');
     }
   };
+
+  // Auto-sync on mount if already authenticated (token restored from localStorage)
+  // This ensures the library loads immediately on refresh / new device
+  useEffect(() => {
+    if (isAuthenticated && !hasSyncedOnMount.current && !isSyncing) {
+      hasSyncedOnMount.current = true;
+      syncLibrary();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
 
   return { isAuthenticated, isSyncing, syncStatus, error, login, syncLibrary };
 }
