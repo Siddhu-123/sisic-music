@@ -37,6 +37,9 @@ export async function getStorageEstimate() {
  * Won't duplicate songs already in DB (matched by driveFileId or track+artist key).
  */
 export async function syncLibraryToDb(songs) {
+  // First: deduplicate existing rows (from pre-upsert syncs)
+  await deduplicateSongs();
+
   const existing = await db.songs.toArray();
   const existingMap = new Map(existing.map(s => [`${s.artist}|||${s.track}`, s]));
 
@@ -49,7 +52,7 @@ export async function syncLibraryToDb(songs) {
 
     if (!prev) {
       // New song → insert
-      await db.songs.add({
+      const newId = await db.songs.add({
         track: s.track || s.name || 'Unknown Track',
         artist: s.artist || 'Unknown Artist',
         album: s.album || '',
@@ -60,6 +63,7 @@ export async function syncLibraryToDb(songs) {
         blob: null,
         dateAdded: Date.now(),
       });
+      existingMap.set(key, { id: newId, ...s }); // Prevent duplicate inserts within same batch
       added++;
     } else {
       // Existing song → upsert metadata (don't clobber local-only fields)
@@ -67,7 +71,6 @@ export async function syncLibraryToDb(songs) {
       if (s.album && s.album !== prev.album) updates.album = s.album;
       if (s.playlistName && s.playlistName !== prev.playlistName) updates.playlistName = s.playlistName;
       if ((s.playCount || 0) > (prev.playCount || 0)) updates.playCount = s.playCount;
-      // If the incoming data has a driveFileId and we don't, use it
       if (s.driveFileId && !prev.driveFileId) updates.driveFileId = s.driveFileId;
 
       if (Object.keys(updates).length > 0) {
@@ -78,6 +81,48 @@ export async function syncLibraryToDb(songs) {
   }
 
   return added;
+}
+
+/**
+ * Remove duplicate song rows (same artist+track), keeping the one with
+ * the most useful data (has driveFileId, blob, or highest playCount).
+ */
+async function deduplicateSongs() {
+  const all = await db.songs.toArray();
+  const groups = new Map();
+
+  for (const song of all) {
+    const key = `${song.artist}|||${song.track}`;
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(song);
+  }
+
+  const toDelete = [];
+  for (const [, dupes] of groups) {
+    if (dupes.length <= 1) continue;
+
+    // Sort: prefer rows with blob > driveFileId > highest playCount > lowest id
+    dupes.sort((a, b) => {
+      if (a.blob && !b.blob) return -1;
+      if (!a.blob && b.blob) return 1;
+      if (a.driveFileId && !b.driveFileId) return -1;
+      if (!a.driveFileId && b.driveFileId) return 1;
+      if ((a.playCount || 0) !== (b.playCount || 0)) return (b.playCount || 0) - (a.playCount || 0);
+      return a.id - b.id;
+    });
+
+    // Keep first (best), delete rest
+    for (let i = 1; i < dupes.length; i++) {
+      toDelete.push(dupes[i].id);
+    }
+  }
+
+  if (toDelete.length > 0) {
+    await db.songs.bulkDelete(toDelete);
+    console.log(`Dedup: removed ${toDelete.length} duplicate song rows`);
+  }
 }
 
 export async function resetLocalDatabase() {

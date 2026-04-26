@@ -193,8 +193,18 @@ export function useAudioPlayer() {
     const onDurationChange = () => setDuration(audio.duration);
     const onError = () => {
       if (!audio.getAttribute('src')) return;
+      const code = audio.error?.code;
+      const msg = audio.error?.message || '';
+      console.error('Audio error:', { code, msg, src: audio.src?.substring(0, 60) });
       setIsPlaying(false);
-      setError('Could not stream this Drive file. Re-sync or sign in again, then try the song once more.');
+      // MEDIA_ERR_SRC_NOT_SUPPORTED (4) or MEDIA_ERR_NETWORK (2) — stream failed
+      if (code === 4 || code === 2) {
+        setError(`Stream failed for this song — it may not be on Drive yet.`);
+        // Auto-skip to next after a brief delay
+        setTimeout(() => playNext(), 1500);
+      } else {
+        setError('Playback error. Try re-syncing or sign in again.');
+      }
     };
 
     audio.addEventListener('play', onPlay);
