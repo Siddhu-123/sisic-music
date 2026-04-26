@@ -150,11 +150,17 @@ function App() {
       .map(song => mergeJob(song, jobBySongKey));
   }, [allSongs, selectedPlaylistKey, availableSongs, jobBySongKey]);
 
+  // Track whether we have pending jobs that need polling
+  const [hasPendingJobs, setHasPendingJobs] = useState(false);
+
   const refreshDownloadJobs = useCallback(async () => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
     try {
       const jobs = await driveService.listDownloadJobs(DRIVE_FOLDER_ID);
       await syncDownloadJobsToDb(jobs);
+      // Only keep polling if there are active (queued/downloading) jobs
+      const pending = jobs.some(j => j.status === 'queued' || j.status === 'downloading');
+      setHasPendingJobs(pending);
     } catch (error) {
       console.error('Failed to refresh Drive jobs:', error);
     }
@@ -162,25 +168,25 @@ function App() {
 
   useEffect(() => {
     if (!isAuthenticated) return undefined;
-    refreshDownloadJobs();
-    const interval = window.setInterval(refreshDownloadJobs, 20000);
-    const onFocus = () => refreshDownloadJobs();
-    const onVisibility = () => {
-      if (!document.hidden) refreshDownloadJobs();
-    };
-    window.addEventListener('focus', onFocus);
-    document.addEventListener('visibilitychange', onVisibility);
+    // Initial check — use setTimeout to avoid synchronous setState in effect body
+    const mountTimer = window.setTimeout(refreshDownloadJobs, 0);
+    // Only poll continuously if there are pending jobs
+    const interval = hasPendingJobs
+      ? window.setInterval(refreshDownloadJobs, 20000)
+      : undefined;
     return () => {
-      window.clearInterval(interval);
-      window.removeEventListener('focus', onFocus);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.clearTimeout(mountTimer);
+      if (interval) window.clearInterval(interval);
     };
-  }, [isAuthenticated, refreshDownloadJobs]);
+  }, [isAuthenticated, refreshDownloadJobs, hasPendingJobs]);
 
   const queueSongForDownload = useCallback(async (song) => {
     if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
     const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
-    if (result.job) await syncDownloadJobsToDb([result.job]);
+    if (result.job) {
+      await syncDownloadJobsToDb([result.job]);
+      setHasPendingJobs(true); // Start polling to track this job
+    }
     return result;
   }, []);
 
