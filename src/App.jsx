@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Home, Search, Library, Music2 } from 'lucide-react';
 import { db, resetLocalDatabase } from './db';
@@ -15,20 +15,40 @@ import './App.css';
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], error: '' };
+const QUEUE_WAIT_MS = 120000;
+const QUEUE_POLL_MS = 3000;
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
 }
 
+function canPlaySong(song) {
+  return Boolean((song?.isDownloaded && song?.blob) || song?.driveFileId);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function App() {
   const { isAuthenticated, isSyncing, syncStatus, error: authError, login, syncLibrary } = useAuth();
   const player = useAudioPlayer();
+  const {
+    queue: playerQueue,
+    queueIndex: playerQueueIndex,
+    loadAndPlay,
+    stop: stopPlayer,
+    clearError: clearPlayerError,
+    setQueueAndPlay,
+  } = player;
 
   const [view, setView] = useState(VIEWS.HOME);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPlaylist, setSelectedPlaylist] = useState(null);
   const [downloadingIds, setDownloadingIds] = useState(new Set());
   const [actionError, setActionError] = useState('');
+  const [actionStatus, setActionStatus] = useState('');
+  const autoQueuedSongIds = useRef(new Set());
 
   // Live data from IndexedDB. Read plainly and sort in JS so mobile browsers
   // with fragile cursor/index support do not crash the whole app.
@@ -69,65 +89,128 @@ function App() {
     return base;
   }, [allSongs, selectedPlaylist, searchQuery]);
 
-  // Wire queue/index changes in useAudioPlayer to actually play a song
-  useEffect(() => {
-    if (player.queue.length === 0) return;
-    const song = player.queue[player.queueIndex];
-    if (song) {
-      player.loadAndPlay(song, driveService.accessToken);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player.queueIndex, player.queue]);
+  const attachDriveFile = useCallback(async (song, fileId) => {
+    const updatedSong = {
+      ...song,
+      driveFileId: fileId,
+      isDownloaded: false,
+      blob: null,
+    };
+    await db.songs.update(song.id, {
+      driveFileId: fileId,
+      isDownloaded: false,
+      blob: null,
+    });
+    return updatedSong;
+  }, []);
 
-  const handleDownload = useCallback(async (song) => {
-    if (song.isDownloaded || downloadingIds.has(song.id)) return;
+  const findDriveFileForSong = useCallback(async (song) => {
+    if (song.driveFileId) return song;
+    const found = await driveService.findSongFile(song.track, DRIVE_FOLDER_ID);
+    return found ? attachDriveFile(song, found.id) : null;
+  }, [attachDriveFile]);
+
+  const waitForDriveFile = useCallback(async (song) => {
+    const deadline = Date.now() + QUEUE_WAIT_MS;
+    while (Date.now() < deadline) {
+      const found = await findDriveFileForSong(song);
+      if (found) return found;
+      await sleep(QUEUE_POLL_MS);
+    }
+    return null;
+  }, [findDriveFileForSong]);
+
+  const handleDownload = useCallback(async (song, { notify = true, waitToPlay = false } = {}) => {
+    if ((song.isDownloaded && song.blob) || downloadingIds.has(song.id)) return null;
     if (!DRIVE_FOLDER_ID) {
       setActionError('Missing required config: VITE_DRIVE_FOLDER_ID.');
       return;
     }
 
     setActionError('');
+    setActionStatus('');
     setDownloadingIds(prev => new Set(prev).add(song.id));
     try {
-      // 1. Check if the MP3 is already on Drive
-      let fileId = song.driveFileId;
-      if (!fileId) {
-        const found = await driveService.findSongFile(song.track, DRIVE_FOLDER_ID);
-        if (found) {
-          fileId = found.id;
-          await db.songs.update(song.id, { driveFileId: fileId });
-        }
+      // 1. Check if the MP3 is already on Drive.
+      const readySong = await findDriveFileForSong(song);
+      if (readySong) {
+        setActionStatus(`"${song.track}" is ready to stream.`);
+        return readySong;
       }
 
-      if (fileId) {
-        // 2. Download the blob and cache it
-        const blob = await driveService.downloadFileAsBlob(fileId);
-        await db.songs.update(song.id, { blob, isDownloaded: true, driveFileId: fileId });
-      } else {
-        // 3. Not on Drive yet: signal the Mac worker to find a local match.
-        await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
-        alert(`"${song.track}" has been added to the download queue. Your Mac will process it shortly.`);
+      // 2. Not on Drive yet: signal the Mac worker to prepare it.
+      const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
+      const queuedMessage = result.alreadyQueued
+        ? `"${song.track}" is already in the download queue.`
+        : `"${song.track}" has been added to the download queue.`;
+      setActionStatus(`${queuedMessage} Waiting for the Mac worker...`);
+      if (notify) {
+        alert(`${queuedMessage} Your Mac will process it shortly.`);
       }
+
+      if (!waitToPlay) return null;
+
+      const streamedSong = await waitForDriveFile(song);
+      if (streamedSong) {
+        setActionStatus(`"${song.track}" is ready to stream.`);
+        return streamedSong;
+      }
+
+      setActionStatus(`"${song.track}" is still being prepared by the Mac worker.`);
+      return null;
     } catch (e) {
       console.error('Download failed:', e);
       setActionError(e instanceof Error ? e.message : 'Download failed.');
+      return null;
     } finally {
       setDownloadingIds(prev => { const n = new Set(prev); n.delete(song.id); return n; });
     }
-  }, [downloadingIds]);
+  }, [downloadingIds, findDriveFileForSong, waitForDriveFile]);
+
+  // Wire queue/index changes in useAudioPlayer to actually play a song.
+  // If next/previous lands on a missing song, stop stale audio and queue it.
+  useEffect(() => {
+    if (playerQueue.length === 0) return;
+    const song = playerQueue[playerQueueIndex];
+    if (!song) return;
+
+    if (!canPlaySong(song)) {
+      stopPlayer();
+      if (!autoQueuedSongIds.current.has(song.id)) {
+        autoQueuedSongIds.current.add(song.id);
+        handleDownload(song, { notify: false, waitToPlay: true }).then(readySong => {
+          if (!readySong) return;
+          const updatedQueue = playerQueue.map(queueSong => (
+            queueSong.id === readySong.id ? readySong : queueSong
+          ));
+          setQueueAndPlay(updatedQueue, playerQueueIndex);
+        });
+      }
+      return;
+    }
+
+    loadAndPlay(song, driveService.accessToken);
+  }, [handleDownload, loadAndPlay, playerQueue, playerQueueIndex, setQueueAndPlay, stopPlayer]);
 
   const handlePlaySong = useCallback((song) => {
     setActionError('');
-    player.clearError();
+    clearPlayerError();
 
-    if (!song.isDownloaded && !song.driveFileId) {
-      handleDownload(song);
+    if (!canPlaySong(song)) {
+      handleDownload(song, { waitToPlay: true }).then(readySong => {
+        if (!readySong) return;
+        const updatedQueue = visibleSongs.map(queueSong => (
+          queueSong.id === readySong.id ? readySong : queueSong
+        ));
+        const idx = updatedQueue.findIndex(s => s.id === readySong.id);
+        setQueueAndPlay(updatedQueue, idx >= 0 ? idx : 0);
+      });
       return;
     }
 
     const idx = visibleSongs.findIndex(s => s.id === song.id);
-    player.setQueueAndPlay(visibleSongs, idx >= 0 ? idx : 0);
-  }, [handleDownload, visibleSongs, player]);
+    setQueueAndPlay(visibleSongs, idx >= 0 ? idx : 0);
+  }, [clearPlayerError, handleDownload, setQueueAndPlay, visibleSongs]);
 
   const handleResetLocalCache = useCallback(async () => {
     const confirmed = window.confirm(
@@ -149,7 +232,7 @@ function App() {
   }
 
   const bannerError = authError || actionError || player.error || localDbError;
-  const bannerStatus = bannerError || syncStatus;
+  const bannerStatus = bannerError || actionStatus || syncStatus;
 
   const navItems = [
     { id: VIEWS.HOME, icon: Home, label: 'Home' },

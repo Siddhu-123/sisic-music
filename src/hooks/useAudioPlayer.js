@@ -1,5 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { db } from '../db';
+
+function driveStreamUrl(fileId, accessToken) {
+  const params = new URLSearchParams({
+    alt: 'media',
+    access_token: accessToken,
+  });
+  return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`;
+}
 
 export function useAudioPlayer() {
   const audioRef = useRef(new Audio());
@@ -12,6 +19,20 @@ export function useAudioPlayer() {
   const [volume, setVolume] = useState(1);
   const [error, setError] = useState('');
   const blobUrlRef = useRef(null);
+
+  const clearSource = useCallback(() => {
+    const audio = audioRef.current;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    setIsPlaying(false);
+    setProgress(0);
+    setDuration(0);
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+  }, []);
 
   const playNext = useCallback(() => {
     setQueueIndex(currentIndex => (
@@ -35,18 +56,25 @@ export function useAudioPlayer() {
       if (audio.duration) setProgress((audio.currentTime / audio.duration) * 100);
     };
     const onDurationChange = () => setDuration(audio.duration);
+    const onError = () => {
+      if (!audio.getAttribute('src')) return;
+      setIsPlaying(false);
+      setError('Could not stream this Drive file. Re-sync or sign in again, then try the song once more.');
+    };
 
     audio.addEventListener('play', onPlay);
     audio.addEventListener('pause', onPause);
     audio.addEventListener('ended', onEnded);
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('durationchange', onDurationChange);
+    audio.addEventListener('error', onError);
     return () => {
       audio.removeEventListener('play', onPlay);
       audio.removeEventListener('pause', onPause);
       audio.removeEventListener('ended', onEnded);
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('durationchange', onDurationChange);
+      audio.removeEventListener('error', onError);
     };
   }, [playNext]);
 
@@ -60,7 +88,6 @@ export function useAudioPlayer() {
       blobUrlRef.current = null;
     }
 
-    setCurrentSong(song);
     audio.pause();
 
     if (song.isDownloaded && song.blob) {
@@ -68,34 +95,21 @@ export function useAudioPlayer() {
       const url = URL.createObjectURL(song.blob);
       blobUrlRef.current = url;
       audio.src = url;
-    } else if (accessToken && song.driveFileId) {
-      // Stream from Drive API with auth header
-      // We must fetch it as a blob because <audio> can't send custom headers
-      try {
-        const response = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${song.driveFileId}?alt=media`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        if (response.ok) {
-          const blob = await response.blob();
-          const url = URL.createObjectURL(blob);
-          blobUrlRef.current = url;
-          audio.src = url;
-          // Cache it in IndexedDB for offline use next time
-          db.songs.where('driveFileId').equals(song.driveFileId).modify({ blob, isDownloaded: true });
-        } else {
-          const message = `Drive stream failed with status ${response.status}.`;
-          console.error(message);
-          setError(message);
-          return;
-        }
-      } catch (e) {
-        console.error('Streaming error:', e);
-        setError(e instanceof Error ? e.message : 'Streaming failed.');
-        return;
-      }
+      setCurrentSong(song);
+    } else if (song.driveFileId && accessToken) {
+      // Let the browser stream directly from Drive instead of fetching the
+      // entire MP3 into IndexedDB.
+      audio.preload = 'metadata';
+      audio.src = driveStreamUrl(song.driveFileId, accessToken);
+      setCurrentSong(song);
     } else {
-      setError(`"${song.track}" is not available to play yet. Download it first so the Drive worker can prepare it.`);
+      clearSource();
+      setCurrentSong(null);
+      setError(
+        song.driveFileId
+          ? 'Google Drive sign-in is required before this song can stream.'
+          : `"${song.track}" is not available to play yet. Download it first so the Drive worker can prepare it.`
+      );
       return;
     }
 
@@ -104,7 +118,7 @@ export function useAudioPlayer() {
       console.error('Playback error:', e);
       setError(e instanceof Error ? e.message : 'Playback failed.');
     });
-  }, [volume]);
+  }, [clearSource, volume]);
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
@@ -131,6 +145,11 @@ export function useAudioPlayer() {
     setError('');
   }, []);
 
+  const stop = useCallback(() => {
+    clearSource();
+    setCurrentSong(null);
+  }, [clearSource]);
+
   const setQueueAndPlay = useCallback((songs, startIndex = 0) => {
     setError('');
     setQueue(songs);
@@ -152,6 +171,7 @@ export function useAudioPlayer() {
     seek,
     changeVolume,
     clearError,
+    stop,
     playNext,
     playPrev,
     setQueueAndPlay,

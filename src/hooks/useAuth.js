@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { driveService } from '../services/GoogleDriveService';
 import { syncLibraryToDb, requestPersistentStorage, db } from '../db';
 
@@ -23,10 +23,54 @@ function missingConfigMessage(missing = getMissingConfig()) {
 }
 
 export function useAuth() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => driveService.isAuthenticated);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
   const [error, setError] = useState(() => missingConfigMessage());
+  const hasAutoSynced = useRef(false);
+
+  const syncLibrary = useCallback(async () => {
+    setError('');
+    if (!SPOTIFY_JSON_FILE_ID) {
+      setError('Missing required config: VITE_SPOTIFY_JSON_FILE_ID.');
+      return;
+    }
+
+    setIsSyncing(true);
+    setSyncStatus('Fetching library from Drive...');
+    try {
+      const data = await driveService.fetchSpotifyLibrary(SPOTIFY_JSON_FILE_ID);
+
+      // Flatten: each playlist track gets tagged with its playlist name
+      const allSongs = [];
+
+      (data.saved_tracks || []).forEach(t => {
+        allSongs.push({ ...t, playlistName: 'Liked Songs' });
+      });
+
+      (data.playlists || []).forEach(pl => {
+        (pl.tracks || []).forEach(t => {
+          allSongs.push({ ...t, playlistName: pl.playlist_name });
+        });
+      });
+
+      const added = await syncLibraryToDb(allSongs);
+      setSyncStatus(`Synced. ${added} new tracks added.`);
+
+      // Save last sync timestamp
+      await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
+    } catch (e) {
+      console.error('Sync failed:', e);
+      let message = e instanceof Error ? e.message : 'Sync failed.';
+      if (message.includes('Spotify library file failed: Drive API 404')) {
+        message = 'Spotify library file was not found for this Google account. Check VITE_SPOTIFY_JSON_FILE_ID, sign in with the Drive account that owns the file, or share spotify_data.json with that account.';
+      }
+      setError(message);
+      setSyncStatus('Sync failed.');
+    } finally {
+      setIsSyncing(false);
+    }
+  }, []);
 
   // Init GIS once the script tag has loaded
   useEffect(() => {
@@ -52,6 +96,12 @@ export function useAuth() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!isAuthenticated || hasAutoSynced.current) return;
+    hasAutoSynced.current = true;
+    syncLibrary();
+  }, [isAuthenticated, syncLibrary]);
+
   const login = async () => {
     try {
       setError('');
@@ -72,49 +122,6 @@ export function useAuth() {
     } catch (e) {
       console.error('Login failed:', e);
       setError(e instanceof Error ? e.message : 'Login failed.');
-    }
-  };
-
-  const syncLibrary = async () => {
-    setError('');
-    if (!SPOTIFY_JSON_FILE_ID) {
-      setError('Missing required config: VITE_SPOTIFY_JSON_FILE_ID.');
-      return;
-    }
-
-    setIsSyncing(true);
-    setSyncStatus('Fetching library from Drive…');
-    try {
-      const data = await driveService.fetchSpotifyLibrary(SPOTIFY_JSON_FILE_ID);
-
-      // Flatten: each playlist track gets tagged with its playlist name
-      const allSongs = [];
-
-      (data.saved_tracks || []).forEach(t => {
-        allSongs.push({ ...t, playlistName: 'Liked Songs' });
-      });
-
-      (data.playlists || []).forEach(pl => {
-        (pl.tracks || []).forEach(t => {
-          allSongs.push({ ...t, playlistName: pl.playlist_name });
-        });
-      });
-
-      const added = await syncLibraryToDb(allSongs);
-      setSyncStatus(`Synced! ${added} new tracks added.`);
-
-      // Save last sync timestamp
-      await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
-    } catch (e) {
-      console.error('Sync failed:', e);
-      let message = e instanceof Error ? e.message : 'Sync failed.';
-      if (message.includes('Spotify library file failed: Drive API 404')) {
-        message = 'Spotify library file was not found for this Google account. Check VITE_SPOTIFY_JSON_FILE_ID, sign in with the Drive account that owns the file, or share spotify_data.json with that account.';
-      }
-      setError(message);
-      setSyncStatus('Sync failed.');
-    } finally {
-      setIsSyncing(false);
     }
   };
 
