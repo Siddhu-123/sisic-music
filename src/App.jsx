@@ -242,7 +242,9 @@ function App() {
           return;
         }
         setPlayerError(`"${song.track}" is queued for download.`);
-        if (queue.length > 1) window.setTimeout(playNext, 250);
+        if (queue.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
+          window.setTimeout(() => playNext({ avoidCurrent: true, stopOnBlocked: true }), 250);
+        }
       } catch (error) {
         if (cancelled || requestId !== playbackRequestRef.current) return;
         console.error('Playback preparation failed:', error);

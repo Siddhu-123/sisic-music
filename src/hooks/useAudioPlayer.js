@@ -1,15 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 
-function driveStreamUrl(fileId, accessToken) {
-  const params = new URLSearchParams({
-    alt: 'media',
-    access_token: accessToken,
-  });
-  return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`;
-}
-
-function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys) {
-  if (songs.length <= 1) return 0;
+function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys, avoidCurrent = false) {
+  if (songs.length <= 1) return avoidCurrent ? -1 : 0;
 
   const weights = songs.map((song, i) => {
     if (i === currentIndex) return 0;
@@ -21,7 +13,7 @@ function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys) 
   });
 
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  if (totalWeight === 0) return (currentIndex + 1) % songs.length;
+  if (totalWeight === 0) return nextUnfailedIndex(songs, currentIndex, failedSongKeys, avoidCurrent);
 
   let random = Math.random() * totalWeight;
   for (let i = 0; i < weights.length; i++) {
@@ -29,6 +21,17 @@ function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys) 
     if (random <= 0) return i;
   }
   return 0;
+}
+
+function nextUnfailedIndex(songs, currentIndex, failedSongKeys, avoidCurrent = false) {
+  if (songs.length === 0) return -1;
+  const maxSteps = avoidCurrent ? songs.length - 1 : songs.length;
+  for (let step = 1; step <= maxSteps; step++) {
+    const next = (currentIndex + step) % songs.length;
+    const key = songs[next]?.songKey;
+    if (!key || !failedSongKeys.has(key)) return next;
+  }
+  return avoidCurrent ? -1 : currentIndex;
 }
 
 function shuffleArray(arr) {
@@ -93,9 +96,25 @@ export function useAudioPlayer() {
       audio.src = url;
       setCurrentSong(song);
     } else if (song.driveFileId && accessToken) {
-      audio.preload = 'auto';
-      audio.src = driveStreamUrl(song.driveFileId, accessToken);
-      setCurrentSong(song);
+      // Fetch via Authorization header → blob URL to bypass Chrome ORB
+      try {
+        const resp = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(song.driveFileId)}?alt=media`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!resp.ok) throw new Error(`Drive responded ${resp.status}`);
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        blobUrlRef.current = url;
+        audio.src = url;
+        setCurrentSong(song);
+      } catch (e) {
+        console.error('Drive stream fetch failed:', e);
+        clearSource();
+        setCurrentSong(null);
+        setError(`Could not stream "${song.track}": ${e.message}`);
+        return false;
+      }
     } else {
       clearSource();
       setCurrentSong(null);
@@ -125,24 +144,29 @@ export function useAudioPlayer() {
     }
   }, [clearSource, volume]);
 
-  const playNext = useCallback(() => {
-    if (queue.length === 0) return;
+  const playNext = useCallback((options = {}) => {
+    if (queue.length === 0) return false;
+    const { avoidCurrent = false, stopOnBlocked = false } = options;
 
+    let nextIdx;
     if (shuffleMode === 'smart') {
-      const nextIdx = smartRandomIndex(queue, queueIndex, playedInSessionRef.current, failedSongKeysRef.current);
-      setQueueIndex(nextIdx);
-      return;
+      nextIdx = smartRandomIndex(queue, queueIndex, playedInSessionRef.current, failedSongKeysRef.current, avoidCurrent);
+    } else {
+      nextIdx = nextUnfailedIndex(queue, queueIndex, failedSongKeysRef.current, avoidCurrent);
     }
 
-    setQueueIndex(current => {
-      for (let step = 1; step <= queue.length; step++) {
-        const next = (current + step) % queue.length;
-        const key = queue[next]?.songKey;
-        if (!key || !failedSongKeysRef.current.has(key)) return next;
+    if (nextIdx < 0 || nextIdx === queueIndex) {
+      if (stopOnBlocked) {
+        clearSource();
+        setCurrentSong(null);
+        setError('Playback stopped because no other playable songs are available right now.');
       }
-      return (current + 1) % queue.length;
-    });
-  }, [queue, queueIndex, shuffleMode]);
+      return false;
+    }
+
+    setQueueIndex(nextIdx);
+    return true;
+  }, [clearSource, queue, queueIndex, shuffleMode]);
 
   const playPrev = useCallback(() => {
     if (queue.length === 0) return;
@@ -190,7 +214,9 @@ export function useAudioPlayer() {
       setIsPlaying(false);
       if (key) failedSongKeysRef.current.add(key);
       setError('Stream failed for this song. Skipping to the next playable track.');
-      setTimeout(() => playNext(), 900);
+      window.setTimeout(() => {
+        playNext({ avoidCurrent: true, stopOnBlocked: true });
+      }, 900);
     };
 
     audio.addEventListener('play', onPlay);
