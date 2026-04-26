@@ -12,7 +12,8 @@ import {
   SyncBanner,
 } from './components/Components';
 import { QueuePanel } from './components/QueuePanel';
-import { useToast, ToastContainer } from './components/Toast';
+import { ToastContainer } from './components/Toast';
+import { useToast } from './hooks/useToast';
 import './App.css';
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
@@ -73,43 +74,82 @@ function App() {
     return base;
   }, [allSongs, selectedPlaylist, searchQuery]);
 
-  // Wire queue/index changes in useAudioPlayer to actually play a song
+  // Wire queue/index changes in useAudioPlayer to actually play a song.
+  // If the song doesn't have a driveFileId yet, look it up on Drive first.
   useEffect(() => {
     if (player.queue.length === 0) return;
     const song = player.queue[player.queueIndex];
-    if (song) {
-      player.loadAndPlay(song, driveService.accessToken);
-    }
+    if (!song) return;
+
+    const playSong = async () => {
+      let resolved = song;
+      // If no driveFileId, try to find it on Drive
+      if (!song.driveFileId && !song.isDownloaded && DRIVE_FOLDER_ID) {
+        try {
+          const found = await driveService.findSongFile(song.track, DRIVE_FOLDER_ID);
+          if (found) {
+            await db.songs.update(song.id, { driveFileId: found.id });
+            resolved = { ...song, driveFileId: found.id };
+          }
+        } catch (e) {
+          console.error('Drive lookup for queued song failed:', e);
+        }
+      }
+      player.loadAndPlay(resolved, driveService.accessToken);
+    };
+
+    playSong();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player.queueIndex, player.queue]);
 
   /**
    * Seamless play flow:
-   * - If song is on Drive (has driveFileId) → stream it immediately
-   * - If not → auto-queue for download + show toast + skip to next playable
+   * 1. If song has driveFileId or blob → stream immediately
+   * 2. If not → check Drive for the file, update DB, then stream
+   * 3. If truly not on Drive → queue for download + toast
    */
-  const handlePlaySong = useCallback((song) => {
+  const handlePlaySong = useCallback(async (song) => {
     const idx = visibleSongs.findIndex(s => s.id === song.id);
     const startIdx = idx >= 0 ? idx : 0;
 
-    // If the clicked song isn't on Drive, queue it and find next playable
-    if (!song.driveFileId && !song.isDownloaded) {
-      // Queue for Mac worker download
-      if (DRIVE_FOLDER_ID) {
-        driveService.requestSongDownload(song, DRIVE_FOLDER_ID).catch(console.error);
-        addToast(`Queued "${song.track}" for download`);
-      }
-      // Try to find next playable song in the list
-      const playable = visibleSongs.filter(s => s.driveFileId || s.isDownloaded);
-      if (playable.length > 0) {
-        player.setQueueAndPlay(playable, 0);
-      } else {
-        addToast('No songs available to play yet — queue some downloads!');
-      }
+    // Already has a Drive file ID or local blob → play immediately
+    if (song.driveFileId || song.isDownloaded) {
+      player.setQueueAndPlay(visibleSongs, startIdx);
       return;
     }
 
-    player.setQueueAndPlay(visibleSongs, startIdx);
+    // No driveFileId stored — search Drive for the file first
+    if (DRIVE_FOLDER_ID) {
+      try {
+        const found = await driveService.findSongFile(song.track, DRIVE_FOLDER_ID);
+        if (found) {
+          // Found on Drive! Update the DB so future plays are instant
+          await db.songs.update(song.id, { driveFileId: found.id });
+          // Use a copy with the resolved ID (don't mutate Dexie objects)
+          const updated = visibleSongs.map(s =>
+            s.id === song.id ? { ...s, driveFileId: found.id } : s
+          );
+          player.setQueueAndPlay(updated, startIdx);
+          return;
+        }
+      } catch (e) {
+        console.error('Drive lookup failed:', e);
+      }
+
+      // Not on Drive → queue for Mac worker download (await, don't fire-and-forget)
+      try {
+        await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
+        addToast(`Queued "${song.track}" for download`);
+      } catch (e) {
+        addToast(`Failed to queue "${song.track}": ${e.message || 'Drive write error'}`);
+      }
+    }
+
+    // Try to find next playable song in the list
+    const playable = visibleSongs.filter(s => s.driveFileId || s.isDownloaded);
+    if (playable.length > 0) {
+      player.setQueueAndPlay(playable, 0);
+    }
   }, [visibleSongs, player, addToast]);
 
   /**
