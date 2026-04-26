@@ -134,7 +134,7 @@ export function LoginScreen({ onLogin, error }) {
   );
 }
 
-export function SyncBanner({ isSyncing, syncStatus, error, onSync }) {
+export function SyncBanner({ isSyncing, syncStatus, error, onSync, actionLabel, onAction }) {
   if (!syncStatus && !isSyncing) return null;
   return (
     <div
@@ -143,7 +143,10 @@ export function SyncBanner({ isSyncing, syncStatus, error, onSync }) {
     >
       {isSyncing && <div className="spinner" />}
       <span>{syncStatus}</span>
-      {!isSyncing && !error && (
+      {!isSyncing && actionLabel && onAction && (
+        <button className="sync-refresh-btn" onClick={onAction}>{actionLabel}</button>
+      )}
+      {!isSyncing && !error && !actionLabel && (
         <button className="sync-refresh-btn" onClick={onSync}>Sync again</button>
       )}
     </div>

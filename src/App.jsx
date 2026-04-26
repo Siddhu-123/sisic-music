@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Home, Search, Library, Music2 } from 'lucide-react';
-import { db } from './db';
+import { db, resetLocalDatabase } from './db';
 import { driveService } from './services/GoogleDriveService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth';
@@ -14,6 +14,11 @@ import {
 import './App.css';
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
+const EMPTY_LIBRARY = { songs: [], playlists: [], error: '' };
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
+}
 
 function App() {
   const { isAuthenticated, isSyncing, syncStatus, error: authError, login, syncLibrary } = useAuth();
@@ -25,12 +30,29 @@ function App() {
   const [downloadingIds, setDownloadingIds] = useState(new Set());
   const [actionError, setActionError] = useState('');
 
-  // Live data from IndexedDB
-  const allSongs = useLiveQuery(() => db.songs.orderBy('track').toArray(), []);
-  const playlists = useLiveQuery(async () => {
-    const names = await db.songs.orderBy('playlistName').uniqueKeys();
-    return names;
-  }, []);
+  // Live data from IndexedDB. Read plainly and sort in JS so mobile browsers
+  // with fragile cursor/index support do not crash the whole app.
+  const libraryData = useLiveQuery(async () => {
+    try {
+      const songs = await db.songs.toArray();
+      songs.sort((a, b) => (a.track || '').localeCompare(b.track || ''));
+      const playlists = Array.from(new Set(
+        songs.map(song => song.playlistName).filter(Boolean)
+      )).sort((a, b) => a.localeCompare(b));
+      return { songs, playlists, error: '' };
+    } catch (error) {
+      console.error('Local music cache failed:', error);
+      return {
+        ...EMPTY_LIBRARY,
+        error: `Local music cache is unavailable: ${errorMessage(error)}`,
+      };
+    }
+  }, [], EMPTY_LIBRARY);
+
+  const safeLibraryData = libraryData || EMPTY_LIBRARY;
+  const allSongs = safeLibraryData.songs;
+  const playlists = safeLibraryData.playlists;
+  const localDbError = safeLibraryData.error;
 
   // Songs to show in current view
   const visibleSongs = React.useMemo(() => {
@@ -99,11 +121,26 @@ function App() {
     }
   }, [downloadingIds]);
 
+  const handleResetLocalCache = useCallback(async () => {
+    const confirmed = window.confirm(
+      'Reset the local music cache on this device? This removes downloaded offline songs and synced library rows from this browser, then reloads the app.'
+    );
+    if (!confirmed) return;
+
+    try {
+      await resetLocalDatabase();
+      window.location.reload();
+    } catch (error) {
+      console.error('Local cache reset failed:', error);
+      setActionError(`Local cache reset failed: ${errorMessage(error)}`);
+    }
+  }, []);
+
   if (!isAuthenticated) {
     return <LoginScreen onLogin={login} error={authError} />;
   }
 
-  const bannerError = authError || actionError || player.error;
+  const bannerError = authError || actionError || player.error || localDbError;
   const bannerStatus = bannerError || syncStatus;
 
   const navItems = [
@@ -158,6 +195,8 @@ function App() {
           syncStatus={bannerStatus}
           error={Boolean(bannerError)}
           onSync={syncLibrary}
+          actionLabel={localDbError ? 'Reset local cache' : ''}
+          onAction={localDbError ? handleResetLocalCache : undefined}
         />
 
         <header className="main-view__header">

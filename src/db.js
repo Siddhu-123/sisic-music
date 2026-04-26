@@ -58,3 +58,8 @@ export async function syncLibraryToDb(songs) {
   }
   return newSongs.length;
 }
+
+export async function resetLocalDatabase() {
+  await db.delete();
+  await db.open();
+}
