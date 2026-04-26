@@ -2,9 +2,9 @@ import Dexie from 'dexie';
 
 export const db = new Dexie('SisicMusicDB');
 
-db.version(1).stores({
+db.version(2).stores({
   // track & artist for searching; driveFileId & isDownloaded for storage logic
-  songs: '++id, track, artist, album, driveFileId, isDownloaded, playlistName',
+  songs: '++id, track, artist, album, driveFileId, isDownloaded, playlistName, playCount',
   metadata: 'key', // For sync timestamps etc.
 });
 
@@ -38,25 +38,46 @@ export async function getStorageEstimate() {
  */
 export async function syncLibraryToDb(songs) {
   const existing = await db.songs.toArray();
-  const existingKeys = new Set(existing.map(s => `${s.artist}|||${s.track}`));
+  const existingMap = new Map(existing.map(s => [`${s.artist}|||${s.track}`, s]));
 
-  const newSongs = songs
-    .filter(s => !existingKeys.has(`${s.artist}|||${s.track}`))
-    .map(s => ({
-      track: s.track || s.name || 'Unknown Track',
-      artist: s.artist || 'Unknown Artist',
-      album: s.album || '',
-      driveFileId: s.driveFileId || null,
-      isDownloaded: false,
-      playlistName: s.playlistName || 'Saved Tracks',
-      blob: null,
-      dateAdded: Date.now(),
-    }));
+  let added = 0;
+  let _updated = 0;
 
-  if (newSongs.length > 0) {
-    await db.songs.bulkAdd(newSongs);
+  for (const s of songs) {
+    const key = `${s.artist}|||${s.track}`;
+    const prev = existingMap.get(key);
+
+    if (!prev) {
+      // New song → insert
+      await db.songs.add({
+        track: s.track || s.name || 'Unknown Track',
+        artist: s.artist || 'Unknown Artist',
+        album: s.album || '',
+        driveFileId: s.driveFileId || null,
+        isDownloaded: false,
+        playlistName: s.playlistName || 'Saved Tracks',
+        playCount: s.playCount || 0,
+        blob: null,
+        dateAdded: Date.now(),
+      });
+      added++;
+    } else {
+      // Existing song → upsert metadata (don't clobber local-only fields)
+      const updates = {};
+      if (s.album && s.album !== prev.album) updates.album = s.album;
+      if (s.playlistName && s.playlistName !== prev.playlistName) updates.playlistName = s.playlistName;
+      if ((s.playCount || 0) > (prev.playCount || 0)) updates.playCount = s.playCount;
+      // If the incoming data has a driveFileId and we don't, use it
+      if (s.driveFileId && !prev.driveFileId) updates.driveFileId = s.driveFileId;
+
+      if (Object.keys(updates).length > 0) {
+        await db.songs.update(prev.id, updates);
+        _updated++;
+      }
+    }
   }
-  return newSongs.length;
+
+  return added;
 }
 
 export async function resetLocalDatabase() {

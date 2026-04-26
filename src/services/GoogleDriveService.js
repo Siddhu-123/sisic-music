@@ -97,12 +97,16 @@ class GoogleDriveService {
   }
 
   /**
-   * List files in a Drive folder that match a song name.
-   * Used to check if a song is already downloaded to Drive by the Mac worker.
+   * Find an audio file on Drive by exact canonical filename: "Artist - Track.mp3"
+   * Matches the Mac worker's naming convention.
    */
-  async findSongFile(songTitle, folderId) {
-    const safe = songTitle.replace(/'/g, "\\'").substring(0, 40);
-    const q = `name contains '${safe}' and '${folderId}' in parents and trashed=false`;
+  async findSongFile(songTitle, folderId, artist = '') {
+    // Build canonical filename: "Artist - Track.mp3"
+    const label = artist ? `${artist} - ${songTitle}` : songTitle;
+    // eslint-disable-next-line no-control-regex
+    const safeName = label.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+    const escaped = `${safeName}.mp3`.replace(/'/g, "\\'");
+    const q = `name='${escaped}' and '${folderId}' in parents and trashed=false`;
     const resp = await this.driveGet(
       `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
       'Drive song search'

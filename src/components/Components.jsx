@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, SkipForward, SkipBack, Volume2, Download, CheckCircle2 } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Volume2, Download, CheckCircle2, Shuffle, ListMusic } from 'lucide-react';
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00';
@@ -8,8 +8,8 @@ function formatTime(seconds) {
   return `${m}:${s}`;
 }
 
-export function PlayerBar({ player }) {
-  const { currentSong, isPlaying, progress, duration, volume, togglePlay, seek, changeVolume, playNext, playPrev } = player;
+export function PlayerBar({ player, onToggleQueue }) {
+  const { currentSong, isPlaying, progress, duration, volume, shuffleMode, togglePlay, seek, changeVolume, playNext, playPrev, toggleShuffle } = player;
 
   return (
     <div className="player-bar">
@@ -35,6 +35,14 @@ export function PlayerBar({ player }) {
       {/* Controls */}
       <div className="player-controls">
         <div className="player-buttons">
+          <button
+            className={`icon-btn ${shuffleMode !== 'off' ? 'icon-btn--active' : ''}`}
+            onClick={toggleShuffle}
+            aria-label={`Shuffle: ${shuffleMode}`}
+            title={`Shuffle: ${shuffleMode}`}
+          >
+            <Shuffle size={16} />
+          </button>
           <button className="icon-btn" onClick={playPrev} aria-label="Previous">
             <SkipBack size={20} />
           </button>
@@ -43,6 +51,9 @@ export function PlayerBar({ player }) {
           </button>
           <button className="icon-btn" onClick={playNext} aria-label="Next">
             <SkipForward size={20} />
+          </button>
+          <button className="icon-btn" onClick={onToggleQueue} aria-label="Queue" title="Queue">
+            <ListMusic size={16} />
           </button>
         </div>
         <div className="progress-row">
