@@ -127,6 +127,10 @@ export function useAudioPlayer() {
     setVolume(v);
   }, []);
 
+  const clearError = useCallback(() => {
+    setError('');
+  }, []);
+
   const setQueueAndPlay = useCallback((songs, startIndex = 0) => {
     setError('');
     setQueue(songs);
@@ -147,6 +151,7 @@ export function useAudioPlayer() {
     togglePlay,
     seek,
     changeVolume,
+    clearError,
     playNext,
     playPrev,
     setQueueAndPlay,

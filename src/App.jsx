@@ -79,11 +79,6 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player.queueIndex, player.queue]);
 
-  const handlePlaySong = useCallback((song) => {
-    const idx = visibleSongs.findIndex(s => s.id === song.id);
-    player.setQueueAndPlay(visibleSongs, idx >= 0 ? idx : 0);
-  }, [visibleSongs, player]);
-
   const handleDownload = useCallback(async (song) => {
     if (song.isDownloaded || downloadingIds.has(song.id)) return;
     if (!DRIVE_FOLDER_ID) {
@@ -109,15 +104,8 @@ function App() {
         const blob = await driveService.downloadFileAsBlob(fileId);
         await db.songs.update(song.id, { blob, isDownloaded: true, driveFileId: fileId });
       } else {
-        // 3. Not on Drive yet: queue a direct audio source for the Mac worker.
-        const sourceUrl = window.prompt(
-          `Paste a direct audio file URL you have rights to use for "${song.track}".`
-        );
-        if (!sourceUrl?.trim()) {
-          setActionError('Download request cancelled. A direct audio source URL is required for the Mac worker.');
-          return;
-        }
-        await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, sourceUrl.trim());
+        // 3. Not on Drive yet: signal the Mac worker to find a local match.
+        await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
         alert(`"${song.track}" has been added to the download queue. Your Mac will process it shortly.`);
       }
     } catch (e) {
@@ -127,6 +115,19 @@ function App() {
       setDownloadingIds(prev => { const n = new Set(prev); n.delete(song.id); return n; });
     }
   }, [downloadingIds]);
+
+  const handlePlaySong = useCallback((song) => {
+    setActionError('');
+    player.clearError();
+
+    if (!song.isDownloaded && !song.driveFileId) {
+      handleDownload(song);
+      return;
+    }
+
+    const idx = visibleSongs.findIndex(s => s.id === song.id);
+    player.setQueueAndPlay(visibleSongs, idx >= 0 ? idx : 0);
+  }, [handleDownload, visibleSongs, player]);
 
   const handleResetLocalCache = useCallback(async () => {
     const confirmed = window.confirm(
