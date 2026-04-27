@@ -33,7 +33,10 @@ async function ensureDriveStreamWorker(accessToken) {
     const base = appBaseUrl();
     streamWorkerReadyPromise = navigator.serviceWorker
       .register(new URL('stream-sw.js', base), { scope: base.pathname })
-      .then(() => navigator.serviceWorker.ready);
+      .then(async registration => {
+        await registration.update();
+        return navigator.serviceWorker.ready;
+      });
   }
   const registration = await streamWorkerReadyPromise;
   const worker = navigator.serviceWorker.controller

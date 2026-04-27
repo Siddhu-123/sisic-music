@@ -8,6 +8,7 @@ if ('serviceWorker' in navigator) {
   const appBase = new URL(import.meta.env.BASE_URL || './', window.location.href);
   const workerUrl = new URL('stream-sw.js', appBase);
   navigator.serviceWorker.register(workerUrl, { scope: appBase.pathname })
+    .then(registration => registration.update())
     .catch(error => console.warn('Drive stream worker registration failed:', error));
 }
 
