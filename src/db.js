@@ -35,7 +35,6 @@ db.version(3).stores({
       driveFileId: base.driveFileId || previous?.driveFileId || null,
       isDownloaded: Boolean(base.isDownloaded || previous?.isDownloaded),
       isCached: Boolean(base.isCached || old.blob || previous?.isCached),
-      blob: base.blob || previous?.blob || null,
       cacheSizeBytes: base.cacheSizeBytes || old.blob?.size || previous?.cacheSizeBytes || 0,
       cachedAt: base.cachedAt || previous?.cachedAt || (old.blob ? Date.now() : null),
       playCount: Math.max(base.playCount || 0, previous?.playCount || 0),
@@ -70,6 +69,63 @@ db.version(3).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 3 });
 });
 
+db.version(4).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, isDownloaded, isCached, playCount, lastPlayedAt, cachedAt',
+  playlists: '&playlistKey, name, source',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songAudio: '&songKey, cachedAt, cacheSizeBytes, explicit',
+  metadata: 'key',
+}).upgrade(async tx => {
+  const songsTable = tx.table('songs');
+  const audioTable = tx.table('songAudio');
+  const songs = await songsTable.toArray();
+
+  for (const song of songs) {
+    if (!song.blob) {
+      if (song.isCached || song.isDownloaded || song.cacheSizeBytes || song.cachedAt) {
+        await songsTable.update(song.id, {
+          blob: null,
+          isDownloaded: false,
+          isCached: false,
+          cacheSizeBytes: 0,
+          cachedAt: null,
+        });
+      }
+      continue;
+    }
+
+    const cachedAt = song.cachedAt || Date.now();
+    const cacheSizeBytes = song.cacheSizeBytes || song.blob.size || 0;
+    let storedAudio = false;
+
+    try {
+      const audioData = await song.blob.arrayBuffer();
+      await audioTable.put({
+        songKey: song.songKey,
+        audioData,
+        audioMimeType: song.blob.type || 'audio/mpeg',
+        cacheSizeBytes: cacheSizeBytes || audioData.byteLength || 0,
+        cachedAt,
+        explicit: Boolean(song.isDownloaded),
+      });
+      storedAudio = true;
+    } catch (error) {
+      console.warn('Dropping legacy cached audio that could not be migrated:', song.songKey, error);
+    }
+
+    await songsTable.update(song.id, {
+      blob: null,
+      isDownloaded: storedAudio ? Boolean(song.isDownloaded) : false,
+      isCached: storedAudio,
+      cacheSizeBytes: storedAudio ? cacheSizeBytes : 0,
+      cachedAt: storedAudio ? cachedAt : null,
+    });
+  }
+
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 4 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -84,8 +140,7 @@ function normalizeSongInput(input = {}) {
     driveFileId: song.driveFileId || null,
     isDownloaded: Boolean(song.isDownloaded),
     isCached: Boolean(song.isCached),
-    blob: song.blob || null,
-    cacheSizeBytes: song.cacheSizeBytes || song.blob?.size || 0,
+    cacheSizeBytes: song.cacheSizeBytes || 0,
     cachedAt: song.cachedAt || null,
     playCount: song.playCount || 0,
     lastPlayedAt: song.lastPlayedAt || null,
@@ -103,13 +158,23 @@ function bestSongMerge(previous, incoming) {
     driveFileId: incoming.driveFileId || previous.driveFileId || null,
     isDownloaded: Boolean(previous.isDownloaded || incoming.isDownloaded),
     isCached: Boolean(previous.isCached || incoming.isCached),
-    blob: previous.blob || incoming.blob || null,
     cacheSizeBytes: previous.cacheSizeBytes || incoming.cacheSizeBytes || 0,
     cachedAt: previous.cachedAt || incoming.cachedAt || null,
     playCount: Math.max(previous.playCount || 0, incoming.playCount || 0),
     lastPlayedAt: previous.lastPlayedAt || incoming.lastPlayedAt || null,
     dateAdded: previous.dateAdded || incoming.dateAdded || Date.now(),
   };
+}
+
+function withoutLegacyBlob(song) {
+  const copy = { ...song };
+  delete copy.blob;
+  return copy;
+}
+
+function isCachedAudioUsable(audio = {}) {
+  const mimeType = String(audio.audioMimeType || '').toLowerCase();
+  return Boolean(audio.audioData && (!mimeType || mimeType.startsWith('audio/')));
 }
 
 async function putPlaylistMembership(tables, playlistName, songKey, source = 'spotify') {
@@ -169,6 +234,23 @@ export async function markSongPlayable(songKeyOrSong, driveFileId) {
   await db.songs.where('songKey').equals(songKey).modify({ driveFileId });
 }
 
+export async function clearSongPlayable(songKeyOrSong) {
+  const songKey = typeof songKeyOrSong === 'string' ? songKeyOrSong : getSongKey(songKeyOrSong);
+  await db.transaction('rw', db.songs, db.songAudio, async () => {
+    await db.songAudio.delete(songKey);
+    const song = await db.songs.where('songKey').equals(songKey).first();
+    if (!song) return;
+    await db.songs.update(song.id, {
+      driveFileId: null,
+      isDownloaded: false,
+      isCached: false,
+      cacheSizeBytes: 0,
+      cachedAt: null,
+      blob: null,
+    });
+  });
+}
+
 export async function touchSongPlayed(songKey) {
   if (!songKey) return;
   const song = await db.songs.where('songKey').equals(songKey).first();
@@ -183,33 +265,70 @@ export async function cacheSongBlob(songKey, blob, driveFileId, { explicit = fal
   if (!songKey || !blob) return;
   const song = await db.songs.where('songKey').equals(songKey).first();
   if (!song) return;
-  await db.songs.update(song.id, {
-    blob,
-    driveFileId: driveFileId || song.driveFileId || null,
-    isDownloaded: Boolean(explicit || song.isDownloaded),
-    isCached: true,
-    cacheSizeBytes: blob.size || 0,
-    cachedAt: Date.now(),
+  const audioData = await blob.arrayBuffer();
+  const cacheSizeBytes = blob.size || audioData.byteLength || 0;
+  const cachedAt = Date.now();
+  await db.transaction('rw', db.songs, db.songAudio, async () => {
+    await db.songAudio.put({
+      songKey,
+      audioData,
+      audioMimeType: blob.type || 'audio/mpeg',
+      cacheSizeBytes,
+      cachedAt,
+      explicit: Boolean(explicit),
+    });
+    await db.songs.update(song.id, {
+      driveFileId: driveFileId || song.driveFileId || null,
+      isDownloaded: Boolean(explicit || song.isDownloaded),
+      isCached: true,
+      cacheSizeBytes,
+      cachedAt,
+      blob: null,
+    });
   });
 }
 
+export async function getCachedSongAudio(songKey) {
+  if (!songKey) return null;
+  const audio = await db.songAudio.where('songKey').equals(songKey).first();
+  if (!isCachedAudioUsable(audio)) return null;
+  return {
+    blob: new Blob([audio.audioData], { type: audio.audioMimeType || 'audio/mpeg' }),
+    hasBlob: true,
+    isCached: true,
+    cacheSizeBytes: audio.cacheSizeBytes || audio.audioData.byteLength || 0,
+    cachedAt: audio.cachedAt || null,
+  };
+}
+
 export async function enforceAudioCacheLimit(limitBytes = AUDIO_CACHE_LIMIT_BYTES) {
-  const cached = await db.songs
-    .filter(song => Boolean(song.blob && song.isCached && !song.isDownloaded))
+  const cached = await db.songAudio
+    .filter(audio => !audio.explicit)
     .toArray();
-  let total = cached.reduce((sum, song) => sum + (song.cacheSizeBytes || song.blob?.size || 0), 0);
+  let total = cached.reduce((sum, audio) => sum + (audio.cacheSizeBytes || audio.audioData?.byteLength || 0), 0);
   if (total <= limitBytes) return 0;
 
-  cached.sort((a, b) => (a.lastPlayedAt || a.cachedAt || 0) - (b.lastPlayedAt || b.cachedAt || 0));
+  const songs = await db.songs.bulkGet(cached.map(audio => audio.songKey));
+  const lastPlayedBySong = new Map(songs.filter(Boolean).map(song => [song.songKey, song.lastPlayedAt || 0]));
+  cached.sort((a, b) => {
+    const aLastUsed = lastPlayedBySong.get(a.songKey) || a.cachedAt || 0;
+    const bLastUsed = lastPlayedBySong.get(b.songKey) || b.cachedAt || 0;
+    return aLastUsed - bLastUsed;
+  });
   let removed = 0;
-  for (const song of cached) {
+  for (const audio of cached) {
     if (total <= limitBytes) break;
-    total -= song.cacheSizeBytes || song.blob?.size || 0;
-    await db.songs.update(song.id, {
-      blob: null,
-      isCached: false,
-      cacheSizeBytes: 0,
-      cachedAt: null,
+    total -= audio.cacheSizeBytes || audio.audioData?.byteLength || 0;
+    await db.transaction('rw', db.songAudio, db.songs, async () => {
+      await db.songAudio.delete(audio.songKey);
+      const song = await db.songs.where('songKey').equals(audio.songKey).first();
+      if (song && !song.isDownloaded) {
+        await db.songs.update(song.id, {
+          isCached: false,
+          cacheSizeBytes: 0,
+          cachedAt: null,
+        });
+      }
     });
     removed++;
   }
@@ -263,14 +382,16 @@ export async function syncDownloadJobsToDb(jobs = []) {
 
 export async function getLibrarySnapshot() {
   try {
-    const [songsRaw, playlistsRaw, links, jobsRaw] = await Promise.all([
+    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows] = await Promise.all([
       db.songs.toArray(),
       db.playlists.toArray(),
       db.playlistSongs.toArray(),
       db.downloadJobs.toArray(),
+      db.songAudio.toArray(),
     ]);
 
     const playlistByKey = new Map(playlistsRaw.map(pl => [pl.playlistKey, pl]));
+    const audioBySongKey = new Map(audioRows.map(audio => [audio.songKey, audio]));
     const linksBySong = new Map();
     const countsByPlaylist = new Map();
     for (const link of links) {
@@ -280,19 +401,30 @@ export async function getLibrarySnapshot() {
     }
 
     const jobsBySong = new Map();
+    const jobFileIds = new Set();
     for (const job of jobsRaw) {
+      if (job.jobFileId) jobFileIds.add(job.jobFileId);
       const prev = jobsBySong.get(job.songKey);
       if (!prev || String(job.updatedAt || '') > String(prev.updatedAt || '')) {
         jobsBySong.set(job.songKey, job);
       }
     }
 
-    const songs = songsRaw.map(({ blob, ...song }) => {
+    const songs = songsRaw.map(rawSong => {
+      const song = withoutLegacyBlob(rawSong);
       const playlistKeys = linksBySong.get(song.songKey) || [];
       const playlistNames = playlistKeys.map(key => playlistByKey.get(key)?.name).filter(Boolean);
+      const audio = audioBySongKey.get(song.songKey);
+      const hasAudio = isCachedAudioUsable(audio);
+      const hasJobFileAsDriveFile = Boolean(song.driveFileId && jobFileIds.has(song.driveFileId));
       return {
         ...song,
-        hasBlob: Boolean(blob),
+        driveFileId: hasJobFileAsDriveFile ? null : song.driveFileId,
+        hasBlob: hasAudio,
+        isDownloaded: Boolean(song.isDownloaded && hasAudio),
+        isCached: hasAudio,
+        cacheSizeBytes: hasAudio ? (song.cacheSizeBytes || audio?.cacheSizeBytes || 0) : 0,
+        cachedAt: hasAudio ? (song.cachedAt || audio?.cachedAt || null) : null,
         playlistKeys,
         playlists: playlistNames,
         playlistName: playlistNames[0] || '',

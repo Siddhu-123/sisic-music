@@ -4,8 +4,9 @@ import { Home, Search, Library, Music2, TrendingUp } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   cacheSongBlob,
-  db,
+  clearSongPlayable,
   enforceAudioCacheLimit,
+  getCachedSongAudio,
   getLibrarySnapshot,
   markSongPlayable,
   resetLocalDatabase,
@@ -201,11 +202,25 @@ function App() {
     let resolved = { ...song, ...localSong, downloadJob: jobBySongKey.get(localSong.songKey) || localSong.downloadJob || null };
 
     if (resolved.isDownloaded || resolved.isCached || resolved.hasBlob) {
-      const fullSong = await db.songs.where('songKey').equals(resolved.songKey).first();
-      if (fullSong?.blob) return { ...resolved, ...fullSong, hasBlob: true };
+      const cachedAudio = await getCachedSongAudio(resolved.songKey);
+      if (cachedAudio) return { ...resolved, ...cachedAudio };
     }
 
-    if (resolved.driveFileId) return resolved;
+    if (resolved.driveFileId) {
+      const metadata = await driveService.getAudioFileMetadata(resolved.driveFileId);
+      if (metadata) return resolved;
+      await clearSongPlayable(resolved.songKey);
+      resolved = {
+        ...resolved,
+        driveFileId: null,
+        isDownloaded: false,
+        isCached: false,
+        hasBlob: false,
+        blob: null,
+        cacheSizeBytes: 0,
+        cachedAt: null,
+      };
+    }
 
     if (DRIVE_FOLDER_ID) {
       const found = await driveService.findSongFile(resolved, DRIVE_FOLDER_ID);
@@ -321,6 +336,13 @@ function App() {
     try {
       const localSong = await ensureLocalSong(song, song.playlistName || '');
       let fileId = localSong.driveFileId;
+      if (fileId) {
+        const metadata = await driveService.getAudioFileMetadata(fileId);
+        if (!metadata) {
+          await clearSongPlayable(localSong.songKey);
+          fileId = null;
+        }
+      }
       if (!fileId) {
         const found = await driveService.findSongFile(localSong, DRIVE_FOLDER_ID);
         if (found) {

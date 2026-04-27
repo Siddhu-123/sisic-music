@@ -9,6 +9,8 @@ const TOKEN_STORAGE_KEY = 'sisic_access_token';
 const EXPIRY_STORAGE_KEY = 'sisic_token_expiry';
 const JOB_MIME_TYPE = 'application/json';
 const JOB_FILE_FIELDS = 'files(id,name,modifiedTime,appProperties)';
+const AUDIO_FILE_FIELDS = 'files(id,name,mimeType,size,appProperties)';
+const FILE_METADATA_FIELDS = 'id,name,mimeType,size,appProperties';
 
 function escapeDriveQuery(value = '') {
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -22,6 +24,22 @@ function normalizeJob(raw, file = {}) {
     jobFileName: file.name || raw.jobFileName || '',
     updatedAt: raw.updatedAt || file.modifiedTime || raw.createdAt || new Date().toISOString(),
   };
+}
+
+function isAudioFileMetadata(file = {}) {
+  const name = String(file.name || '').toLowerCase();
+  const mimeType = String(file.mimeType || '').toLowerCase();
+  const appProperties = file.appProperties || {};
+
+  if (appProperties.sisicJob === 'true') return false;
+  if (name.startsWith('sisic-job-') || name.endsWith('.json')) return false;
+  if (mimeType === JOB_MIME_TYPE || mimeType.includes('json')) return false;
+
+  return mimeType.startsWith('audio/') || name.endsWith('.mp3');
+}
+
+function firstAudioFile(files = []) {
+  return files.find(isAudioFileMetadata) || null;
 }
 
 class GoogleDriveService {
@@ -118,6 +136,25 @@ class GoogleDriveService {
     return await resp.json();
   }
 
+  async getAudioFileMetadata(fileId) {
+    if (!fileId) return null;
+    const params = new URLSearchParams({
+      fields: FILE_METADATA_FIELDS,
+      supportsAllDrives: 'true',
+    });
+    try {
+      const resp = await this.driveGet(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`,
+        'Drive audio metadata'
+      );
+      const file = await resp.json();
+      return isAudioFileMetadata(file) ? file : null;
+    } catch (error) {
+      console.warn('Drive audio metadata validation failed:', fileId, error);
+      return null;
+    }
+  }
+
   async findSongFile(songOrTitle, folderId, maybeArtist = '') {
     const song = typeof songOrTitle === 'object'
       ? asSongRecord(songOrTitle)
@@ -131,21 +168,30 @@ class GoogleDriveService {
       'trashed=false',
       `appProperties has { key='sisicSongKey' and value='${escapedKey}' }`,
     ].join(' and ');
-    const metadataMatches = await this.driveList(metadataQuery, 'files(id,name,appProperties)', 10);
-    if (metadataMatches[0]) return metadataMatches[0];
+    const metadataMatches = await this.driveList(metadataQuery, AUDIO_FILE_FIELDS, 10);
+    const metadataAudio = firstAudioFile(metadataMatches);
+    if (metadataAudio) return metadataAudio;
 
     const escapedName = escapeDriveQuery(canonicalAudioFilename(song));
     const filenameQuery = `name='${escapedName}' and '${escapedFolder}' in parents and trashed=false`;
-    const filenameMatches = await this.driveList(filenameQuery, 'files(id,name,appProperties)', 10);
-    return filenameMatches[0] || null;
+    const filenameMatches = await this.driveList(filenameQuery, AUDIO_FILE_FIELDS, 10);
+    return firstAudioFile(filenameMatches);
   }
 
   async downloadFileAsBlob(fileId) {
+    const metadata = await this.getAudioFileMetadata(fileId);
+    if (!metadata) {
+      throw new Error('Drive file is not an audio file. It may be a download job JSON file.');
+    }
     const resp = await this.driveGet(
       `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
       'Drive audio download'
     );
-    return await resp.blob();
+    const blob = await resp.blob();
+    if (blob.type && !blob.type.startsWith('audio/')) {
+      throw new Error(`Drive file is not audio. Download returned ${blob.type}.`);
+    }
+    return blob;
   }
 
   async readJsonFile(fileId, label = 'Drive JSON file') {
