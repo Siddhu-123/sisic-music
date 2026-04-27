@@ -7,7 +7,6 @@ import {
   db,
   enforceAudioCacheLimit,
   getLibrarySnapshot,
-  getStorageEstimate,
   markSongPlayable,
   resetLocalDatabase,
   syncDownloadJobsToDb,
@@ -27,7 +26,6 @@ import './App.css';
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], error: '' };
 const PAGE_SIZE = 50;
-const AUTO_CACHE_AFTER_SECONDS = 10;
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
@@ -65,15 +63,15 @@ function App() {
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
-  const autoCacheRef = useRef(new Set());
+  const resolvePlayableSongRef = useRef(null);
+  const loadAndPlayRef = useRef(null);
+  const playNextRef = useRef(null);
+  const setPlayerErrorRef = useRef(null);
   const {
-    currentSong,
     currentSongKey,
-    duration,
     isPlaying,
     loadAndPlay,
     playNext,
-    progress,
     queue,
     queueIndex,
     setPlayerError,
@@ -232,6 +230,13 @@ function App() {
   }, [addToast, ensureLocalSong, jobBySongKey, queueSongForDownload]);
 
   useEffect(() => {
+    resolvePlayableSongRef.current = resolvePlayableSong;
+    loadAndPlayRef.current = loadAndPlay;
+    playNextRef.current = playNext;
+    setPlayerErrorRef.current = setPlayerError;
+  }, [loadAndPlay, playNext, resolvePlayableSong, setPlayerError]);
+
+  useEffect(() => {
     if (queue.length === 0) return undefined;
     const song = queue[queueIndex];
     if (!song) return undefined;
@@ -241,20 +246,24 @@ function App() {
 
     const playSong = async () => {
       try {
-        const resolved = await resolvePlayableSong(song, { queueIfMissing: true, showToast: false });
+        const resolved = await resolvePlayableSongRef.current(song, { queueIfMissing: true, showToast: false });
         if (cancelled || requestId !== playbackRequestRef.current) return;
         if (resolved) {
-          loadAndPlay(resolved, driveService.accessToken);
+          await loadAndPlayRef.current(resolved, driveService.accessToken);
           return;
         }
-        setPlayerError(`"${song.track}" is queued for download.`);
+        setPlayerErrorRef.current(`"${song.track}" is queued for download.`);
         if (queue.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
-          window.setTimeout(() => playNext({ avoidCurrent: true, stopOnBlocked: true }), 250);
+          window.setTimeout(() => {
+            if (!cancelled && requestId === playbackRequestRef.current) {
+              playNextRef.current({ avoidCurrent: true, stopOnBlocked: true });
+            }
+          }, 250);
         }
       } catch (error) {
         if (cancelled || requestId !== playbackRequestRef.current) return;
         console.error('Playback preparation failed:', error);
-        setPlayerError(errorMessage(error));
+        setPlayerErrorRef.current(errorMessage(error));
       }
     };
 
@@ -262,7 +271,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [queue, queueIndex, loadAndPlay, playNext, setPlayerError, resolvePlayableSong]);
+  }, [queue, queueIndex]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -271,27 +280,7 @@ function App() {
     touchSongPlayed(currentSongKey).catch(error => console.error('Play count update failed:', error));
   }, [currentSongKey, isPlaying]);
 
-  useEffect(() => {
-    const song = currentSong;
-    if (!song?.songKey || !song.driveFileId || !isPlaying || !duration) return;
-    if (song.isDownloaded || song.isCached || song.hasBlob) return;
-    const elapsed = (progress / 100) * duration;
-    if (elapsed < AUTO_CACHE_AFTER_SECONDS || autoCacheRef.current.has(song.songKey)) return;
-
-    autoCacheRef.current.add(song.songKey);
-    const cacheInBackground = async () => {
-      try {
-        const estimate = await getStorageEstimate();
-        if (estimate?.quotaBytes && estimate.quotaBytes - estimate.usedBytes < 25 * 1024 * 1024) return;
-        const blob = await driveService.downloadFileAsBlob(song.driveFileId);
-        await cacheSongBlob(song.songKey, blob, song.driveFileId, { explicit: false });
-        await enforceAudioCacheLimit(AUDIO_CACHE_LIMIT_BYTES);
-      } catch (error) {
-        console.error('Auto-cache failed:', error);
-      }
-    };
-    cacheInBackground();
-  }, [currentSong, currentSongKey, duration, isPlaying, progress]);
+  // Streaming is the default. Full audio downloads only happen through the explicit offline button.
 
   const handlePlaySong = useCallback(async (song, songList) => {
     setActionError('');

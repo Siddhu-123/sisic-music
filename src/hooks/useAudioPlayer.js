@@ -1,5 +1,57 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 
+const MIN_CACHED_AUDIO_BYTES = 16 * 1024;
+let streamWorkerReadyPromise = null;
+
+function appBaseUrl() {
+  return new URL(import.meta.env.BASE_URL || './', window.location.href);
+}
+
+function driveStreamUrl(fileId) {
+  return new URL(`stream/${encodeURIComponent(fileId)}`, appBaseUrl()).toString();
+}
+
+function waitForController() {
+  if (navigator.serviceWorker.controller) return Promise.resolve(navigator.serviceWorker.controller);
+  return new Promise(resolve => {
+    const timeout = window.setTimeout(() => {
+      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+      resolve(navigator.serviceWorker.controller);
+    }, 1200);
+    function onControllerChange() {
+      window.clearTimeout(timeout);
+      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+      resolve(navigator.serviceWorker.controller);
+    }
+    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+  });
+}
+
+async function ensureDriveStreamWorker(accessToken) {
+  if (!accessToken || !('serviceWorker' in navigator)) return false;
+  if (!streamWorkerReadyPromise) {
+    const base = appBaseUrl();
+    streamWorkerReadyPromise = navigator.serviceWorker
+      .register(new URL('stream-sw.js', base), { scope: base.pathname })
+      .then(() => navigator.serviceWorker.ready);
+  }
+  const registration = await streamWorkerReadyPromise;
+  const worker = navigator.serviceWorker.controller
+    || registration.active
+    || await waitForController();
+  if (!worker) return false;
+  worker.postMessage({ type: 'SISIC_DRIVE_TOKEN', accessToken });
+  return true;
+}
+
+function hasUsableCachedAudio(song) {
+  return Boolean(
+    song.blob
+    && (song.isDownloaded || song.isCached || song.hasBlob)
+    && (!song.blob.size || song.blob.size >= MIN_CACHED_AUDIO_BYTES)
+  );
+}
+
 function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys, avoidCurrent = false) {
   if (songs.length <= 1) return avoidCurrent ? -1 : 0;
 
@@ -58,8 +110,10 @@ export function useAudioPlayer() {
   const playedInSessionRef = useRef(new Set());
   const failedSongKeysRef = useRef(new Set());
   const originalQueueRef = useRef([]);
+  const loadRequestRef = useRef(0);
 
   const clearSource = useCallback(() => {
+    loadRequestRef.current += 1;
     const audio = audioRef.current;
     audio.pause();
     audio.removeAttribute('src');
@@ -78,6 +132,8 @@ export function useAudioPlayer() {
   }, []);
 
   const loadAndPlay = useCallback(async (song, accessToken) => {
+    const requestId = ++loadRequestRef.current;
+    const isLatestRequest = () => requestId === loadRequestRef.current;
     const audio = audioRef.current;
     setError('');
 
@@ -90,31 +146,29 @@ export function useAudioPlayer() {
     audio.removeAttribute('src');
     audio.load();
 
-    if ((song.isDownloaded || song.isCached || song.hasBlob) && song.blob) {
+    if (song.driveFileId && accessToken) {
+      const canProxyStream = await ensureDriveStreamWorker(accessToken);
+      if (!isLatestRequest()) return false;
+      if (!canProxyStream && hasUsableCachedAudio(song)) {
+        const url = URL.createObjectURL(song.blob);
+        blobUrlRef.current = url;
+        audio.src = url;
+        setCurrentSong(song);
+      } else if (!canProxyStream) {
+        clearSource();
+        setCurrentSong(null);
+        setError('Drive stream worker is not ready. Refresh and try again.');
+        return false;
+      } else {
+        audio.preload = 'metadata';
+        audio.src = driveStreamUrl(song.driveFileId);
+        setCurrentSong(song);
+      }
+    } else if (hasUsableCachedAudio(song)) {
       const url = URL.createObjectURL(song.blob);
       blobUrlRef.current = url;
       audio.src = url;
       setCurrentSong(song);
-    } else if (song.driveFileId && accessToken) {
-      // Fetch via Authorization header → blob URL to bypass Chrome ORB
-      try {
-        const resp = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(song.driveFileId)}?alt=media`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        if (!resp.ok) throw new Error(`Drive responded ${resp.status}`);
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        blobUrlRef.current = url;
-        audio.src = url;
-        setCurrentSong(song);
-      } catch (e) {
-        console.error('Drive stream fetch failed:', e);
-        clearSource();
-        setCurrentSong(null);
-        setError(`Could not stream "${song.track}": ${e.message}`);
-        return false;
-      }
     } else {
       clearSource();
       setCurrentSong(null);
@@ -130,6 +184,7 @@ export function useAudioPlayer() {
     if (song.songKey || song.id) playedInSessionRef.current.add(song.songKey || song.id);
 
     await new Promise(resolve => setTimeout(resolve, 50));
+    if (!isLatestRequest()) return false;
 
     try {
       await audio.play();

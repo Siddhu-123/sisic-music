@@ -4,26 +4,11 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import App from './App.jsx';
 
-const appBasePath = new URL(import.meta.env.BASE_URL, window.location.origin).pathname;
-
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations()
-    .then(registrations => Promise.all(
-      registrations
-        .filter(registration => registration.scope.includes(appBasePath))
-        .map(registration => registration.unregister())
-    ))
-    .catch(error => console.warn('Service worker cleanup failed:', error));
-}
-
-if ('caches' in window) {
-  caches.keys()
-    .then(keys => Promise.all(
-      keys
-        .filter(key => key.includes('sisic') || key.includes('sisic-music') || key.includes(appBasePath))
-        .map(key => caches.delete(key))
-    ))
-    .catch(error => console.warn('Cache cleanup failed:', error));
+  const appBase = new URL(import.meta.env.BASE_URL || './', window.location.href);
+  const workerUrl = new URL('stream-sw.js', appBase);
+  navigator.serviceWorker.register(workerUrl, { scope: appBase.pathname })
+    .catch(error => console.warn('Drive stream worker registration failed:', error));
 }
 
 class RootErrorBoundary extends Component {
