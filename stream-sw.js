@@ -1,4 +1,4 @@
-const DEFAULT_CHUNK_BYTES = 256 * 1024;
+const DEFAULT_CHUNK_BYTES = 1024 * 1024;
 
 let driveAccessToken = '';
 const fileMetadataCache = new Map();
