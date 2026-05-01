@@ -79,19 +79,42 @@ function inferSongPartsFromFilename(name = '') {
   };
 }
 
+function isUnknownLabel(value = '', unknownValue = 'Unknown') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || normalized === unknownValue.toLowerCase();
+}
+
+function meaningfulValue(value, unknownValue) {
+  return isUnknownLabel(value, unknownValue) ? '' : String(value || '').trim();
+}
+
+function isUnknownSongKey(songKey = '') {
+  return String(songKey || '').trim().toLowerCase() === 'unknown artist::unknown track';
+}
+
 function normalizeSongIndexEntry(file = {}, item = null) {
   const appProperties = file.appProperties || {};
-  const inferred = inferSongPartsFromFilename(file.name);
+  const filename = file.name || file.filename || '';
+  const inferred = inferSongPartsFromFilename(filename);
   const normalizedItem = item ? asSongRecord(item) : null;
-  const artist = normalizedItem?.artist || appProperties.sisicArtist || inferred.artist;
-  const track = normalizedItem?.track || appProperties.sisicTrack || inferred.track;
-  const songKey = normalizedItem?.songKey || appProperties.sisicSongKey || getSongKey({ artist, track });
+  const artist = normalizedItem?.artist
+    || meaningfulValue(appProperties.sisicArtist, 'Unknown Artist')
+    || meaningfulValue(file.artist, 'Unknown Artist')
+    || inferred.artist;
+  const track = normalizedItem?.track
+    || meaningfulValue(appProperties.sisicTrack, 'Unknown Track')
+    || meaningfulValue(file.track, 'Unknown Track')
+    || inferred.track;
+  const existingSongKey = appProperties.sisicSongKey || file.songKey || '';
+  const songKey = normalizedItem?.songKey
+    || (isUnknownSongKey(existingSongKey) ? '' : existingSongKey)
+    || getSongKey({ artist, track });
   return {
     songKey,
     artist,
     track,
     album: normalizedItem?.album || appProperties.sisicAlbum || file.album || '',
-    filename: file.name || canonicalAudioFilename({ artist, track }),
+    filename: filename || canonicalAudioFilename({ artist, track }),
     driveFileId: file.id || file.driveFileId || '',
     mimeType: file.mimeType || 'audio/mpeg',
     size: Number(file.size || 0),
@@ -398,7 +421,7 @@ class GoogleDriveService {
     const body = await this.readJsonIndex(folderId, SONG_INDEX_FILENAME, indexBody('songs', []));
     this.songIndexCache = {
       ...body,
-      songs: Array.isArray(body.songs) ? body.songs : [],
+      songs: Array.isArray(body.songs) ? body.songs.map(song => normalizeSongIndexEntry(song)) : [],
     };
     return this.songIndexCache;
   }
