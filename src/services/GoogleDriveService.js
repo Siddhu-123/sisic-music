@@ -8,12 +8,12 @@ import {
 } from '../songIdentity';
 
 const SCOPES = [
-  'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive',
 ].join(' ');
 
 const TOKEN_STORAGE_KEY = 'sisic_access_token';
 const EXPIRY_STORAGE_KEY = 'sisic_token_expiry';
+const TOKEN_SCOPE_STORAGE_KEY = 'sisic_token_scope';
 const JOB_MIME_TYPE = 'application/json';
 const SONG_INDEX_FILENAME = 'sisic-songs.json';
 const QUEUE_INDEX_FILENAME = 'sisic-queue.json';
@@ -141,8 +141,15 @@ function normalizeDeletedEntry(songInput = {}, extra = {}) {
 class GoogleDriveService {
   constructor() {
     this.tokenClient = null;
-    this.accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) || null;
-    this.tokenExpiry = Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || null;
+    const storedScopes = localStorage.getItem(TOKEN_SCOPE_STORAGE_KEY) || '';
+    const hasCurrentScopes = storedScopes === SCOPES;
+    this.accessToken = hasCurrentScopes ? localStorage.getItem(TOKEN_STORAGE_KEY) || null : null;
+    this.tokenExpiry = hasCurrentScopes ? Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || null : null;
+    if (!hasCurrentScopes) {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      localStorage.removeItem(EXPIRY_STORAGE_KEY);
+      localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
+    }
     this.jobCache = new Map();
     this.indexFileCache = new Map();
     this.songIndexCache = null;
@@ -155,9 +162,11 @@ class GoogleDriveService {
     if (token && expiry) {
       localStorage.setItem(TOKEN_STORAGE_KEY, token);
       localStorage.setItem(EXPIRY_STORAGE_KEY, String(expiry));
+      localStorage.setItem(TOKEN_SCOPE_STORAGE_KEY, SCOPES);
     } else {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(EXPIRY_STORAGE_KEY);
+      localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
     }
   }
 
@@ -190,7 +199,7 @@ class GoogleDriveService {
         this._persistToken(resp.access_token, Date.now() + (resp.expires_in * 1000));
         resolve(resp.access_token);
       };
-      this.tokenClient.requestAccessToken({ prompt: '' });
+      this.tokenClient.requestAccessToken({ prompt: this.accessToken ? '' : 'consent' });
     });
   }
 
