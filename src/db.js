@@ -126,6 +126,17 @@ db.version(4).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 4 });
 });
 
+db.version(5).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, isDownloaded, isCached, playCount, lastPlayedAt, cachedAt',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songAudio: '&songKey, cachedAt, cacheSizeBytes, explicit',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 5 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -180,7 +191,7 @@ function isCachedAudioUsable(audio = {}) {
 async function putPlaylistMembership(tables, playlistName, songKey, source = 'spotify') {
   if (!playlistName) return false;
   const playlistKey = getPlaylistKey(playlistName);
-  await tables.playlists.put({ playlistKey, name: playlistName, source });
+  await tables.playlists.put({ playlistKey, name: playlistName, source, updatedAt: new Date().toISOString() });
   await tables.playlistSongs.put({
     playlistKey,
     songKey,
@@ -227,6 +238,32 @@ export async function upsertSongToDb(input, playlistName = '') {
     }
     return await db.songs.where('songKey').equals(incoming.songKey).first();
   });
+}
+
+export async function addSongToPlaylist(songInput, playlistName, source = 'sisic') {
+  const song = normalizeSongInput(songInput);
+  const cleanName = String(playlistName || '').trim();
+  if (!cleanName) throw new Error('Choose a playlist first.');
+  return await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, async () => {
+    const previous = await db.songs.where('songKey').equals(song.songKey).first();
+    const merged = bestSongMerge(previous, song);
+    if (previous) {
+      await db.songs.update(previous.id, merged);
+    } else {
+      await db.songs.add(merged);
+    }
+    await putPlaylistMembership(db, cleanName, song.songKey, source);
+    return await db.songs.where('songKey').equals(song.songKey).first();
+  });
+}
+
+export async function removeSongFromPlaylist(songKeyOrSong, playlistKey) {
+  const songKey = typeof songKeyOrSong === 'string' ? songKeyOrSong : getSongKey(songKeyOrSong);
+  if (!songKey || !playlistKey) return false;
+  await db.playlistSongs.delete([playlistKey, songKey]);
+  const remaining = await db.playlistSongs.where('playlistKey').equals(playlistKey).count();
+  if (remaining === 0) await db.playlists.delete(playlistKey);
+  return true;
 }
 
 export async function markSongPlayable(songKeyOrSong, driveFileId) {
@@ -361,6 +398,57 @@ export async function syncLibraryToDb(songs) {
     await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
     return { added, updated, playlistLinks, totalSongs: await db.songs.count() };
   });
+}
+
+export async function syncPlaylistIndexToDb(playlists = []) {
+  if (!Array.isArray(playlists) || playlists.length === 0) return;
+  await db.transaction('rw', db.playlists, db.playlistSongs, async () => {
+    for (const playlist of playlists) {
+      const name = String(playlist.name || '').trim();
+      const playlistKey = playlist.playlistKey || getPlaylistKey(name);
+      if (!playlistKey || !name || !Array.isArray(playlist.songKeys)) continue;
+      await db.playlists.put({
+        playlistKey,
+        name,
+        source: playlist.source || 'sisic',
+        updatedAt: playlist.updatedAt || new Date().toISOString(),
+      });
+      for (const songKey of playlist.songKeys) {
+        if (!songKey) continue;
+        await db.playlistSongs.put({
+          playlistKey,
+          songKey,
+          playlistName: name,
+          addedAt: Date.now(),
+        });
+      }
+    }
+  });
+}
+
+export async function getPlaylistSnapshotForDrive({ excludePlaylistKeys = [] } = {}) {
+  const excluded = new Set(excludePlaylistKeys);
+  const [playlistsRaw, links] = await Promise.all([
+    db.playlists.toArray(),
+    db.playlistSongs.toArray(),
+  ]);
+  const linksByPlaylist = new Map();
+  for (const link of links) {
+    if (!link.playlistKey || !link.songKey || excluded.has(link.playlistKey)) continue;
+    if (!linksByPlaylist.has(link.playlistKey)) linksByPlaylist.set(link.playlistKey, []);
+    linksByPlaylist.get(link.playlistKey).push(link.songKey);
+  }
+  return playlistsRaw
+    .filter(playlist => playlist.playlistKey && !excluded.has(playlist.playlistKey))
+    .map(playlist => ({
+      playlistKey: playlist.playlistKey,
+      name: playlist.name,
+      source: playlist.source || 'sisic',
+      songKeys: [...new Set(linksByPlaylist.get(playlist.playlistKey) || [])],
+      updatedAt: playlist.updatedAt || new Date().toISOString(),
+    }))
+    .filter(playlist => playlist.songKeys.length > 0)
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function syncDownloadJobsToDb(jobs = []) {

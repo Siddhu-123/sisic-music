@@ -1,4 +1,11 @@
-import { asSongRecord, canonicalAudioFilename, getSongKey, jobFilePrefix } from '../songIdentity';
+import {
+  asSongRecord,
+  canonicalAudioFilename,
+  compareSongSimilarity,
+  findSimilarSongMatch,
+  getSongKey,
+  jobFilePrefix,
+} from '../songIdentity';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly',
@@ -8,9 +15,30 @@ const SCOPES = [
 const TOKEN_STORAGE_KEY = 'sisic_access_token';
 const EXPIRY_STORAGE_KEY = 'sisic_token_expiry';
 const JOB_MIME_TYPE = 'application/json';
+const SONG_INDEX_FILENAME = 'sisic-songs.json';
+const QUEUE_INDEX_FILENAME = 'sisic-queue.json';
+const DELETED_INDEX_FILENAME = 'sisic-deleted.json';
+const PLAYLIST_INDEX_FILENAME = 'sisic-playlists.json';
+const PLAYBACK_LOG_FILENAME = 'sisic-playback-log.json';
+const CLIENT_INSTANCE_STORAGE_KEY = 'sisic_client_instance_id';
+const MAX_PLAYBACK_LOGS = 200;
 const JOB_FILE_FIELDS = 'files(id,name,modifiedTime,appProperties)';
-const AUDIO_FILE_FIELDS = 'files(id,name,mimeType,size,appProperties)';
+const AUDIO_FILE_FIELDS = 'files(id,name,mimeType,size,modifiedTime,appProperties)';
 const FILE_METADATA_FIELDS = 'id,name,mimeType,size,appProperties';
+
+function getClientInstanceId() {
+  try {
+    const existing = localStorage.getItem(CLIENT_INSTANCE_STORAGE_KEY);
+    if (existing) return existing;
+    const next = `web-${crypto.randomUUID()}`;
+    localStorage.setItem(CLIENT_INSTANCE_STORAGE_KEY, next);
+    return next;
+  } catch {
+    return 'web';
+  }
+}
+
+const CLIENT_INSTANCE_ID = getClientInstanceId();
 
 function escapeDriveQuery(value = '') {
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -42,11 +70,83 @@ function firstAudioFile(files = []) {
   return files.find(isAudioFileMetadata) || null;
 }
 
+function inferSongPartsFromFilename(name = '') {
+  const withoutExt = String(name || '').replace(/\.[^.]+$/, '');
+  const [artist = '', ...trackParts] = withoutExt.split(' - ');
+  return {
+    artist: artist.trim() || 'Unknown Artist',
+    track: trackParts.join(' - ').trim() || withoutExt.trim() || 'Unknown Track',
+  };
+}
+
+function normalizeSongIndexEntry(file = {}, item = null) {
+  const appProperties = file.appProperties || {};
+  const inferred = inferSongPartsFromFilename(file.name);
+  const normalizedItem = item ? asSongRecord(item) : null;
+  const artist = normalizedItem?.artist || appProperties.sisicArtist || inferred.artist;
+  const track = normalizedItem?.track || appProperties.sisicTrack || inferred.track;
+  const songKey = normalizedItem?.songKey || appProperties.sisicSongKey || getSongKey({ artist, track });
+  return {
+    songKey,
+    artist,
+    track,
+    album: normalizedItem?.album || appProperties.sisicAlbum || file.album || '',
+    filename: file.name || canonicalAudioFilename({ artist, track }),
+    driveFileId: file.id || file.driveFileId || '',
+    mimeType: file.mimeType || 'audio/mpeg',
+    size: Number(file.size || 0),
+    modifiedTime: file.modifiedTime || '',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeQueueIndexJob(job = {}) {
+  return normalizeJob(job) || null;
+}
+
+function indexBody(type, values, previous = {}) {
+  return {
+    schemaVersion: 1,
+    revision: (Number(previous.revision) || 0) + 1,
+    updatedAt: new Date().toISOString(),
+    updatedBy: CLIENT_INSTANCE_ID,
+    [type]: values,
+  };
+}
+
+function normalizePlaylistIndexEntry(playlist = {}) {
+  const songKeys = Array.isArray(playlist.songKeys) ? playlist.songKeys.filter(Boolean) : [];
+  return {
+    playlistKey: playlist.playlistKey || '',
+    name: playlist.name || 'Untitled Playlist',
+    source: playlist.source || 'sisic',
+    songKeys: [...new Set(songKeys)],
+    updatedAt: playlist.updatedAt || new Date().toISOString(),
+  };
+}
+
+function normalizeDeletedEntry(songInput = {}, extra = {}) {
+  const song = asSongRecord(songInput);
+  return {
+    songKey: song.songKey,
+    artist: song.artist,
+    track: song.track,
+    album: song.album || '',
+    deletedAt: extra.deletedAt || new Date().toISOString(),
+    reason: extra.reason || 'ready-offload',
+    previousDriveFileId: extra.previousDriveFileId || song.driveFileId || '',
+  };
+}
+
 class GoogleDriveService {
   constructor() {
     this.tokenClient = null;
     this.accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) || null;
     this.tokenExpiry = Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || null;
+    this.jobCache = new Map();
+    this.indexFileCache = new Map();
+    this.songIndexCache = null;
+    this.queueIndexCache = null;
   }
 
   _persistToken(token, expiry) {
@@ -116,16 +216,26 @@ class GoogleDriveService {
   }
 
   async driveList(query, fields = JOB_FILE_FIELDS, pageSize = 100) {
-    const params = new URLSearchParams({
-      q: query,
-      fields,
-      pageSize: String(pageSize),
-      supportsAllDrives: 'true',
-      includeItemsFromAllDrives: 'true',
-    });
-    const resp = await this.driveGet(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, 'Drive file list');
-    const data = await resp.json();
-    return data.files || [];
+    const allFiles = [];
+    let pageToken = '';
+    const requestedFields = fields.includes('nextPageToken') ? fields : `nextPageToken,${fields}`;
+
+    do {
+      const params = new URLSearchParams({
+        q: query,
+        fields: requestedFields,
+        pageSize: String(pageSize),
+        supportsAllDrives: 'true',
+        includeItemsFromAllDrives: 'true',
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const resp = await this.driveGet(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, 'Drive file list');
+      const data = await resp.json();
+      allFiles.push(...(data.files || []));
+      pageToken = data.nextPageToken || '';
+    } while (pageToken);
+
+    return allFiles;
   }
 
   async fetchSpotifyLibrary(fileId) {
@@ -134,6 +244,350 @@ class GoogleDriveService {
       'Spotify library file'
     );
     return await resp.json();
+  }
+
+  async fetchStorageQuota() {
+    try {
+      const resp = await this.driveGet(
+        'https://www.googleapis.com/drive/v3/about?fields=storageQuota',
+        'Drive storage quota'
+      );
+      const data = await resp.json();
+      const quota = data.storageQuota || {};
+      return {
+        limitBytes: Number(quota.limit || 0),
+        usageBytes: Number(quota.usage || 0),
+        usageInDriveBytes: Number(quota.usageInDrive || 0),
+        usageInDriveTrashBytes: Number(quota.usageInDriveTrash || 0),
+      };
+    } catch (error) {
+      console.warn('Drive storage quota unavailable:', error);
+      return null;
+    }
+  }
+
+  async findJsonIndexFile(folderId, filename) {
+    const cacheKey = `${folderId}:${filename}`;
+    const cached = this.indexFileCache.get(cacheKey);
+    if (cached) return cached;
+
+    const escapedFolder = escapeDriveQuery(folderId);
+    const escapedName = escapeDriveQuery(filename);
+    const q = `name='${escapedName}' and '${escapedFolder}' in parents and trashed=false`;
+    const files = await this.driveList(q, 'files(id,name,modifiedTime,appProperties)', 10);
+    const file = files[0] || null;
+    if (file) this.indexFileCache.set(cacheKey, file);
+    return file;
+  }
+
+  async createJsonIndexFile(folderId, filename, body) {
+    const metadata = {
+      name: filename,
+      parents: [folderId],
+      mimeType: JOB_MIME_TYPE,
+      appProperties: {
+        sisicIndex: 'true',
+        sisicIndexName: filename,
+      },
+    };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
+    form.append('file', new Blob([JSON.stringify(body, null, 2)], { type: JOB_MIME_TYPE }));
+    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`Drive index create failed: ${resp.status} ${await resp.text()}`);
+    const file = await resp.json();
+    this.indexFileCache.set(`${folderId}:${filename}`, file);
+    return file;
+  }
+
+  async updateJsonIndexFile(fileId, body) {
+    const params = new URLSearchParams({
+      uploadType: 'media',
+      fields: 'id,name,modifiedTime,appProperties',
+      supportsAllDrives: 'true',
+    });
+    const resp = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        'Content-Type': JOB_MIME_TYPE,
+      },
+      body: JSON.stringify(body, null, 2),
+    });
+    if (!resp.ok) throw new Error(`Drive index update failed: ${resp.status} ${await resp.text()}`);
+    return await resp.json();
+  }
+
+  async readJsonIndex(folderId, filename, defaultBody = {}) {
+    const file = await this.findJsonIndexFile(folderId, filename);
+    if (!file) return defaultBody;
+    return await this.readJsonFile(file.id, filename);
+  }
+
+  async writeJsonIndex(folderId, filename, body) {
+    const file = await this.findJsonIndexFile(folderId, filename);
+    if (!file) {
+      return await this.createJsonIndexFile(folderId, filename, body);
+    }
+    const updatedFile = await this.updateJsonIndexFile(file.id, body);
+    this.indexFileCache.set(`${folderId}:${filename}`, updatedFile);
+    return updatedFile;
+  }
+
+  async mutateJsonIndex(folderId, filename, key, defaultValues, mutator) {
+    const current = await this.readJsonIndex(folderId, filename, indexBody(key, defaultValues || []));
+    const currentValues = Array.isArray(current[key]) ? current[key] : [];
+    const nextValues = await mutator([...currentValues], current);
+    const body = indexBody(key, Array.isArray(nextValues) ? nextValues : [], current);
+    await this.writeJsonIndex(folderId, filename, body);
+    if (filename === SONG_INDEX_FILENAME) this.songIndexCache = body;
+    if (filename === QUEUE_INDEX_FILENAME) this.queueIndexCache = body;
+    return body;
+  }
+
+  async trashFile(fileId) {
+    if (!fileId) throw new Error('Missing Drive file ID.');
+    const params = new URLSearchParams({
+      fields: 'id,name,trashed',
+      supportsAllDrives: 'true',
+    });
+    const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ trashed: true }),
+    });
+    if (!resp.ok) throw new Error(`Drive file trash failed: ${resp.status} ${await resp.text()}`);
+    return await resp.json();
+  }
+
+  async listAudioFiles(folderId) {
+    const escapedFolder = escapeDriveQuery(folderId);
+    const q = `'${escapedFolder}' in parents and trashed=false`;
+    const files = await this.driveList(q, AUDIO_FILE_FIELDS, 100);
+    return files.filter(isAudioFileMetadata);
+  }
+
+  async syncSongIndex(folderId) {
+    const audioFiles = await this.listAudioFiles(folderId);
+    const songs = audioFiles.map(normalizeSongIndexEntry).sort((a, b) => a.songKey.localeCompare(b.songKey));
+    const previous = await this.readJsonIndex(folderId, SONG_INDEX_FILENAME, indexBody('songs', []));
+    const body = indexBody('songs', songs, previous);
+    await this.writeJsonIndex(folderId, SONG_INDEX_FILENAME, body);
+    this.songIndexCache = body;
+    return body;
+  }
+
+  async readSongIndex(folderId) {
+    if (this.songIndexCache) return this.songIndexCache;
+    const body = await this.readJsonIndex(folderId, SONG_INDEX_FILENAME, indexBody('songs', []));
+    this.songIndexCache = {
+      ...body,
+      songs: Array.isArray(body.songs) ? body.songs : [],
+    };
+    return this.songIndexCache;
+  }
+
+  async findSongInIndex(song, folderId, { allowSimilarity = true } = {}) {
+    const index = await this.readSongIndex(folderId);
+    const songKey = getSongKey(song);
+    const found = index.songs.find(entry => entry.songKey === songKey && entry.driveFileId);
+    let matched = found;
+    let similarity = null;
+
+    if (!matched && allowSimilarity) {
+      const match = findSimilarSongMatch(song, index.songs.filter(entry => entry.driveFileId), 'medium');
+      if (match) {
+        matched = match.song;
+        similarity = match.similarity;
+      }
+    }
+
+    if (!matched) return null;
+    return {
+      id: matched.driveFileId,
+      name: matched.filename,
+      mimeType: matched.mimeType || 'audio/mpeg',
+      size: matched.size,
+      modifiedTime: matched.modifiedTime,
+      similarity,
+      appProperties: {
+        sisicAudio: 'true',
+        sisicSongKey: matched.songKey,
+        sisicArtist: matched.artist,
+        sisicTrack: matched.track,
+      },
+    };
+  }
+
+  async confirmSongIndexMatch(folderId, songInput, matchedFile) {
+    const song = asSongRecord(songInput);
+    const entry = normalizeSongIndexEntry({
+      id: matchedFile.id || matchedFile.driveFileId,
+      name: matchedFile.name || matchedFile.filename || canonicalAudioFilename(song),
+      mimeType: matchedFile.mimeType || 'audio/mpeg',
+      size: matchedFile.size || 0,
+      modifiedTime: matchedFile.modifiedTime || '',
+      appProperties: matchedFile.appProperties || {},
+    }, song);
+    entry.confirmedMatch = true;
+    entry.matchUpdatedAt = new Date().toISOString();
+    const body = await this.mutateJsonIndex(folderId, SONG_INDEX_FILENAME, 'songs', [], songs => {
+      const byKey = new Map(songs.filter(item => item.songKey).map(item => [item.songKey, item]));
+      byKey.set(song.songKey, entry);
+      return [...byKey.values()].sort((a, b) => a.songKey.localeCompare(b.songKey));
+    });
+    return body.songs.find(item => item.songKey === song.songKey) || entry;
+  }
+
+  async syncQueueIndexFromJobFiles(folderId) {
+    const jobs = await this.listDownloadJobFiles(folderId);
+    const previous = await this.readJsonIndex(folderId, QUEUE_INDEX_FILENAME, indexBody('jobs', []));
+    const body = indexBody('jobs', jobs.map(normalizeQueueIndexJob).filter(Boolean), previous);
+    await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
+    this.queueIndexCache = body;
+    return body.jobs;
+  }
+
+  async readQueueIndex(folderId) {
+    const body = await this.readJsonIndex(folderId, QUEUE_INDEX_FILENAME, indexBody('jobs', []));
+    this.queueIndexCache = {
+      ...body,
+      jobs: Array.isArray(body.jobs) ? body.jobs : [],
+    };
+    return this.queueIndexCache;
+  }
+
+  async upsertQueueIndexJob(folderId, job) {
+    const current = await this.readQueueIndex(folderId);
+    const normalized = normalizeQueueIndexJob(job);
+    if (!normalized) return current;
+    const jobsById = new Map(current.jobs.map(item => [item.jobId, item]));
+    jobsById.set(normalized.jobId, normalized);
+    const body = indexBody('jobs', [...jobsById.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))), current);
+    await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
+    this.queueIndexCache = body;
+    return body;
+  }
+
+  async ensureDeletedIndex(folderId) {
+    return await this.readJsonIndex(folderId, DELETED_INDEX_FILENAME, indexBody('deleted', []));
+  }
+
+  async readDeletedIndex(folderId) {
+    const body = await this.ensureDeletedIndex(folderId);
+    return {
+      ...body,
+      deleted: Array.isArray(body.deleted) ? body.deleted : [],
+    };
+  }
+
+  findDeletedMatch(songInput, deleted = [], minimumConfidence = 'high') {
+    const song = asSongRecord(songInput);
+    const exact = deleted.find(item => item.songKey === song.songKey);
+    if (exact) {
+      return { deleted: exact, similarity: compareSongSimilarity(song, exact) };
+    }
+    const match = findSimilarSongMatch(song, deleted, minimumConfidence);
+    return match ? { deleted: match.song, similarity: match.similarity } : null;
+  }
+
+  async addDeletedSong(folderId, songInput, extra = {}) {
+    const entry = normalizeDeletedEntry(songInput, extra);
+    const body = await this.mutateJsonIndex(folderId, DELETED_INDEX_FILENAME, 'deleted', [], deleted => {
+      const byKey = new Map(deleted.filter(item => item.songKey).map(item => [item.songKey, item]));
+      byKey.set(entry.songKey, entry);
+      return [...byKey.values()].sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || '')));
+    });
+    return body.deleted.find(item => item.songKey === entry.songKey) || entry;
+  }
+
+  async removeDeletedSong(folderId, songInput) {
+    const song = asSongRecord(songInput);
+    const body = await this.mutateJsonIndex(folderId, DELETED_INDEX_FILENAME, 'deleted', [], deleted => (
+      deleted.filter(item => item.songKey !== song.songKey && compareSongSimilarity(song, item).confidence !== 'high')
+    ));
+    return body.deleted;
+  }
+
+  async deleteReadySong(folderId, songInput) {
+    const song = asSongRecord(songInput);
+    const previousDriveFileId = song.driveFileId;
+    if (!previousDriveFileId) throw new Error('This Ready song does not have a Drive file ID.');
+    await this.trashFile(previousDriveFileId);
+    await this.mutateJsonIndex(folderId, SONG_INDEX_FILENAME, 'songs', [], songs => (
+      songs.filter(item => item.songKey !== song.songKey && item.driveFileId !== previousDriveFileId)
+    ));
+    return await this.addDeletedSong(folderId, song, {
+      previousDriveFileId,
+      reason: 'ready-offload',
+    });
+  }
+
+  async readPlaylistIndex(folderId) {
+    const body = await this.readJsonIndex(folderId, PLAYLIST_INDEX_FILENAME, indexBody('playlists', []));
+    return {
+      ...body,
+      playlists: Array.isArray(body.playlists) ? body.playlists.map(normalizePlaylistIndexEntry) : [],
+    };
+  }
+
+  async writePlaylistIndex(folderId, playlists = []) {
+    const normalized = playlists.map(normalizePlaylistIndexEntry).filter(playlist => playlist.playlistKey && playlist.songKeys.length > 0);
+    return await this.mutateJsonIndex(folderId, PLAYLIST_INDEX_FILENAME, 'playlists', [], () => normalized);
+  }
+
+  async appendPlaybackLog(folderId, event = {}) {
+    const logEntry = {
+      id: crypto.randomUUID(),
+      eventType: event.eventType || 'playback-event',
+      songKey: event.songKey || '',
+      artist: event.artist || '',
+      track: event.track || '',
+      driveFileId: event.driveFileId || '',
+      positionSeconds: Number(event.positionSeconds || 0),
+      durationSeconds: Number(event.durationSeconds || 0),
+      expectedFullPlay: Boolean(event.expectedFullPlay),
+      userInitiated: Boolean(event.userInitiated),
+      message: event.message || '',
+      createdAt: new Date().toISOString(),
+      createdBy: CLIENT_INSTANCE_ID,
+    };
+    try {
+      await this.mutateJsonIndex(folderId, PLAYBACK_LOG_FILENAME, 'events', [], events => (
+        [logEntry, ...events].slice(0, MAX_PLAYBACK_LOGS)
+      ));
+    } catch (error) {
+      console.warn('Playback log write failed:', error);
+    }
+    return logEntry;
+  }
+
+  async loadDriveIndexes(folderId) {
+    const [songs, queue, deleted, playlists, quota] = await Promise.all([
+      this.readSongIndex(folderId),
+      this.readQueueIndex(folderId),
+      this.readDeletedIndex(folderId),
+      this.readPlaylistIndex(folderId),
+      this.fetchStorageQuota(),
+    ]);
+    return {
+      songs: songs.songs || [],
+      jobs: queue.jobs || [],
+      deleted: deleted.deleted || [],
+      playlists: playlists.playlists || [],
+      quota,
+    };
+  }
+
+  async syncDriveIndexes(folderId) {
+    return await this.loadDriveIndexes(folderId);
   }
 
   async getAudioFileMetadata(fileId) {
@@ -159,6 +613,9 @@ class GoogleDriveService {
     const song = typeof songOrTitle === 'object'
       ? asSongRecord(songOrTitle)
       : asSongRecord({ track: songOrTitle, artist: maybeArtist });
+    const indexed = await this.findSongInIndex(song, folderId);
+    if (indexed) return indexed;
+
     const songKey = getSongKey(song);
     const escapedFolder = escapeDriveQuery(folderId);
     const escapedKey = escapeDriveQuery(songKey);
@@ -199,16 +656,25 @@ class GoogleDriveService {
     return await resp.json();
   }
 
-  async listDownloadJobs(folderId) {
+  async listDownloadJobFiles(folderId) {
     const escapedFolder = escapeDriveQuery(folderId);
     const q = `name contains 'sisic-job-' and '${escapedFolder}' in parents and trashed=false`;
     const files = await this.driveList(q, JOB_FILE_FIELDS, 100);
     const jobs = [];
     for (const file of files) {
+      const cached = this.jobCache.get(file.id);
+      if (cached?.modifiedTime === file.modifiedTime) {
+        jobs.push(cached.job);
+        continue;
+      }
+
       try {
         const content = await this.readJsonFile(file.id, 'Drive job file');
         const job = normalizeJob(content, file);
-        if (job) jobs.push(job);
+        if (job) {
+          this.jobCache.set(file.id, { modifiedTime: file.modifiedTime, job });
+          jobs.push(job);
+        }
       } catch (error) {
         console.error('Failed to read Drive job file:', file.name, error);
       }
@@ -216,8 +682,22 @@ class GoogleDriveService {
     return jobs.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
+  async listDownloadJobs(folderId) {
+    const index = await this.readQueueIndex(folderId);
+    if (Array.isArray(index.jobs)) {
+      return index.jobs.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    }
+    return [];
+  }
+
   async findDownloadJob(song, folderId) {
     const songKey = getSongKey(song);
+    const queueIndex = await this.readQueueIndex(folderId);
+    const indexed = [...(queueIndex.jobs || [])]
+      .filter(job => job.songKey === songKey)
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0];
+    if (indexed) return indexed;
+
     const escapedFolder = escapeDriveQuery(folderId);
     const escapedKey = escapeDriveQuery(songKey);
     const q = [
@@ -256,7 +736,7 @@ class GoogleDriveService {
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
     form.append('file', new Blob([content], { type: JOB_MIME_TYPE }));
-    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,appProperties', {
+    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.accessToken}` },
       body: form,
@@ -265,11 +745,42 @@ class GoogleDriveService {
       throw new Error(`Drive job create failed: ${resp.status} ${await resp.text()}`);
     }
     const file = await resp.json();
-    return normalizeJob(job, file);
+    const normalized = normalizeJob(job, file);
+    if (normalized?.jobFileId) {
+      this.jobCache.set(normalized.jobFileId, {
+        modifiedTime: normalized.updatedAt,
+        job: normalized,
+      });
+    }
+    return normalized;
   }
 
-  async requestSongDownload(songInput, folderId, sourceUrl = '') {
+  async requestSongDownload(songInput, folderId, sourceUrl = '', options = {}) {
     const song = asSongRecord(songInput);
+    const { auto = false, allowRedownload = false } = options;
+    const deletedIndex = await this.readDeletedIndex(folderId);
+    const deletedMatch = this.findDeletedMatch(song, deletedIndex.deleted, 'high');
+    if (deletedMatch && !allowRedownload) {
+      return {
+        queued: false,
+        alreadyQueued: false,
+        blocked: true,
+        deleted: deletedMatch.deleted,
+        job: {
+          jobId: `deleted-${song.songKey}`,
+          songKey: song.songKey,
+          artist: song.artist,
+          track: song.track,
+          status: 'blocked',
+          lastError: 'This song was intentionally deleted from Drive.',
+          updatedAt: deletedMatch.deleted.deletedAt || new Date().toISOString(),
+        },
+      };
+    }
+    if (deletedMatch && allowRedownload) {
+      await this.removeDeletedSong(folderId, song);
+    }
+
     const existing = await this.findDownloadJob(song, folderId);
     if (existing && ['queued', 'downloading', 'done'].includes(existing.status)) {
       return { queued: false, alreadyQueued: existing.status !== 'done', job: existing };
@@ -291,8 +802,15 @@ class GoogleDriveService {
       updatedAt: now,
       uploadedFileId: '',
       sourceUrl,
+      requestedBy: auto ? 'playlist-readiness' : 'browser',
+      allowRedownload: Boolean(allowRedownload),
     };
     const created = await this.createJobFile(job, folderId);
+    try {
+      await this.upsertQueueIndexJob(folderId, created);
+    } catch (error) {
+      console.warn('Queued job was created, but queue index could not be updated by the browser:', error);
+    }
     return { queued: true, alreadyQueued: false, job: created };
   }
 }

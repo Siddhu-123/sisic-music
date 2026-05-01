@@ -1,17 +1,20 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Home, Search, Library, Music2, TrendingUp } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
+  addSongToPlaylist,
   cacheSongBlob,
   clearSongPlayable,
   enforceAudioCacheLimit,
   getCachedSongAudio,
   getLibrarySnapshot,
+  getPlaylistSnapshotForDrive,
   markSongPlayable,
   resetLocalDatabase,
   syncDownloadJobsToDb,
   touchSongPlayed,
+  syncPlaylistIndexToDb,
   upsertSongToDb,
 } from './db';
 import { driveService } from './services/GoogleDriveService';
@@ -21,15 +24,29 @@ import { PlayerBar, SongCard, LoginScreen, SyncBanner } from './components/Compo
 import { QueuePanel } from './components/QueuePanel';
 import { ToastContainer } from './components/Toast';
 import { useToast } from './hooks/useToast';
-import { asSongRecord, getSongKey } from './songIdentity';
+import { asSongRecord, getSongKey, normalizeText } from './songIdentity';
 import './App.css';
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], error: '' };
 const PAGE_SIZE = 50;
+const AUTO_QUEUE_LIMIT = 10;
+const LISTENING_HISTORY_KEY = 'listening history';
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
+}
+
+function formatBytes(bytes = 0) {
+  if (!bytes) return '0 MB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Number(bytes) || 0;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  return `${value >= 10 || unitIndex < 2 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function isPlayable(song) {
@@ -42,10 +59,28 @@ function mergeJob(song, jobBySongKey) {
 }
 
 function playableStatus(song) {
+  if (song?.isDeleted) return 'deleted';
   if (song?.isDownloaded) return 'offline';
   if (song?.isCached || song?.hasBlob) return 'cached';
   if (song?.driveFileId) return 'ready';
   return song?.downloadJob?.status || (song?.isCatalogueOnly ? 'catalogue' : 'missing');
+}
+
+function searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, jobBySongKey) {
+  if (!searchQuery || searchQuery.length < 2) return [];
+  const tokens = normalizeText(searchQuery).split(' ').filter(token => token.length >= 2);
+  if (tokens.length === 0) return [];
+  let matches = null;
+  for (const token of tokens) {
+    const keys = catalogueSearchIndex.tokenToKeys.get(token);
+    if (!keys) return [];
+    matches = matches ? new Set([...matches].filter(key => keys.has(key))) : new Set(keys);
+  }
+  return [...(matches || [])]
+    .map(key => catalogueSearchIndex.byKey.get(key))
+    .filter(Boolean)
+    .slice(0, 80)
+    .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
 }
 
 function App() {
@@ -61,9 +96,17 @@ function App() {
   const [showQueue, setShowQueue] = useState(false);
   const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
   const [catalogue, setCatalogue] = useState([]);
+  const [driveIndexSongs, setDriveIndexSongs] = useState([]);
+  const [driveDeletedSongs, setDriveDeletedSongs] = useState([]);
+  const [driveQuota, setDriveQuota] = useState(null);
+  const [showStoragePanel, setShowStoragePanel] = useState(false);
+  const [playlistPicker, setPlaylistPicker] = useState(null);
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
+  const autoQueuedSongKeysRef = useRef(new Set());
+  const activeQueueSongRef = useRef(null);
+  const queueRef = useRef([]);
   const resolvePlayableSongRef = useRef(null);
   const loadAndPlayRef = useRef(null);
   const playNextRef = useRef(null);
@@ -73,10 +116,13 @@ function App() {
     isPlaying,
     loadAndPlay,
     playNext,
+    playbackEvent,
     queue,
     queueIndex,
     setPlayerError,
   } = player;
+  const activeQueueSong = queue[queueIndex] || null;
+  const activeQueueSongKey = activeQueueSong?.songKey || activeQueueSong?.id || '';
 
   useEffect(() => {
     fetch(`${import.meta.env.BASE_URL}unique_songs.json`)
@@ -98,11 +144,24 @@ function App() {
       .catch(error => console.error('Failed to load search catalogue:', error));
   }, []);
 
+  useEffect(() => {
+    queueRef.current = queue;
+    activeQueueSongRef.current = activeQueueSong;
+  }, [activeQueueSong, queue]);
+
   const libraryData = useLiveQuery(getLibrarySnapshot, [], EMPTY_LIBRARY);
   const safeLibraryData = libraryData || EMPTY_LIBRARY;
   const allSongs = safeLibraryData.songs;
   const playlists = safeLibraryData.playlists;
   const localDbError = safeLibraryData.error;
+
+  const visiblePlaylists = useMemo(() => {
+    return playlists.filter(playlist => playlist.playlistKey !== LISTENING_HISTORY_KEY);
+  }, [playlists]);
+
+  const visiblePlaylistKeySet = useMemo(() => {
+    return new Set(visiblePlaylists.map(playlist => playlist.playlistKey));
+  }, [visiblePlaylists]);
 
   const jobBySongKey = useMemo(() => {
     const map = new Map();
@@ -129,25 +188,93 @@ function App() {
     return allSongs.filter(isPlayable).map(song => mergeJob(song, jobBySongKey));
   }, [allSongs, jobBySongKey]);
 
+  const driveSongKeySet = useMemo(() => {
+    return new Set(driveIndexSongs.map(song => song.songKey).filter(Boolean));
+  }, [driveIndexSongs]);
+
+  const deletedSongKeySet = useMemo(() => {
+    return new Set(driveDeletedSongs.map(song => song.songKey).filter(Boolean));
+  }, [driveDeletedSongs]);
+
+  const driveReadySongs = useMemo(() => {
+    return driveIndexSongs
+      .filter(song => song.songKey && song.driveFileId)
+      .map(indexedSong => {
+        const normalized = asSongRecord({
+          ...indexedSong,
+          track: indexedSong.track,
+          artist: indexedSong.artist,
+          driveFileId: indexedSong.driveFileId,
+        });
+        const local = allSongsByKey.get(normalized.songKey);
+        return mergeJob({
+          ...normalized,
+          ...local,
+          driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
+        }, jobBySongKey);
+      })
+      .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
+  }, [allSongsByKey, driveIndexSongs, jobBySongKey]);
+
+  const readyFolderSongs = useMemo(() => {
+    return driveReadySongs.filter(song => !song.playlistKeys?.some(key => visiblePlaylistKeySet.has(key)));
+  }, [driveReadySongs, visiblePlaylistKeySet]);
+
+  const missingRequiredSongs = useMemo(() => {
+    return allSongs
+      .filter(song => song.playlistKeys?.some(key => visiblePlaylistKeySet.has(key)))
+      .filter(song => !driveSongKeySet.has(song.songKey))
+      .filter(song => !deletedSongKeySet.has(song.songKey));
+  }, [allSongs, deletedSongKeySet, driveSongKeySet, visiblePlaylistKeySet]);
+
+  const deletedRequiredSongs = useMemo(() => {
+    return allSongs
+      .filter(song => song.playlistKeys?.some(key => visiblePlaylistKeySet.has(key)))
+      .filter(song => deletedSongKeySet.has(song.songKey));
+  }, [allSongs, deletedSongKeySet, visiblePlaylistKeySet]);
+
+  const driveFolderUsedBytes = useMemo(() => {
+    return driveIndexSongs.reduce((sum, song) => sum + (Number(song.size) || 0), 0);
+  }, [driveIndexSongs]);
+
+  const largestReadySongs = useMemo(() => {
+    return [...driveReadySongs]
+      .sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0))
+      .slice(0, 8);
+  }, [driveReadySongs]);
+
+  const catalogueSearchIndex = useMemo(() => {
+    const byKey = new Map();
+    const tokenToKeys = new Map();
+    for (const song of catalogue) {
+      byKey.set(song.songKey, song);
+      const tokens = new Set(normalizeText(`${song.artist} ${song.track}`).split(' ').filter(token => token.length >= 2));
+      for (const token of tokens) {
+        const prefixes = new Set([token]);
+        for (let length = 2; length <= Math.min(6, token.length); length++) prefixes.add(token.slice(0, length));
+        for (const prefix of prefixes) {
+          if (!tokenToKeys.has(prefix)) tokenToKeys.set(prefix, new Set());
+          tokenToKeys.get(prefix).add(song.songKey);
+        }
+      }
+    }
+    return { byKey, tokenToKeys };
+  }, [catalogue]);
+
   const searchResults = useMemo(() => {
-    if (!searchQuery || searchQuery.length < 2) return [];
-    const q = searchQuery.toLowerCase();
-    return catalogue
-      .filter(song => song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q))
-      .slice(0, 80)
-      .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
-  }, [catalogue, allSongsByKey, jobBySongKey, searchQuery]);
+    return searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, jobBySongKey);
+  }, [allSongsByKey, catalogueSearchIndex, jobBySongKey, searchQuery]);
 
   const selectedPlaylist = useMemo(() => {
-    return playlists.find(playlist => playlist.playlistKey === selectedPlaylistKey) || null;
-  }, [playlists, selectedPlaylistKey]);
+    return visiblePlaylists.find(playlist => playlist.playlistKey === selectedPlaylistKey) || null;
+  }, [visiblePlaylists, selectedPlaylistKey]);
 
   const librarySongs = useMemo(() => {
-    if (!selectedPlaylistKey) return availableSongs;
+    if (!selectedPlaylistKey) return readyFolderSongs;
     return allSongs
       .filter(song => song.playlistKeys?.includes(selectedPlaylistKey))
       .map(song => mergeJob(song, jobBySongKey));
-  }, [allSongs, selectedPlaylistKey, availableSongs, jobBySongKey]);
+  }, [allSongs, selectedPlaylistKey, readyFolderSongs, jobBySongKey]);
 
   // Track whether we have pending jobs that need polling
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
@@ -166,28 +293,83 @@ function App() {
   }, [isAuthenticated]);
 
   useEffect(() => {
-    if (!isAuthenticated) return undefined;
-    // Initial check — use setTimeout to avoid synchronous setState in effect body
-    const mountTimer = window.setTimeout(refreshDownloadJobs, 0);
-    // Only poll continuously if there are pending jobs
-    const interval = hasPendingJobs
-      ? window.setInterval(refreshDownloadJobs, 20000)
-      : undefined;
-    return () => {
-      window.clearTimeout(mountTimer);
-      if (interval) window.clearInterval(interval);
-    };
-  }, [isAuthenticated, refreshDownloadJobs, hasPendingJobs]);
+    if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
+    let cancelled = false;
 
-  const queueSongForDownload = useCallback(async (song) => {
+    const loadIndexes = async () => {
+      try {
+        const result = await driveService.loadDriveIndexes(DRIVE_FOLDER_ID);
+        if (cancelled) return;
+        setDriveIndexSongs(result.songs || []);
+        setDriveDeletedSongs(result.deleted || []);
+        setDriveQuota(result.quota || null);
+        await syncDownloadJobsToDb(result.jobs || []);
+        await syncPlaylistIndexToDb(result.playlists || []);
+        setHasPendingJobs((result.jobs || []).some(job => job.status === 'queued' || job.status === 'downloading'));
+      } catch (error) {
+        console.error('Drive index load failed:', error);
+      }
+    };
+
+    loadIndexes();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !hasPendingJobs) return undefined;
+    const interval = window.setInterval(refreshDownloadJobs, isPlaying ? 60000 : 20000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [isAuthenticated, refreshDownloadJobs, hasPendingJobs, isPlaying]);
+
+  const queueSongForDownload = useCallback(async (song, options = {}) => {
     if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
-    const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID);
+    const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, '', options);
     if (result.job) {
       await syncDownloadJobsToDb([result.job]);
-      setHasPendingJobs(true); // Start polling to track this job
+      if (!result.blocked) setHasPendingJobs(true); // Start polling to track this job
     }
     return result;
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated || missingRequiredSongs.length === 0) return undefined;
+    let cancelled = false;
+
+    const enqueueMissingPlaylistSongs = async () => {
+      const candidates = missingRequiredSongs
+        .filter(song => {
+          if (autoQueuedSongKeysRef.current.has(song.songKey)) return false;
+          const job = jobBySongKey.get(song.songKey);
+          return !['queued', 'downloading', 'done', 'blocked'].includes(job?.status);
+        })
+        .slice(0, isPlaying ? Math.min(5, AUTO_QUEUE_LIMIT) : AUTO_QUEUE_LIMIT);
+
+      if (candidates.length === 0) return;
+      let queuedCount = 0;
+      for (const song of candidates) {
+        if (cancelled) return;
+        autoQueuedSongKeysRef.current.add(song.songKey);
+        try {
+          const result = await queueSongForDownload(song, { auto: true });
+          if (result.queued) queuedCount++;
+        } catch (error) {
+          console.error('Playlist readiness queue failed:', song.songKey, error);
+        }
+      }
+      if (!cancelled && queuedCount > 0) {
+        addToast(`Queued ${queuedCount} missing playlist song${queuedCount === 1 ? '' : 's'}`);
+      }
+    };
+
+    enqueueMissingPlaylistSongs();
+    return () => {
+      cancelled = true;
+    };
+  }, [addToast, isAuthenticated, isPlaying, jobBySongKey, missingRequiredSongs, queueSongForDownload]);
 
   const ensureLocalSong = useCallback(async (song, playlistName = '') => {
     const normalized = asSongRecord(song);
@@ -225,7 +407,30 @@ function App() {
     if (DRIVE_FOLDER_ID) {
       const found = await driveService.findSongFile(resolved, DRIVE_FOLDER_ID);
       if (found) {
+        if (found.similarity?.confidence === 'medium') {
+          const confirmed = window.confirm(
+            `Use this Drive file for "${resolved.track}" by ${resolved.artist}?\n\nMatched file: ${found.name}\nConfidence: ${(found.similarity.score * 100).toFixed(0)}%`
+          );
+          if (!confirmed) return null;
+        }
+        if (found.similarity?.confidence && found.similarity.confidence !== 'exact') {
+          await driveService.confirmSongIndexMatch(DRIVE_FOLDER_ID, resolved, found);
+        }
         await markSongPlayable(resolved.songKey, found.id);
+        setDriveIndexSongs(prev => {
+          if (prev.some(item => item.songKey === resolved.songKey)) return prev;
+          return [...prev, {
+            songKey: resolved.songKey,
+            artist: resolved.artist,
+            track: resolved.track,
+            album: resolved.album || '',
+            driveFileId: found.id,
+            filename: found.name,
+            mimeType: found.mimeType || 'audio/mpeg',
+            size: Number(found.size || 0),
+            updatedAt: new Date().toISOString(),
+          }];
+        });
         return { ...resolved, driveFileId: found.id };
       }
     }
@@ -234,7 +439,9 @@ function App() {
       const result = await queueSongForDownload(resolved);
       const status = result.job?.status || 'queued';
       if (showToast) {
-        addToast(result.queued
+        addToast(result.blocked
+          ? `"${resolved.track}" was previously deleted. Use Download to restore it.`
+          : result.queued
           ? `Queued "${resolved.track}" for download`
           : `"${resolved.track}" is already ${status}`);
       }
@@ -252,8 +459,8 @@ function App() {
   }, [loadAndPlay, playNext, resolvePlayableSong, setPlayerError]);
 
   useEffect(() => {
-    if (queue.length === 0) return undefined;
-    const song = queue[queueIndex];
+    if (!activeQueueSongKey) return undefined;
+    const song = activeQueueSongRef.current;
     if (!song) return undefined;
 
     const requestId = ++playbackRequestRef.current;
@@ -268,7 +475,7 @@ function App() {
           return;
         }
         setPlayerErrorRef.current(`"${song.track}" is queued for download.`);
-        if (queue.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
+        if (queueRef.current.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
           window.setTimeout(() => {
             if (!cancelled && requestId === playbackRequestRef.current) {
               playNextRef.current({ avoidCurrent: true, stopOnBlocked: true });
@@ -286,7 +493,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [queue, queueIndex]);
+  }, [activeQueueSongKey, queueIndex]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -294,6 +501,15 @@ function App() {
     countedPlaybackRef.current.add(currentSongKey);
     touchSongPlayed(currentSongKey).catch(error => console.error('Play count update failed:', error));
   }, [currentSongKey, isPlaying]);
+
+  useEffect(() => {
+    if (!playbackEvent || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
+    if (playbackEvent.eventType === 'unexpected-playback-skip' || playbackEvent.eventType === 'playback-short-ended') {
+      console.warn('Playback anomaly:', playbackEvent);
+    }
+    driveService.appendPlaybackLog(DRIVE_FOLDER_ID, playbackEvent)
+      .catch(error => console.warn('Playback log write failed:', error));
+  }, [playbackEvent]);
 
   // Streaming is the default. Full audio downloads only happen through the explicit offline button.
 
@@ -308,6 +524,12 @@ function App() {
       if (resolved) {
         const updated = sourceSongs.map(item => item.songKey === selectedKey ? { ...item, ...resolved } : item);
         player.setQueueAndPlay(updated, startIdx);
+        return;
+      }
+
+      if (player.currentSong) {
+        const queuedSong = mergeJob(allSongsByKey.get(selectedKey) || sourceSongs[startIdx] || song, jobBySongKey);
+        player.enqueueNext(queuedSong);
         return;
       }
 
@@ -355,10 +577,17 @@ function App() {
         const blob = await driveService.downloadFileAsBlob(fileId);
         await cacheSongBlob(localSong.songKey, blob, fileId, { explicit: true });
         await enforceAudioCacheLimit(AUDIO_CACHE_LIMIT_BYTES);
+        if (deletedSongKeySet.has(localSong.songKey)) {
+          await driveService.removeDeletedSong(DRIVE_FOLDER_ID, localSong);
+          setDriveDeletedSongs(prev => prev.filter(item => item.songKey !== localSong.songKey));
+        }
         addToast(`"${localSong.track}" saved for offline`);
       } else {
-        const result = await queueSongForDownload(localSong);
-        addToast(result.queued
+        const result = await queueSongForDownload(localSong, { allowRedownload: true });
+        setDriveDeletedSongs(prev => prev.filter(item => item.songKey !== localSong.songKey));
+        addToast(result.blocked
+          ? `"${localSong.track}" is blocked by deleted history`
+          : result.queued
           ? `Queued "${localSong.track}" for download`
           : `"${localSong.track}" is already ${result.job?.status || 'queued'}`);
       }
@@ -374,7 +603,108 @@ function App() {
         return next;
       });
     }
-  }, [addToast, downloadingKeys, ensureLocalSong, queueSongForDownload]);
+  }, [addToast, deletedSongKeySet, downloadingKeys, ensureLocalSong, queueSongForDownload]);
+
+  const persistPlaylistIndex = useCallback(async () => {
+    if (!DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
+    const playlistsForDrive = await getPlaylistSnapshotForDrive({
+      excludePlaylistKeys: [LISTENING_HISTORY_KEY],
+    });
+    await driveService.writePlaylistIndex(DRIVE_FOLDER_ID, playlistsForDrive);
+  }, []);
+
+  const openPlaylistPicker = useCallback((song) => {
+    setPlaylistPicker({
+      song,
+      selectedKeys: [],
+      newPlaylistName: '',
+      busy: false,
+    });
+  }, []);
+
+  const handlePlaylistPickerConfirm = useCallback(async () => {
+    if (!playlistPicker?.song) return;
+    const selectedNames = visiblePlaylists
+      .filter(playlist => playlistPicker.selectedKeys.includes(playlist.playlistKey))
+      .map(playlist => playlist.name);
+    const newName = playlistPicker.newPlaylistName.trim();
+    const targetNames = [...selectedNames, ...(newName ? [newName] : [])];
+
+    if (targetNames.length === 0) {
+      addToast('Choose at least one playlist');
+      return;
+    }
+
+    setPlaylistPicker(prev => prev ? { ...prev, busy: true } : prev);
+    try {
+      const localSong = await ensureLocalSong(playlistPicker.song, '');
+      for (const playlistName of targetNames) {
+        await addSongToPlaylist(localSong, playlistName, 'sisic');
+      }
+      await persistPlaylistIndex();
+      if (!localSong.driveFileId && !driveSongKeySet.has(localSong.songKey)) {
+        const result = await queueSongForDownload(localSong, { allowRedownload: deletedSongKeySet.has(localSong.songKey) });
+        if (result.queued) addToast(`Queued "${localSong.track}" for download`);
+      }
+      setPlaylistPicker(null);
+      addToast(`Added "${localSong.track}" to ${targetNames.length} playlist${targetNames.length === 1 ? '' : 's'}`);
+    } catch (error) {
+      console.error('Playlist update failed:', error);
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+      setPlaylistPicker(prev => prev ? { ...prev, busy: false } : prev);
+    }
+  }, [
+    addToast,
+    deletedSongKeySet,
+    driveSongKeySet,
+    ensureLocalSong,
+    persistPlaylistIndex,
+    playlistPicker,
+    queueSongForDownload,
+    visiblePlaylists,
+  ]);
+
+  const handleDeleteReadySong = useCallback(async (song) => {
+    if (!DRIVE_FOLDER_ID) {
+      setActionError('Missing required config: VITE_DRIVE_FOLDER_ID.');
+      return;
+    }
+    const confirmed = window.confirm(`Delete "${song.track}" from Drive and keep it in deleted history?`);
+    if (!confirmed) return;
+
+    try {
+      const deletedEntry = await driveService.deleteReadySong(DRIVE_FOLDER_ID, song);
+      await clearSongPlayable(song.songKey);
+      setDriveIndexSongs(prev => prev.filter(item => item.songKey !== song.songKey && item.driveFileId !== song.driveFileId));
+      setDriveDeletedSongs(prev => {
+        const next = prev.filter(item => item.songKey !== deletedEntry.songKey);
+        return [deletedEntry, ...next];
+      });
+      if (player.currentSongKey === song.songKey) player.stop();
+      addToast(`Deleted "${song.track}" from Drive`);
+    } catch (error) {
+      console.error('Ready delete failed:', error);
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
+  }, [addToast, player]);
+
+  const handleReconcileDriveIndex = useCallback(async () => {
+    if (!DRIVE_FOLDER_ID) return;
+    try {
+      const result = await driveService.syncSongIndex(DRIVE_FOLDER_ID);
+      setDriveIndexSongs(result.songs || []);
+      addToast(`Reconciled ${result.songs?.length || 0} Drive songs`);
+    } catch (error) {
+      console.error('Drive reconciliation failed:', error);
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
+  }, [addToast]);
 
   const handleResetLocalCache = useCallback(async () => {
     const confirmed = window.confirm(
@@ -402,7 +732,7 @@ function App() {
   const navItems = [
     { id: VIEWS.HOME, icon: Home, label: 'Home' },
     { id: VIEWS.SEARCH, icon: Search, label: 'Search' },
-    { id: VIEWS.LIBRARY, icon: Library, label: 'Library' },
+    { id: VIEWS.LIBRARY, icon: Library, label: 'Ready' },
   ];
 
   let displaySongs = [];
@@ -415,9 +745,12 @@ function App() {
   const renderSongCard = (song, list) => (
     <SongCard
       key={song.songKey}
-      song={{ ...song, status: playableStatus(song) }}
+      song={{ ...song, isDeleted: deletedSongKeySet.has(song.songKey), status: playableStatus({ ...song, isDeleted: deletedSongKeySet.has(song.songKey) }) }}
       onPlay={(selected) => handlePlaySong(selected, list)}
       onDownload={handleDownload}
+      onAddToPlaylist={openPlaylistPicker}
+      onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
+      isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
       isCurrentSong={player.currentSongKey === song.songKey}
       isDownloading={downloadingKeys.has(song.songKey)}
     />
@@ -443,11 +776,11 @@ function App() {
           ))}
         </nav>
 
-        {playlists.length > 0 && (
+        {visiblePlaylists.length > 0 && (
           <>
             <div className="sidebar__section-label">Playlists</div>
             <div>
-              {playlists.map(playlist => (
+              {visiblePlaylists.map(playlist => (
                 <button
                   key={playlist.playlistKey}
                   className={`playlist-item ${selectedPlaylistKey === playlist.playlistKey ? 'playlist-item--active' : ''}`}
@@ -471,17 +804,46 @@ function App() {
           onAction={localDbError ? handleResetLocalCache : undefined}
         />
 
+        <section className="drive-summary" aria-label="Drive storage summary">
+          <div>
+            <span className="drive-summary__label">Drive folder</span>
+            <strong>{formatBytes(driveFolderUsedBytes)}</strong>
+          </div>
+          <div>
+            <span className="drive-summary__label">Ready</span>
+            <strong>{driveIndexSongs.length.toLocaleString()} songs</strong>
+          </div>
+          <div className={missingRequiredSongs.length > 0 ? 'drive-summary__warn' : ''}>
+            <span className="drive-summary__label">Playlist coverage</span>
+            <strong>{missingRequiredSongs.length.toLocaleString()} missing</strong>
+          </div>
+          <div className={deletedRequiredSongs.length > 0 ? 'drive-summary__warn' : ''}>
+            <span className="drive-summary__label">Deleted history</span>
+            <strong>{driveDeletedSongs.length.toLocaleString()} songs</strong>
+          </div>
+          {driveQuota?.limitBytes > 0 && (
+            <div>
+              <span className="drive-summary__label">Account free</span>
+              <strong>{formatBytes(Math.max(0, driveQuota.limitBytes - driveQuota.usageBytes))}</strong>
+            </div>
+          )}
+          <button className="drive-summary__button" onClick={() => setShowStoragePanel(true)}>
+            <BarChart3 size={16} />
+            <span>Storage</span>
+          </button>
+        </section>
+
         {view === VIEWS.HOME && (
           <>
             <header className="main-view__header">
               <h1 className="main-view__title">Good evening</h1>
             </header>
 
-            {playlists.length > 0 && (
+            {visiblePlaylists.length > 0 && (
               <section className="home-section">
                 <h2 className="home-section__title">Your Playlists</h2>
                 <div className="playlist-grid">
-                  {playlists.filter(playlist => playlist.name !== 'Listening History').slice(0, 12).map(playlist => {
+                  {visiblePlaylists.slice(0, 12).map(playlist => {
                     const hue = playlist.name.charCodeAt(0) % 360;
                     return (
                       <button
@@ -575,7 +937,7 @@ function App() {
         {view === VIEWS.LIBRARY && (
           <>
             <header className="main-view__header">
-              <h1 className="main-view__title">{selectedPlaylist?.name || 'Your Library'}</h1>
+              <h1 className="main-view__title">{selectedPlaylist?.name || 'Ready'}</h1>
               <div className="search-box">
                 <Search size={18} className="search-box__icon" />
                 <input
@@ -602,7 +964,7 @@ function App() {
                 <div className="empty-state">
                   <Music2 size={48} color="var(--text-muted)" />
                   <h3>No songs</h3>
-                  <p>{selectedPlaylist ? 'This playlist is empty' : 'No playable songs yet'}</p>
+                  <p>{selectedPlaylist ? 'This playlist is empty' : 'No Drive-ready loose songs yet'}</p>
                 </div>
               ) : (
                 <>
@@ -621,6 +983,92 @@ function App() {
           </>
         )}
       </main>
+
+      {showStoragePanel && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowStoragePanel(false)}>
+          <section className="storage-panel" role="dialog" aria-modal="true" aria-label="Storage dashboard" onClick={event => event.stopPropagation()}>
+            <div className="panel-header">
+              <h2>Storage</h2>
+              <button className="icon-btn" onClick={() => setShowStoragePanel(false)} aria-label="Close storage dashboard">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="storage-metrics">
+              <div><span>Folder used</span><strong>{formatBytes(driveFolderUsedBytes)}</strong></div>
+              <div><span>Account used</span><strong>{formatBytes(driveQuota?.usageBytes || 0)}</strong></div>
+              <div><span>Account free</span><strong>{driveQuota?.limitBytes ? formatBytes(Math.max(0, driveQuota.limitBytes - driveQuota.usageBytes)) : 'Unknown'}</strong></div>
+              <div><span>Ready loose</span><strong>{readyFolderSongs.length.toLocaleString()}</strong></div>
+              <div><span>Missing playlists</span><strong>{missingRequiredSongs.length.toLocaleString()}</strong></div>
+              <div><span>Deleted blocked</span><strong>{deletedRequiredSongs.length.toLocaleString()}</strong></div>
+            </div>
+            <div className="panel-actions">
+              <button className="panel-action-btn" onClick={handleReconcileDriveIndex}>
+                <RefreshCw size={16} />
+                <span>Reconcile</span>
+              </button>
+            </div>
+            {largestReadySongs.length > 0 && (
+              <div className="storage-list">
+                <h3>Largest Ready Songs</h3>
+                {largestReadySongs.map(song => (
+                  <div key={song.songKey} className="storage-list__row">
+                    <span>{song.track}</span>
+                    <em>{formatBytes(song.size)}</em>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {playlistPicker && (
+        <div className="modal-backdrop" role="presentation" onClick={() => !playlistPicker.busy && setPlaylistPicker(null)}>
+          <section className="playlist-picker" role="dialog" aria-modal="true" aria-label="Choose playlist" onClick={event => event.stopPropagation()}>
+            <div className="panel-header">
+              <h2>Playlist</h2>
+              <button className="icon-btn" onClick={() => setPlaylistPicker(null)} aria-label="Close playlist picker" disabled={playlistPicker.busy}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="playlist-picker__song">
+              <strong>{playlistPicker.song.track}</strong>
+              <span>{playlistPicker.song.artist}</span>
+            </div>
+            <div className="playlist-picker__list">
+              {visiblePlaylists.map(playlist => (
+                <label key={playlist.playlistKey} className="playlist-picker__option">
+                  <input
+                    type="checkbox"
+                    checked={playlistPicker.selectedKeys.includes(playlist.playlistKey)}
+                    onChange={event => {
+                      setPlaylistPicker(prev => {
+                        if (!prev) return prev;
+                        const selected = new Set(prev.selectedKeys);
+                        if (event.target.checked) selected.add(playlist.playlistKey);
+                        else selected.delete(playlist.playlistKey);
+                        return { ...prev, selectedKeys: [...selected] };
+                      });
+                    }}
+                  />
+                  <span>{playlist.name}</span>
+                </label>
+              ))}
+            </div>
+            <input
+              className="playlist-picker__new"
+              type="text"
+              placeholder="New playlist"
+              value={playlistPicker.newPlaylistName}
+              onChange={event => setPlaylistPicker(prev => prev ? { ...prev, newPlaylistName: event.target.value } : prev)}
+              disabled={playlistPicker.busy}
+            />
+            <button className="btn-primary playlist-picker__save" onClick={handlePlaylistPickerConfirm} disabled={playlistPicker.busy}>
+              {playlistPicker.busy ? 'Saving...' : 'Save'}
+            </button>
+          </section>
+        </div>
+      )}
 
       {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} />}
       <PlayerBar player={player} onToggleQueue={() => setShowQueue(open => !open)} />

@@ -55,11 +55,16 @@ function hasUsableCachedAudio(song) {
   );
 }
 
+function isQueueReady(song) {
+  return Boolean(song?.driveFileId || song?.isDownloaded || song?.isCached || song?.hasBlob);
+}
+
 function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys, avoidCurrent = false) {
   if (songs.length <= 1) return avoidCurrent ? -1 : 0;
 
   const weights = songs.map((song, i) => {
     if (i === currentIndex) return 0;
+    if (!isQueueReady(song)) return 0;
     if (song.songKey && failedSongKeys.has(song.songKey)) return 0;
     const playCount = song.playCount || 0;
     let weight = 1 + Math.log(1 + playCount);
@@ -84,9 +89,9 @@ function nextUnfailedIndex(songs, currentIndex, failedSongKeys, avoidCurrent = f
   for (let step = 1; step <= maxSteps; step++) {
     const next = (currentIndex + step) % songs.length;
     const key = songs[next]?.songKey;
-    if (!key || !failedSongKeys.has(key)) return next;
+    if (isQueueReady(songs[next]) && (!key || !failedSongKeys.has(key))) return next;
   }
-  return avoidCurrent ? -1 : currentIndex;
+  return isQueueReady(songs[currentIndex]) && !avoidCurrent ? currentIndex : -1;
 }
 
 function shuffleArray(arr) {
@@ -96,6 +101,10 @@ function shuffleArray(arr) {
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
   return shuffled;
+}
+
+function queueItemKey(song) {
+  return song?.songKey || song?.id || null;
 }
 
 export function useAudioPlayer() {
@@ -109,11 +118,20 @@ export function useAudioPlayer() {
   const [volume, setVolume] = useState(1);
   const [error, setError] = useState('');
   const [shuffleMode, setShuffleMode] = useState('off');
+  const [playbackEvent, setPlaybackEvent] = useState(null);
   const blobUrlRef = useRef(null);
   const playedInSessionRef = useRef(new Set());
   const failedSongKeysRef = useRef(new Set());
   const originalQueueRef = useRef([]);
   const loadRequestRef = useRef(0);
+
+  const emitPlaybackEvent = useCallback((event) => {
+    setPlaybackEvent({
+      ...event,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      createdAt: new Date().toISOString(),
+    });
+  }, []);
 
   const clearSource = useCallback(() => {
     loadRequestRef.current += 1;
@@ -196,15 +214,43 @@ export function useAudioPlayer() {
     } catch (e) {
       if (e.name !== 'AbortError') {
         console.error('Playback error:', e);
+        emitPlaybackEvent({
+          eventType: 'playback-start-failed',
+          songKey: song.songKey || '',
+          artist: song.artist || '',
+          track: song.track || '',
+          driveFileId: song.driveFileId || '',
+          positionSeconds: Number(audio.currentTime || 0),
+          durationSeconds: Number(audio.duration || 0),
+          expectedFullPlay: false,
+          userInitiated: false,
+          message: e instanceof Error ? e.message : 'Playback failed.',
+        });
         setError(e instanceof Error ? e.message : 'Playback failed.');
       }
       return false;
     }
-  }, [clearSource, volume]);
+  }, [clearSource, emitPlaybackEvent, volume]);
 
   const playNext = useCallback((options = {}) => {
     if (queue.length === 0) return false;
-    const { avoidCurrent = false, stopOnBlocked = false } = options;
+    const { avoidCurrent = false, stopOnBlocked = false, reason = 'auto-next' } = options;
+    const audio = audioRef.current;
+    const current = queue[queueIndex];
+    if (reason.startsWith('user') && current) {
+      emitPlaybackEvent({
+        eventType: 'user-skip',
+        songKey: current.songKey || '',
+        artist: current.artist || '',
+        track: current.track || '',
+        driveFileId: current.driveFileId || '',
+        positionSeconds: Number(audio.currentTime || 0),
+        durationSeconds: Number(audio.duration || 0),
+        expectedFullPlay: false,
+        userInitiated: true,
+        message: reason,
+      });
+    }
 
     let nextIdx;
     if (shuffleMode === 'smart') {
@@ -224,12 +270,29 @@ export function useAudioPlayer() {
 
     setQueueIndex(nextIdx);
     return true;
-  }, [clearSource, queue, queueIndex, shuffleMode]);
+  }, [clearSource, emitPlaybackEvent, queue, queueIndex, shuffleMode]);
 
-  const playPrev = useCallback(() => {
+  const playPrev = useCallback((options = {}) => {
     if (queue.length === 0) return;
+    const { reason = 'user-prev' } = options;
+    const audio = audioRef.current;
+    const current = queue[queueIndex];
+    if (current) {
+      emitPlaybackEvent({
+        eventType: 'user-skip',
+        songKey: current.songKey || '',
+        artist: current.artist || '',
+        track: current.track || '',
+        driveFileId: current.driveFileId || '',
+        positionSeconds: Number(audio.currentTime || 0),
+        durationSeconds: Number(audio.duration || 0),
+        expectedFullPlay: false,
+        userInitiated: true,
+        message: reason,
+      });
+    }
     setQueueIndex(i => (i - 1 + queue.length) % queue.length);
-  }, [queue.length]);
+  }, [emitPlaybackEvent, queue, queueIndex]);
 
   const toggleShuffle = useCallback(() => {
     setShuffleMode(prev => {
@@ -240,7 +303,9 @@ export function useAudioPlayer() {
         originalQueueRef.current = [...queue];
         const currentSongObj = queue[queueIndex];
         const rest = queue.filter((_, i) => i !== queueIndex);
-        setQueue([currentSongObj, ...shuffleArray(rest)]);
+        const readyRest = rest.filter(isQueueReady);
+        const blockedRest = rest.filter(song => !isQueueReady(song));
+        setQueue([currentSongObj, ...shuffleArray(readyRest), ...blockedRest]);
         setQueueIndex(0);
       } else if (next === 'off' && originalQueueRef.current.length > 0) {
         const currentSongObj = queue[queueIndex];
@@ -258,7 +323,26 @@ export function useAudioPlayer() {
     const audio = audioRef.current;
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
-    const onEnded = () => playNext();
+    const onEnded = () => {
+      const durationSeconds = Number(audio.duration || 0);
+      const positionSeconds = Number(audio.currentTime || 0);
+      const completed = !durationSeconds || positionSeconds >= Math.max(0, durationSeconds - 2);
+      if (currentSong) {
+        emitPlaybackEvent({
+          eventType: completed ? 'playback-complete' : 'playback-short-ended',
+          songKey: currentSong.songKey || '',
+          artist: currentSong.artist || '',
+          track: currentSong.track || '',
+          driveFileId: currentSong.driveFileId || '',
+          positionSeconds,
+          durationSeconds,
+          expectedFullPlay: completed,
+          userInitiated: false,
+          message: completed ? 'Audio ended normally.' : 'Audio ended before the expected duration.',
+        });
+      }
+      playNext({ reason: 'ended' });
+    };
     const onTimeUpdate = () => {
       if (audio.duration) setProgress((audio.currentTime / audio.duration) * 100);
     };
@@ -268,12 +352,33 @@ export function useAudioPlayer() {
       const key = currentSong?.songKey;
       const code = audio.error?.code;
       const msg = audio.error?.message || '';
-      console.error('Audio error:', { code, msg, songKey: key });
+      const payload = {
+        code,
+        msg,
+        songKey: key,
+        currentTime: Number(audio.currentTime || 0),
+        duration: Number(audio.duration || 0),
+      };
+      console.error('Audio error:', payload);
       setIsPlaying(false);
       if (key) failedSongKeysRef.current.add(key);
+      if (currentSong) {
+        emitPlaybackEvent({
+          eventType: 'unexpected-playback-skip',
+          songKey: currentSong.songKey || '',
+          artist: currentSong.artist || '',
+          track: currentSong.track || '',
+          driveFileId: currentSong.driveFileId || '',
+          positionSeconds: Number(audio.currentTime || 0),
+          durationSeconds: Number(audio.duration || 0),
+          expectedFullPlay: false,
+          userInitiated: false,
+          message: `Audio error ${code || 'unknown'} ${msg}`.trim(),
+        });
+      }
       setError('Stream failed for this song. Skipping to the next playable track.');
       window.setTimeout(() => {
-        playNext({ avoidCurrent: true, stopOnBlocked: true });
+        playNext({ avoidCurrent: true, stopOnBlocked: true, reason: 'stream-error' });
       }, 900);
     };
 
@@ -291,7 +396,7 @@ export function useAudioPlayer() {
       audio.removeEventListener('durationchange', onDurationChange);
       audio.removeEventListener('error', onError);
     };
-  }, [playNext, currentSong]);
+  }, [emitPlaybackEvent, playNext, currentSong]);
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
@@ -339,6 +444,42 @@ export function useAudioPlayer() {
     }
   }, [shuffleMode]);
 
+  const enqueueNext = useCallback((song) => {
+    if (!song) return false;
+    setError('');
+    if (song.songKey) failedSongKeysRef.current.delete(song.songKey);
+
+    if (queue.length === 0) {
+      setQueue([song]);
+      setQueueIndex(0);
+      return true;
+    }
+
+    const currentIdx = Math.min(queueIndex, queue.length - 1);
+    const currentKey = queueItemKey(queue[currentIdx]);
+    const selectedKey = queueItemKey(song);
+    const withoutDuplicate = queue.filter((item, index) => (
+      index === currentIdx || !selectedKey || queueItemKey(item) !== selectedKey
+    ));
+    const nextCurrentIdx = Math.max(0, withoutDuplicate.findIndex(item => queueItemKey(item) === currentKey));
+    const insertAt = Math.min(nextCurrentIdx + 1, withoutDuplicate.length);
+    setQueue([
+      ...withoutDuplicate.slice(0, insertAt),
+      song,
+      ...withoutDuplicate.slice(insertAt),
+    ]);
+    setQueueIndex(nextCurrentIdx);
+
+    if (originalQueueRef.current.length > 0) {
+      const originalWithoutDuplicate = originalQueueRef.current.filter(item => (
+        !selectedKey || queueItemKey(item) !== selectedKey
+      ));
+      originalQueueRef.current = [...originalWithoutDuplicate, song];
+    }
+
+    return true;
+  }, [queue, queueIndex]);
+
   return {
     audioRef,
     currentSong,
@@ -348,6 +489,7 @@ export function useAudioPlayer() {
     duration,
     volume,
     error,
+    playbackEvent,
     queue,
     queueIndex,
     shuffleMode,
@@ -360,6 +502,7 @@ export function useAudioPlayer() {
     stop,
     playNext,
     playPrev,
+    enqueueNext,
     setQueueAndPlay,
     toggleShuffle,
   };
