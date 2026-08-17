@@ -127,6 +127,28 @@ function normalizeQueueIndexJob(job = {}) {
   return normalizeJob(job) || null;
 }
 
+function mergeAudioFilesIntoSongIndex(indexedSongs = [], audioFiles = []) {
+  const songsByKey = new Map(indexedSongs.filter(song => song?.songKey).map(song => [song.songKey, song]));
+  for (const file of audioFiles) {
+    const normalized = normalizeSongIndexEntry(file);
+    if (!normalized.driveFileId || isUnknownSongKey(normalized.songKey)) continue;
+    const existing = songsByKey.get(normalized.songKey);
+    if (!existing) {
+      songsByKey.set(normalized.songKey, normalized);
+      continue;
+    }
+    songsByKey.set(normalized.songKey, {
+      ...existing,
+      driveFileId: normalized.driveFileId,
+      filename: normalized.filename || existing.filename,
+      mimeType: normalized.mimeType || existing.mimeType,
+      size: normalized.size || existing.size,
+      modifiedTime: normalized.modifiedTime || existing.modifiedTime,
+    });
+  }
+  return [...songsByKey.values()].sort((a, b) => a.songKey.localeCompare(b.songKey));
+}
+
 function indexBody(type, values, previous = {}) {
   return {
     schemaVersion: 1,
@@ -602,15 +624,21 @@ class GoogleDriveService {
   }
 
   async loadDriveIndexes(folderId) {
-    const [songs, queue, deleted, playlists, quota] = await Promise.all([
+    const [songs, queue, deleted, playlists, quota, audioFiles] = await Promise.all([
       this.readSongIndex(folderId),
       this.readQueueIndex(folderId),
       this.readDeletedIndex(folderId),
       this.readPlaylistIndex(folderId),
       this.fetchStorageQuota(),
+      this.listAudioFiles(folderId).catch(error => {
+        console.warn('Drive audio reconciliation failed; using the song index:', error);
+        return [];
+      }),
     ]);
+    const mergedSongs = mergeAudioFilesIntoSongIndex(songs.songs || [], audioFiles || []);
+    this.songIndexCache = { ...songs, songs: mergedSongs };
     return {
-      songs: songs.songs || [],
+      songs: mergedSongs,
       jobs: queue.jobs || [],
       deleted: deleted.deleted || [],
       playlists: playlists.playlists || [],

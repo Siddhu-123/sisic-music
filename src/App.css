@@ -2342,3 +2342,57 @@ input:focus-visible {
     width: 100%;
   }
 }
+
+.queue-item--clickable {
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.queue-item--clickable:hover,
+.queue-item--clickable:focus-visible {
+  background: var(--bg-card-hover);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.expanded-player__details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: -8px 0 24px;
+}
+
+.expanded-player__details div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.expanded-player__details span {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.expanded-player__details strong {
+  overflow: hidden;
+  color: white;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .expanded-player__details {
+    gap: 6px;
+  }
+
+  .expanded-player__details div {
+    padding: 8px;
+  }
+}
