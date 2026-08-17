@@ -17,7 +17,19 @@ export async function processPendingEmbeddingJobs({ limit = 2, onProgress } = {}
     .toArray();
   if (!jobs.length) return { processed: 0, waiting: false };
   if (typeof embeddingProvider !== 'function') {
-    return { processed: 0, waiting: true, reason: 'No embedding provider is configured.' };
+    const updatedAt = new Date().toISOString();
+    await db.transaction('rw', db.embeddingJobs, db.songs, async () => {
+      for (const job of jobs) {
+        await db.embeddingJobs.update(job.jobId, {
+          status: 'disabled',
+          progress: 0,
+          error: 'No embedding provider is configured.',
+          updatedAt,
+        });
+        await updateSongPipelineStatus(job.songKey, { embeddingStatus: '' });
+      }
+    });
+    return { processed: 0, waiting: false, disabled: jobs.length, reason: 'No embedding provider is configured.' };
   }
 
   let processed = 0;

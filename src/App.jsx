@@ -23,7 +23,7 @@ import {
 import { driveService } from './services/GoogleDriveService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth';
-import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, LoginScreen, SyncBanner } from './components/Components';
+import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components';
 import { QueuePanel } from './components/QueuePanel';
 import { ToastContainer } from './components/Toast';
 import { useToast } from './hooks/useToast';
@@ -70,7 +70,14 @@ function isPlayable(song) {
 
 function mergeJob(song, jobBySongKey) {
   if (!song?.songKey) return song;
-  return { ...song, downloadJob: jobBySongKey.get(song.songKey) || song.downloadJob || null };
+  const job = jobBySongKey.get(song.songKey) || song.downloadJob || null;
+  if (!job) return { ...song, downloadJob: null };
+  return {
+    ...song,
+    sourceUrl: job.sourceUrl || song.sourceUrl || '',
+    qualityStatus: job.qualityStatus || song.qualityStatus || '',
+    downloadJob: job,
+  };
 }
 
 function playableStatus(song) {
@@ -117,6 +124,8 @@ function App() {
   const [showStoragePanel, setShowStoragePanel] = useState(false);
   const [playlistPicker, setPlaylistPicker] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [reviewSong, setReviewSong] = useState(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
   const stagedLocalImportKeysRef = useRef(new Set());
@@ -202,12 +211,13 @@ function App() {
       const duplicates = results.filter(result => result.status === 'duplicate').length;
       const failed = results.filter(result => result.status === 'failed').length;
       const driveQueued = results.filter(result => result.driveJob?.jobId).length;
+      const localOnly = Math.max(0, completed - driveQueued);
       const driveJobs = results.map(result => result.driveJob).filter(job => job?.jobId);
       if (driveJobs.length) {
         await syncDownloadJobsToDb(driveJobs);
         setHasPendingJobs(true);
       }
-      addToast(`Imported ${completed}${driveQueued ? ` · ${driveQueued} queued for Mac upload` : ''}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? '' : 's'}` : ''}${failed ? ` · ${failed} failed` : ''}`);
+      addToast(`Imported ${completed}${driveQueued ? ` · ${driveQueued} queued for Mac upload` : ''}${localOnly ? ` · ${localOnly} local-only` : ''}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? '' : 's'}` : ''}${failed ? ` · ${failed} failed` : ''}`);
     } catch (error) {
       const message = errorMessage(error);
       setActionError(message);
@@ -368,7 +378,7 @@ function App() {
   const downloadQueueSongs = useMemo(() => {
     return [...jobBySongKey.values()]
       .filter(job => job.status === 'queued' || job.status === 'downloading')
-      .filter(job => !driveSongKeySet.has(job.songKey))
+      .filter(job => !driveSongKeySet.has(job.songKey) || job.replacementForFileId)
       .map(job => mergeJob(allSongsByKey.get(job.songKey) || catalogueByKey.get(job.songKey) || asSongRecord(job), jobBySongKey))
       .sort((a, b) => String(a.downloadJob?.updatedAt || '').localeCompare(String(b.downloadJob?.updatedAt || '')));
   }, [allSongsByKey, catalogueByKey, driveSongKeySet, jobBySongKey]);
@@ -537,6 +547,21 @@ function App() {
     return result;
   }, []);
 
+  const queueSongReplacement = useCallback(async (song, sourceUrl = '', reviewAction = 'reject-video') => {
+    if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
+    const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, sourceUrl, {
+      allowRedownload: true,
+      replaceExisting: true,
+      replacementForFileId: song.driveFileId || '',
+      reviewAction,
+    });
+    if (result.job) {
+      await syncDownloadJobsToDb([result.job]);
+      setHasPendingJobs(true);
+    }
+    return result;
+  }, []);
+
   const handleQueueDownload = useCallback(async (song, { allowRedownload = false } = {}) => {
     try {
       const result = await queueSongForDownload(song, { allowRedownload });
@@ -553,6 +578,72 @@ function App() {
       addToast(message);
     }
   }, [addToast, queueSongForDownload]);
+
+  const handleApproveSongReview = useCallback(async song => {
+    if (!DRIVE_FOLDER_ID) return;
+    setReviewBusy(true);
+    try {
+      const updated = await driveService.updateSongReview(DRIVE_FOLDER_ID, song, 'approved-studio');
+      setDriveIndexSongs(prev => prev.map(item => item.songKey === song.songKey ? { ...item, ...updated } : item));
+      setReviewSong(prev => prev ? { ...prev, ...updated } : prev);
+      addToast(`Marked "${song.track}" as the correct studio song`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [addToast]);
+
+  const handleRetryStudioReview = useCallback(async song => {
+    setReviewBusy(true);
+    try {
+      const result = await queueSongReplacement(song);
+      if (result.queued) {
+        addToast(`Queued a studio replacement for "${song.track}"`);
+        setReviewSong(null);
+      } else {
+        addToast(`Replacement is already ${result.job?.status || 'queued'}`);
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [addToast, queueSongReplacement]);
+
+  const handleYoutubeReplacement = useCallback(async (song, sourceUrl) => {
+    let parsed;
+    try {
+      parsed = new URL(sourceUrl.trim());
+    } catch {
+      addToast('Enter a valid YouTube URL.');
+      return;
+    }
+    if (!['youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be'].includes(parsed.hostname.toLowerCase())) {
+      addToast('The replacement link must be from YouTube.');
+      return;
+    }
+    setReviewBusy(true);
+    try {
+      const result = await queueSongReplacement(song, parsed.toString(), 'explicit-youtube-link');
+      if (result.queued) {
+        addToast(`Queued the YouTube replacement for "${song.track}"`);
+        setReviewSong(null);
+      } else {
+        addToast(`Replacement is already ${result.job?.status || 'queued'}`);
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [addToast, queueSongReplacement]);
 
   useEffect(() => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated || missingRequiredSongs.length === 0) return undefined;
@@ -994,6 +1085,7 @@ function App() {
       onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
       onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
       onAddToPlaylist={openPlaylistPicker}
+      onReview={setReviewSong}
       onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
       isCurrentSong={player.currentSongKey === song.songKey}
@@ -1347,6 +1439,16 @@ function App() {
       )}
 
       {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />}
+      {reviewSong && (
+        <SongReviewPanel
+          song={reviewSong}
+          onClose={() => setReviewSong(null)}
+          onApprove={handleApproveSongReview}
+          onRetryStudio={handleRetryStudioReview}
+          onUseYoutubeLink={handleYoutubeReplacement}
+          busy={reviewBusy}
+        />
+      )}
       <PlayerBar player={player} onToggleQueue={() => setShowQueue(open => !open)} />
       <ToastContainer toasts={toasts} />
 

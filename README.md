@@ -37,6 +37,6 @@ The browser reads compact indexes first. The worker performs full Drive audio re
 
 - Drop one or more supported audio files or folders onto the main view, or use the `Import music` control.
 - Imported files are identified by SHA-256, saved offline in IndexedDB, and skipped when the same file is imported again.
-- Import metadata, embedding, and metadata-only cloud sync jobs are persisted locally so offline work can retry later.
+- Import metadata and metadata-only cloud sync jobs are persisted locally so offline work can retry later. Embedding jobs are created only when a provider is configured.
 - Queue state, current position, repeat mode, and the paused/playing restore state are persisted in browser storage.
 - The embedding provider is intentionally injected through `setEmbeddingProvider`; the app does not invent or upload embeddings without a configured provider.

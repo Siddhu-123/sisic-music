@@ -17,6 +17,7 @@ const TOKEN_SCOPE_STORAGE_KEY = 'sisic_token_scope';
 const JOB_MIME_TYPE = 'application/json';
 const SONG_INDEX_FILENAME = 'sisic-songs.json';
 const QUEUE_INDEX_FILENAME = 'sisic-queue.json';
+const CANONICAL_QUEUE_STORAGE_MODE = 'canonical';
 const DELETED_INDEX_FILENAME = 'sisic-deleted.json';
 const PLAYLIST_INDEX_FILENAME = 'sisic-playlists.json';
 const PLAYBACK_LOG_FILENAME = 'sisic-playback-log.json';
@@ -120,6 +121,14 @@ function normalizeSongIndexEntry(file = {}, item = null) {
     mimeType: file.mimeType || 'audio/mpeg',
     size: Number(file.size || 0),
     modifiedTime: file.modifiedTime || '',
+    sourceUrl: normalizedItem?.sourceUrl || appProperties.sisicSourceUrl || file.sourceUrl || '',
+    sourceTitle: normalizedItem?.sourceTitle || appProperties.sisicSourceTitle || file.sourceTitle || '',
+    sourceUploader: normalizedItem?.sourceUploader || appProperties.sisicSourceUploader || file.sourceUploader || '',
+    sourceVideoId: normalizedItem?.sourceVideoId || appProperties.sisicSourceVideoId || file.sourceVideoId || '',
+    sourceDuration: normalizedItem?.sourceDuration || appProperties.sisicSourceDuration || file.sourceDuration || '',
+    sourceSelectionMode: normalizedItem?.sourceSelectionMode || appProperties.sisicSourceSelectionMode || file.sourceSelectionMode || '',
+    qualityStatus: normalizedItem?.qualityStatus || appProperties.sisicQualityStatus || file.qualityStatus || '',
+    qualityReviewedAt: normalizedItem?.qualityReviewedAt || appProperties.sisicQualityReviewedAt || file.qualityReviewedAt || '',
     updatedAt: new Date().toISOString(),
   };
 }
@@ -129,13 +138,15 @@ function normalizeQueueIndexJob(job = {}) {
 }
 
 function indexBody(type, values, previous = {}) {
-  return {
+  const body = {
     schemaVersion: 1,
     revision: (Number(previous.revision) || 0) + 1,
     updatedAt: new Date().toISOString(),
     updatedBy: CLIENT_INSTANCE_ID,
     [type]: values,
   };
+  if (previous.storageMode) body.storageMode = previous.storageMode;
+  return body;
 }
 
 function normalizePlaylistIndexEntry(playlist = {}) {
@@ -460,6 +471,30 @@ class GoogleDriveService {
     return await resp.json();
   }
 
+  async updateFileAppProperties(fileId, updates = {}) {
+    if (!fileId) return null;
+    const existing = await this.getAudioFileMetadata(fileId);
+    if (!existing) return null;
+    const params = new URLSearchParams({
+      fields: FILE_METADATA_FIELDS,
+      supportsAllDrives: 'true',
+    });
+    const request = accessToken => fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        appProperties: { ...(existing.appProperties || {}), ...updates },
+      }),
+    });
+    let resp = await request(await this.getValidAccessToken());
+    if (resp.status === 401 && this.tokenClient) resp = await request(await this.refreshAccessToken());
+    if (!resp.ok) throw new Error(`Drive audio metadata update failed: ${resp.status} ${await resp.text()}`);
+    return await resp.json();
+  }
+
   async listAudioFiles(folderId) {
     const escapedFolder = escapeDriveQuery(folderId);
     const q = `'${escapedFolder}' in parents and trashed=false`;
@@ -539,9 +574,41 @@ class GoogleDriveService {
     return body.songs.find(item => item.songKey === song.songKey) || entry;
   }
 
+  async updateSongReview(folderId, songInput, reviewStatus, extra = {}) {
+    const song = asSongRecord(songInput);
+    const reviewedAt = new Date().toISOString();
+    if (song.driveFileId) {
+      await this.updateFileAppProperties(song.driveFileId, {
+        sisicQualityStatus: reviewStatus,
+        sisicQualityReviewedAt: reviewedAt,
+      });
+    }
+    const body = await this.mutateJsonIndex(folderId, SONG_INDEX_FILENAME, 'songs', [], songs => {
+      const byKey = new Map(songs.filter(item => item.songKey).map(item => [item.songKey, item]));
+      const existing = byKey.get(song.songKey) || normalizeSongIndexEntry({
+        id: song.driveFileId || '',
+        name: song.filename || canonicalAudioFilename(song),
+        mimeType: song.mimeType || 'audio/mpeg',
+        size: song.size || 0,
+        modifiedTime: song.modifiedTime || '',
+        appProperties: {},
+      }, song);
+      byKey.set(song.songKey, {
+        ...existing,
+        qualityStatus: reviewStatus,
+        qualityReviewedAt: reviewedAt,
+        reviewNote: extra.reviewNote || existing.reviewNote || '',
+      });
+      return [...byKey.values()].sort((a, b) => a.songKey.localeCompare(b.songKey));
+    });
+    return body.songs.find(item => item.songKey === song.songKey) || null;
+  }
+
   async syncQueueIndexFromJobFiles(folderId) {
+    const current = await this.readQueueIndex(folderId);
+    if (current.storageMode === CANONICAL_QUEUE_STORAGE_MODE) return current.jobs;
     const jobs = await this.listDownloadJobFiles(folderId);
-    const previous = await this.readJsonIndex(folderId, QUEUE_INDEX_FILENAME, indexBody('jobs', []));
+    const previous = current;
     const body = indexBody('jobs', jobs.map(normalizeQueueIndexJob).filter(Boolean), previous);
     await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
     this.queueIndexCache = body;
@@ -815,6 +882,25 @@ class GoogleDriveService {
   }
 
   async createJobFile(job, folderId) {
+    const currentQueue = await this.readQueueIndex(folderId);
+    if (currentQueue.storageMode === CANONICAL_QUEUE_STORAGE_MODE) {
+      const normalized = normalizeJob(job, {
+        id: `queue:${job.jobId}`,
+        name: QUEUE_INDEX_FILENAME,
+      });
+      const jobsById = new Map((currentQueue.jobs || []).map(item => [item.jobId, item]));
+      jobsById.set(normalized.jobId, normalized);
+      const body = indexBody(
+        'jobs',
+        [...jobsById.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
+        currentQueue,
+      );
+      body.storageMode = CANONICAL_QUEUE_STORAGE_MODE;
+      await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
+      this.queueIndexCache = body;
+      return normalized;
+    }
+
     const content = JSON.stringify(job, null, 2);
     const metadata = {
       name: `${jobFilePrefix(job.songKey)}-${job.jobId}.json`,
@@ -925,7 +1011,7 @@ class GoogleDriveService {
 
     try {
       const created = await this.createJobFile(job, folderId);
-      await this.upsertQueueIndexJob(folderId, created);
+      if (!created.jobFileId.startsWith('queue:')) await this.upsertQueueIndexJob(folderId, created);
       return created;
     } catch (error) {
       if (source.id) {
@@ -941,7 +1027,13 @@ class GoogleDriveService {
 
   async requestSongDownload(songInput, folderId, sourceUrl = '', options = {}) {
     const song = asSongRecord(songInput);
-    const { auto = false, allowRedownload = false } = options;
+    const {
+      auto = false,
+      allowRedownload = false,
+      replaceExisting = false,
+      replacementForFileId = '',
+      reviewAction = '',
+    } = options;
     const deletedIndex = await this.readDeletedIndex(folderId);
     const deletedMatch = this.findDeletedMatch(song, deletedIndex.deleted, 'high');
     if (deletedMatch && !allowRedownload) {
@@ -966,8 +1058,11 @@ class GoogleDriveService {
     }
 
     const existing = await this.findDownloadJob(song, folderId);
-    if (existing && ['queued', 'downloading', 'done'].includes(existing.status)) {
+    if (existing && ['queued', 'downloading'].includes(existing.status)) {
       return { queued: false, alreadyQueued: existing.status !== 'done', job: existing };
+    }
+    if (existing?.status === 'done' && !replaceExisting) {
+      return { queued: false, alreadyQueued: false, job: existing };
     }
 
     const now = new Date().toISOString();
@@ -986,14 +1081,19 @@ class GoogleDriveService {
       updatedAt: now,
       uploadedFileId: '',
       sourceUrl,
+      qualityStatus: reviewAction === 'reject-video' ? 'pending-replacement' : '',
+      reviewAction,
+      replacementForFileId: replacementForFileId || (replaceExisting ? song.driveFileId || '' : ''),
       requestedBy: auto ? 'playlist-readiness' : 'browser',
       allowRedownload: Boolean(allowRedownload),
     };
     const created = await this.createJobFile(job, folderId);
-    try {
-      await this.upsertQueueIndexJob(folderId, created);
-    } catch (error) {
-      console.warn('Queued job was created, but queue index could not be updated by the browser:', error);
+    if (!created.jobFileId.startsWith('queue:')) {
+      try {
+        await this.upsertQueueIndexJob(folderId, created);
+      } catch (error) {
+        console.warn('Queued job was created, but queue index could not be updated by the browser:', error);
+      }
     }
     return { queued: true, alreadyQueued: false, job: created };
   }

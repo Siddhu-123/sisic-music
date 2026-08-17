@@ -10,6 +10,7 @@ import {
 } from '../db';
 import { asSongRecord, canonicalAudioFilename } from '../songIdentity';
 import { dedupeFileList, extensionFor, isSupportedAudioFile, parseAudioFilename, fileSignature } from '../importIdentity';
+import { getEmbeddingProvider } from './embeddingService';
 
 async function hashFile(file) {
   if (globalThis.crypto?.subtle) {
@@ -102,13 +103,15 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
       sourceType: 'local-import',
       importStatus: 'importing',
       syncStatus: 'queued',
-      embeddingStatus: 'queued',
+      embeddingStatus: typeof getEmbeddingProvider() === 'function' ? 'queued' : '',
     });
     await update({ status: 'importing', progress: 0.6, songKey: song.songKey, message: 'Saving offline copy' });
     await upsertSongToDb(song);
     await cacheSongBlob(song.songKey, file, null, { explicit: true });
     const storedSong = await upsertSongToDb({ ...song, isDownloaded: true, isCached: true, importStatus: 'complete' });
-    await enqueueEmbeddingJob(storedSong || song);
+    if (typeof getEmbeddingProvider() === 'function') {
+      await enqueueEmbeddingJob(storedSong || song);
+    }
     await enqueueSyncOutbox({ entityType: 'song', entityKey: song.songKey, songKey: song.songKey, payload: {
       songKey: song.songKey,
       artist: song.artist,
@@ -127,8 +130,8 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
       driveJob = await driveService.createImportedAudioJob(song, file, driveFolderId);
     }
     const completionMessage = driveJob
-      ? 'Imported locally and queued for Mac upload'
-      : 'Imported locally and queued for sync/embedding';
+      ? 'Imported locally · Queued for Mac upload'
+      : 'Imported locally only · Sign in to queue Mac upload';
     await update({ status: 'complete', progress: 1, message: completionMessage, driveJobId: driveJob?.jobId || '' });
     onProgress?.({ ...job, status: 'complete', progress: 1 });
     return { status: 'complete', song: storedSong || song, jobId: job.jobId, driveJob };
