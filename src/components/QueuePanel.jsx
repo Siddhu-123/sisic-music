@@ -1,5 +1,6 @@
 import React from 'react';
 import { X, Shuffle, Repeat, Clock3, AlertTriangle, Cloud, HardDriveDownload, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 const SHUFFLE_LABELS = { off: 'Off', shuffle: 'Shuffle', smart: 'Smart' };
 const REPEAT_LABELS = { off: 'Repeat off', one: 'Repeat one', all: 'Repeat all' };
@@ -15,6 +16,7 @@ function queueStatus(song, jobBySongKey) {
 }
 
 export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
+  const panelRef = useDialogFocus(true, onClose);
   const {
     queue,
     queueIndex,
@@ -45,9 +47,15 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
   };
 
   return (
-    <div className="queue-panel">
+    <aside
+      ref={panelRef}
+      className="queue-panel"
+      role="dialog"
+      aria-labelledby="queue-panel-title"
+      tabIndex={-1}
+    >
       <div className="queue-panel__header">
-        <h3>Queue</h3>
+        <h2 id="queue-panel-title">Queue</h2>
         <div className="queue-panel__actions">
           <button
             className={`icon-btn queue-shuffle-btn ${shuffleMode !== 'off' ? 'queue-shuffle-btn--active' : ''}`}
@@ -69,7 +77,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
           <button className="icon-btn" onClick={clearQueue} aria-label="Clear queue" title="Clear queue">
             <Trash2 size={16} />
           </button>
-          <button className="icon-btn" onClick={onClose} aria-label="Close queue">
+          <button data-dialog-autofocus className="icon-btn" onClick={onClose} aria-label="Close queue">
             <X size={18} />
           </button>
         </div>
@@ -124,6 +132,6 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
           </div>
         )}
       </div>
-    </div>
+    </aside>
   );
 }

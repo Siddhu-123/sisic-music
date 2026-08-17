@@ -40,7 +40,7 @@ function waitForController() {
   });
 }
 
-async function ensureDriveStreamWorker(accessToken) {
+async function ensureDriveStreamWorker(accessToken, tokenVersion) {
   if (!accessToken || !('serviceWorker' in navigator)) return false;
   if (!streamWorkerReadyPromise) {
     const base = appBaseUrl();
@@ -54,9 +54,9 @@ async function ensureDriveStreamWorker(accessToken) {
   const registration = await streamWorkerReadyPromise;
   const worker = navigator.serviceWorker.controller || await waitForController();
   if (!worker) return false;
-  worker.postMessage({ type: 'SISIC_DRIVE_TOKEN', accessToken });
+  worker.postMessage({ type: 'SISIC_DRIVE_TOKEN', accessToken, tokenVersion });
   if (registration.active && registration.active !== worker) {
-    registration.active.postMessage({ type: 'SISIC_DRIVE_TOKEN', accessToken });
+    registration.active.postMessage({ type: 'SISIC_DRIVE_TOKEN', accessToken, tokenVersion });
   }
   return true;
 }
@@ -252,7 +252,7 @@ export function useAudioPlayer() {
       } else {
         let canProxyStream = false;
         try {
-          canProxyStream = await ensureDriveStreamWorker(streamAccessToken);
+          canProxyStream = await ensureDriveStreamWorker(streamAccessToken, driveService.tokenVersion);
         } catch (error) {
           console.warn('Drive stream worker unavailable; using direct audio fallback:', error);
         }
@@ -514,8 +514,8 @@ export function useAudioPlayer() {
         });
       }
       if (currentSong?.driveFileId && !driveService.isAuthenticated) {
-        driveService.requireAuthentication(new Error('Google Drive access expired.'));
-        setError('Google Drive access expired. Sign in again to continue.');
+        driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
+        setError('Drive connection paused. Reconnect to continue streaming.');
         return;
       }
       if (key) failedSongKeysRef.current.add(key);

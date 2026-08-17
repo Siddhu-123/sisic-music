@@ -6,6 +6,7 @@ import {
   getSongKey,
   jobFilePrefix,
 } from '../songIdentity';
+import { tokenExpiryFromResponse } from './driveAuth';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/drive',
@@ -14,6 +15,8 @@ const SCOPES = [
 const TOKEN_STORAGE_KEY = 'sisic_access_token';
 const EXPIRY_STORAGE_KEY = 'sisic_token_expiry';
 const TOKEN_SCOPE_STORAGE_KEY = 'sisic_token_scope';
+const TOKEN_VERSION_STORAGE_KEY = 'sisic_token_version';
+const AUTH_HISTORY_STORAGE_KEY = 'sisic_drive_authorized';
 const JOB_MIME_TYPE = 'application/json';
 const SONG_INDEX_FILENAME = 'sisic-songs.json';
 const QUEUE_INDEX_FILENAME = 'sisic-queue.json';
@@ -180,39 +183,72 @@ class GoogleDriveService {
     const hasCurrentScopes = storedScopes === SCOPES;
     this.accessToken = hasCurrentScopes ? localStorage.getItem(TOKEN_STORAGE_KEY) || null : null;
     this.tokenExpiry = hasCurrentScopes ? Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || null : null;
+    this.tokenVersion = hasCurrentScopes ? localStorage.getItem(TOKEN_VERSION_STORAGE_KEY) || '' : '';
+    this.hasAuthorizedSession = localStorage.getItem(AUTH_HISTORY_STORAGE_KEY) === 'true' || Boolean(this.accessToken);
     if (!hasCurrentScopes) {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(EXPIRY_STORAGE_KEY);
       localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
+      localStorage.removeItem(TOKEN_VERSION_STORAGE_KEY);
     }
     this.jobCache = new Map();
     this.indexFileCache = new Map();
     this.songIndexCache = null;
     this.queueIndexCache = null;
-    this.tokenRefreshPromise = null;
     this.authRequiredListeners = new Set();
     this.authRequired = false;
+    this.tokenRequestPromise = null;
+    this.tokenErrorCallback = null;
   }
 
-  _persistToken(token, expiry) {
+  _persistToken(token, expiry, tokenVersion = '') {
     this.accessToken = token;
     this.tokenExpiry = expiry;
+    this.tokenVersion = token ? (tokenVersion || crypto.randomUUID()) : '';
     if (token && expiry) this.authRequired = false;
     if (token && expiry) {
+      this.hasAuthorizedSession = true;
       localStorage.setItem(TOKEN_STORAGE_KEY, token);
       localStorage.setItem(EXPIRY_STORAGE_KEY, String(expiry));
       localStorage.setItem(TOKEN_SCOPE_STORAGE_KEY, SCOPES);
+      localStorage.setItem(TOKEN_VERSION_STORAGE_KEY, this.tokenVersion);
+      localStorage.setItem(AUTH_HISTORY_STORAGE_KEY, 'true');
     } else {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
       localStorage.removeItem(EXPIRY_STORAGE_KEY);
       localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
+      localStorage.removeItem(TOKEN_VERSION_STORAGE_KEY);
     }
-    if (token && typeof navigator !== 'undefined') {
-      navigator.serviceWorker?.controller?.postMessage({
-        type: 'SISIC_DRIVE_TOKEN',
-        accessToken: token,
-      });
-    }
+    if (token) this.syncTokenToServiceWorker();
+  }
+
+  syncTokenToServiceWorker(target = null) {
+    if (!this.isAuthenticated || typeof navigator === 'undefined') return false;
+    const message = {
+      type: 'SISIC_DRIVE_TOKEN',
+      accessToken: this.accessToken,
+      tokenVersion: this.tokenVersion,
+    };
+    if (target?.postMessage) target.postMessage(message);
+    const controller = navigator.serviceWorker?.controller;
+    if (controller && controller !== target) controller.postMessage(message);
+    navigator.serviceWorker?.ready?.then(registration => {
+      if (registration.active && registration.active !== target && registration.active !== controller) {
+        registration.active.postMessage(message);
+      }
+    }).catch(() => {});
+    return true;
+  }
+
+  adoptStoredToken() {
+    const storedScopes = localStorage.getItem(TOKEN_SCOPE_STORAGE_KEY) || '';
+    const accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+    const expiry = Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || 0;
+    const tokenVersion = localStorage.getItem(TOKEN_VERSION_STORAGE_KEY) || '';
+    if (storedScopes !== SCOPES || !accessToken || expiry <= Date.now()) return false;
+    if (tokenVersion === this.tokenVersion && accessToken === this.accessToken) return this.isAuthenticated;
+    this._persistToken(accessToken, expiry, tokenVersion);
+    return true;
   }
 
   subscribeAuthRequired(listener) {
@@ -243,67 +279,69 @@ class GoogleDriveService {
       scope: SCOPES,
       callback: (resp) => {
         if (resp.error) return;
-        this._persistToken(resp.access_token, Date.now() + (resp.expires_in * 1000));
+        this._persistToken(resp.access_token, tokenExpiryFromResponse(resp));
       },
+      error_callback: error => this.tokenErrorCallback?.(error),
     });
   }
 
   requestToken() {
-    return new Promise((resolve, reject) => {
+    if (this.tokenRequestPromise) return this.tokenRequestPromise;
+    this.tokenRequestPromise = new Promise((resolve, reject) => {
       if (!this.tokenClient) {
         reject(new Error('Token client not initialized'));
         return;
       }
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        this.tokenErrorCallback = null;
+        callback(value);
+      };
       this.tokenClient.callback = (resp) => {
         if (resp.error) {
-          reject(new Error(resp.error));
+          finish(reject, new Error(resp.error_description || resp.error));
           return;
         }
-        this._persistToken(resp.access_token, Date.now() + (resp.expires_in * 1000));
-        resolve(resp.access_token);
+        this._persistToken(resp.access_token, tokenExpiryFromResponse(resp));
+        finish(resolve, resp.access_token);
       };
-      this.tokenClient.requestAccessToken({ prompt: this.accessToken ? '' : 'consent' });
+      this.tokenErrorCallback = error => {
+        const message = error?.type === 'popup_closed'
+          ? 'Google sign-in was closed before it finished.'
+          : 'Google sign-in could not open. Allow pop-ups and try again.';
+        finish(reject, new Error(message));
+      };
+      this.tokenClient.requestAccessToken({ prompt: this.hasAuthorizedSession ? '' : 'consent' });
+    }).finally(() => {
+      this.tokenRequestPromise = null;
+      this.tokenErrorCallback = null;
     });
+    return this.tokenRequestPromise;
   }
 
-  async refreshAccessToken({ notifyOnFailure = true } = {}) {
-    if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
-    this.tokenRefreshPromise = this.requestToken()
-      .catch(error => {
-        if (notifyOnFailure) this.requireAuthentication(error);
-        throw error;
-      })
-      .finally(() => {
-        this.tokenRefreshPromise = null;
-      });
-    return this.tokenRefreshPromise;
-  }
-
-  async getValidAccessToken(forceRefresh = false) {
-    if (!forceRefresh && this.isAuthenticated) return this.accessToken;
-    return this.refreshAccessToken();
+  async getValidAccessToken() {
+    if (this.isAuthenticated) return this.accessToken;
+    throw this.requireAuthentication(new Error('Google Drive authorization is required.'));
   }
 
   get isAuthenticated() {
     return Boolean(this.accessToken && Date.now() < (this.tokenExpiry || 0));
   }
 
-  async driveGet(url, label = 'Drive request', allowTokenRefresh = true) {
-    const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
-    });
-    if (resp.status === 401 && allowTokenRefresh && this.tokenClient) {
-      try {
-        await this.refreshAccessToken();
-        return this.driveGet(url, label, false);
-      } catch (error) {
-        this.requireAuthentication(error);
-        throw error;
-      }
-    }
+  async authorizedFetch(url, options = {}, label = 'Drive request') {
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${await this.getValidAccessToken()}`);
+    const resp = await fetch(url, { ...options, headers });
     if (resp.status === 401) {
-      this.requireAuthentication(new Error(`${label} failed: Drive API 401.`));
+      throw this.requireAuthentication(new Error(`${label} needs Google Drive reconnection.`));
     }
+    return resp;
+  }
+
+  async driveGet(url, label = 'Drive request') {
+    const resp = await this.authorizedFetch(url, {}, label);
     if (!resp.ok) {
       let details = '';
       try {
@@ -395,11 +433,10 @@ class GoogleDriveService {
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
     form.append('file', new Blob([JSON.stringify(body, null, 2)], { type: JOB_MIME_TYPE }));
-    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
+    const resp = await this.authorizedFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${this.accessToken}` },
       body: form,
-    });
+    }, 'Drive index create');
     if (!resp.ok) throw new Error(`Drive index create failed: ${resp.status} ${await resp.text()}`);
     const file = await resp.json();
     this.indexFileCache.set(`${folderId}:${filename}`, file);
@@ -412,14 +449,13 @@ class GoogleDriveService {
       fields: 'id,name,modifiedTime,appProperties',
       supportsAllDrives: 'true',
     });
-    const resp = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+    const resp = await this.authorizedFetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
-        Authorization: `Bearer ${this.accessToken}`,
         'Content-Type': JOB_MIME_TYPE,
       },
       body: JSON.stringify(body, null, 2),
-    });
+    }, 'Drive index update');
     if (!resp.ok) throw new Error(`Drive index update failed: ${resp.status} ${await resp.text()}`);
     return await resp.json();
   }
@@ -457,16 +493,13 @@ class GoogleDriveService {
       fields: 'id,name,trashed',
       supportsAllDrives: 'true',
     });
-    const request = accessToken => fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+    const resp = await this.authorizedFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ trashed: true }),
-    });
-    let resp = await request(await this.getValidAccessToken());
-    if (resp.status === 401 && this.tokenClient) resp = await request(await this.refreshAccessToken());
+    }, 'Drive file trash');
     if (!resp.ok) throw new Error(`Drive file trash failed: ${resp.status} ${await resp.text()}`);
     return await resp.json();
   }
@@ -479,18 +512,15 @@ class GoogleDriveService {
       fields: FILE_METADATA_FIELDS,
       supportsAllDrives: 'true',
     });
-    const request = accessToken => fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+    const resp = await this.authorizedFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         appProperties: { ...(existing.appProperties || {}), ...updates },
       }),
-    });
-    let resp = await request(await this.getValidAccessToken());
-    if (resp.status === 401 && this.tokenClient) resp = await request(await this.refreshAccessToken());
+    }, 'Drive audio metadata update');
     if (!resp.ok) throw new Error(`Drive audio metadata update failed: ${resp.status} ${await resp.text()}`);
     return await resp.json();
   }
@@ -919,19 +949,10 @@ class GoogleDriveService {
       form.append('file', new Blob([content], { type: JOB_MIME_TYPE }));
       return form;
     };
-    const accessToken = await this.getValidAccessToken();
-    let resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
+    const resp = await this.authorizedFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
       body: createForm(),
-    });
-    if (resp.status === 401 && this.tokenClient) {
-      resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${await this.refreshAccessToken()}` },
-        body: createForm(),
-      });
-    }
+    }, 'Drive job create');
     if (!resp.ok) {
       throw new Error(`Drive job create failed: ${resp.status} ${await resp.text()}`);
     }
@@ -964,20 +985,10 @@ class GoogleDriveService {
       return form;
     };
 
-    let accessToken = await this.getValidAccessToken();
-    let resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,appProperties', {
+    const resp = await this.authorizedFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,appProperties', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
       body: createForm(),
-    });
-    if (resp.status === 401) {
-      accessToken = await this.refreshAccessToken();
-      resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,appProperties', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
-        body: createForm(),
-      });
-    }
+    }, 'Drive import source upload');
     if (!resp.ok) throw new Error(`Drive import source upload failed: ${resp.status} ${await resp.text()}`);
     return await resp.json();
   }

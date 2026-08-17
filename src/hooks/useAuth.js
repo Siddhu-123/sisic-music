@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { driveService } from '../services/GoogleDriveService';
+import { workerAuthMessageAction } from '../services/driveAuth';
 import { syncLibraryToDb, requestPersistentStorage } from '../db';
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
 export const DRIVE_FOLDER_ID = import.meta.env.VITE_DRIVE_FOLDER_ID?.trim() || '';
-const TOKEN_REFRESH_LEAD_MS = 5 * 60 * 1000;
+const RECONNECT_MESSAGE = 'Drive connection paused. Reconnect to continue syncing; offline music stays available.';
+const DEV_UI_PREVIEW = import.meta.env.DEV && new URLSearchParams(window.location.search).has('ui-preview');
 
 const REQUIRED_CONFIG = {
   VITE_GOOGLE_CLIENT_ID: CLIENT_ID,
@@ -25,9 +27,12 @@ function missingConfigMessage(missing = getMissingConfig()) {
 
 export function useAuth() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => driveService.isAuthenticated);
+  const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || DEV_UI_PREVIEW);
+  const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
-  const [error, setError] = useState(() => missingConfigMessage());
+  const [error, setError] = useState(() => missingConfigMessage()
+    || ((driveService.hasAuthorizedSession || DEV_UI_PREVIEW) && !driveService.isAuthenticated ? RECONNECT_MESSAGE : ''));
   const hasSyncedOnMount = useRef(false);
 
   useEffect(() => {
@@ -37,6 +42,7 @@ export function useAuth() {
     const tryInit = () => {
       if (window.google?.accounts?.oauth2) {
         driveService.initTokenClient(CLIENT_ID);
+        driveService.syncTokenToServiceWorker();
         return true;
       }
       return false;
@@ -54,61 +60,48 @@ export function useAuth() {
   useEffect(() => {
     const unsubscribe = driveService.subscribeAuthRequired(() => {
       setIsAuthenticated(false);
-      setError('Google Drive access expired. Sign in again to continue.');
+      setHasAuthorizedSession(true);
+      setError(RECONNECT_MESSAGE);
       setSyncStatus('');
     });
 
     const handleServiceWorkerMessage = event => {
-      if (event.data?.type !== 'SISIC_DRIVE_AUTH_ERROR') return;
-      driveService.requireAuthentication(new Error(event.data.message || 'Google Drive access expired.'));
+      const action = workerAuthMessageAction(event.data, {
+        isAuthenticated: driveService.isAuthenticated,
+        tokenVersion: driveService.tokenVersion,
+      });
+      if (action === 'sync-token') {
+        driveService.syncTokenToServiceWorker(event.source);
+      } else if (action === 'reauthorize') {
+        driveService.requireAuthentication(new Error(event.data.message || 'Google Drive authorization ended.'));
+      }
+    };
+    const handleStoredToken = () => {
+      if (!driveService.adoptStoredToken()) return;
+      setIsAuthenticated(true);
+      setHasAuthorizedSession(true);
+      setError('');
     };
     navigator.serviceWorker?.addEventListener('message', handleServiceWorkerMessage);
+    window.addEventListener('storage', handleStoredToken);
 
     return () => {
       unsubscribe();
       navigator.serviceWorker?.removeEventListener('message', handleServiceWorkerMessage);
+      window.removeEventListener('storage', handleStoredToken);
     };
   }, []);
 
   useEffect(() => {
     if (!isAuthenticated || !driveService.tokenExpiry) return undefined;
 
-    let cancelled = false;
-    let timer = null;
-    const scheduleExpiryCheck = () => {
-      if (cancelled) return;
-      const delay = Math.max(0, (driveService.tokenExpiry || Date.now()) - Date.now() + 250);
-      timer = window.setTimeout(() => {
-        if (!driveService.isAuthenticated) {
-          driveService.requireAuthentication(new Error('Google Drive access expired.'));
-        }
-      }, delay);
-    };
-    const refreshBeforeExpiry = async () => {
-      if (cancelled) return;
+    const delay = Math.max(0, driveService.tokenExpiry - Date.now() + 250);
+    const timer = window.setTimeout(() => {
       if (!driveService.isAuthenticated) {
-        driveService.requireAuthentication(new Error('Google Drive access expired.'));
-        return;
+        driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
       }
-      try {
-        await driveService.refreshAccessToken({ notifyOnFailure: false });
-        if (!cancelled) scheduleRefresh();
-      } catch {
-        // Keep the current token until its real expiry if Google needs interaction.
-        if (!cancelled) scheduleExpiryCheck();
-      }
-    };
-    const scheduleRefresh = () => {
-      if (cancelled) return;
-      const delay = Math.max(1000, (driveService.tokenExpiry || Date.now()) - Date.now() - TOKEN_REFRESH_LEAD_MS);
-      timer = window.setTimeout(refreshBeforeExpiry, delay);
-    };
-
-    scheduleRefresh();
-    return () => {
-      cancelled = true;
-      if (timer) window.clearTimeout(timer);
-    };
+    }, delay);
+    return () => window.clearTimeout(timer);
   }, [isAuthenticated]);
 
   const syncLibrary = useCallback(async () => {
@@ -158,6 +151,7 @@ export function useAuth() {
   }, []);
 
   const login = useCallback(async () => {
+    setIsAuthorizing(true);
     try {
       setError('');
       const missing = getMissingConfig();
@@ -171,11 +165,15 @@ export function useAuth() {
       }
       await driveService.requestToken();
       setIsAuthenticated(true);
+      setHasAuthorizedSession(true);
+      setError('');
       await requestPersistentStorage();
       await syncLibrary();
     } catch (e) {
       console.error('Login failed:', e);
       setError(e instanceof Error ? e.message : 'Login failed.');
+    } finally {
+      setIsAuthorizing(false);
     }
   }, [syncLibrary]);
 
@@ -186,5 +184,5 @@ export function useAuth() {
     }
   }, [isAuthenticated, isSyncing, syncLibrary]);
 
-  return { isAuthenticated, isSyncing, syncStatus, error, login, syncLibrary };
+  return { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error, login, syncLibrary };
 }

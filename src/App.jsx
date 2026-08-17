@@ -27,6 +27,7 @@ import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongReview
 import { QueuePanel } from './components/QueuePanel';
 import { ToastContainer } from './components/Toast';
 import { useToast } from './hooks/useToast';
+import { useDialogFocus } from './hooks/useDialogFocus';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity';
 import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService';
 import { processPendingEmbeddingJobs } from './services/embeddingService';
@@ -62,6 +63,13 @@ function formatBytes(bytes = 0) {
     unitIndex++;
   }
   return `${value >= 10 || unitIndex < 2 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function currentGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 18) return 'Good afternoon';
+  return 'Good evening';
 }
 
 function isPlayable(song) {
@@ -106,7 +114,7 @@ function searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, 
 }
 
 function App() {
-  const { isAuthenticated, isSyncing, syncStatus, error: authError, login, syncLibrary } = useAuth();
+  const { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error: authError, login, syncLibrary } = useAuth();
   const player = useAudioPlayer();
   const { toasts, addToast } = useToast();
 
@@ -130,6 +138,8 @@ function App() {
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
   const stagedLocalImportKeysRef = useRef(new Set());
   const fileInputRef = useRef(null);
+  const storageDialogRef = useDialogFocus(showStoragePanel, () => setShowStoragePanel(false));
+  const playlistDialogRef = useDialogFocus(Boolean(playlistPicker), () => setPlaylistPicker(null), { canClose: !playlistPicker?.busy });
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
@@ -1054,8 +1064,8 @@ function App() {
     }
   }, []);
 
-  if (!isAuthenticated) {
-    return <LoginScreen onLogin={login} error={authError} />;
+  if (!isAuthenticated && !hasAuthorizedSession) {
+    return <LoginScreen onLogin={login} error={authError} busy={isAuthorizing} />;
   }
 
   const bannerError = authError || actionError || player.error || localDbError;
@@ -1106,6 +1116,7 @@ function App() {
               key={item.id}
               className={`sidebar__nav-item ${view === item.id ? 'sidebar__nav-item--active' : ''}`}
               onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); }}
+              aria-current={view === item.id ? 'page' : undefined}
             >
               <item.icon size={20} />
               {item.label}
@@ -1150,8 +1161,9 @@ function App() {
           syncStatus={bannerStatus}
           error={Boolean(bannerError)}
           onSync={syncLibrary}
-          actionLabel={localDbError ? 'Reset local cache' : ''}
-          onAction={localDbError ? handleResetLocalCache : undefined}
+          actionLabel={!isAuthenticated ? 'Reconnect Drive' : localDbError ? 'Reset local cache' : ''}
+          onAction={!isAuthenticated ? login : localDbError ? handleResetLocalCache : undefined}
+          actionDisabled={isAuthorizing}
         />
         <ImportStatusPanel jobs={importJobs} embeddingJobs={embeddingJobs} />
 
@@ -1187,7 +1199,7 @@ function App() {
         {view === VIEWS.HOME && (
           <>
             <header className="main-view__header">
-              <h1 className="main-view__title">Good evening</h1>
+              <h1 className="main-view__title">{currentGreeting()}</h1>
             </header>
 
             {visiblePlaylists.length > 0 && (
@@ -1354,10 +1366,10 @@ function App() {
 
       {showStoragePanel && (
         <div className="modal-backdrop" role="presentation" onClick={() => setShowStoragePanel(false)}>
-          <section className="storage-panel" role="dialog" aria-modal="true" aria-label="Storage dashboard" onClick={event => event.stopPropagation()}>
+          <section ref={storageDialogRef} className="storage-panel" role="dialog" aria-modal="true" aria-label="Storage dashboard" tabIndex={-1} onClick={event => event.stopPropagation()}>
             <div className="panel-header">
               <h2>Storage</h2>
-              <button className="icon-btn" onClick={() => setShowStoragePanel(false)} aria-label="Close storage dashboard">
+              <button data-dialog-autofocus className="icon-btn" onClick={() => setShowStoragePanel(false)} aria-label="Close storage dashboard">
                 <X size={18} />
               </button>
             </div>
@@ -1392,10 +1404,10 @@ function App() {
 
       {playlistPicker && (
         <div className="modal-backdrop" role="presentation" onClick={() => !playlistPicker.busy && setPlaylistPicker(null)}>
-          <section className="playlist-picker" role="dialog" aria-modal="true" aria-label="Choose playlist" onClick={event => event.stopPropagation()}>
+          <section ref={playlistDialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-label="Choose playlist" tabIndex={-1} onClick={event => event.stopPropagation()}>
             <div className="panel-header">
               <h2>Playlist</h2>
-              <button className="icon-btn" onClick={() => setPlaylistPicker(null)} aria-label="Close playlist picker" disabled={playlistPicker.busy}>
+              <button data-dialog-autofocus className="icon-btn" onClick={() => setPlaylistPicker(null)} aria-label="Close playlist picker" disabled={playlistPicker.busy}>
                 <X size={18} />
               </button>
             </div>
@@ -1458,6 +1470,7 @@ function App() {
             key={item.id}
             className={`mobile-nav__btn ${view === item.id ? 'mobile-nav__btn--active' : ''}`}
             onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); }}
+            aria-current={view === item.id ? 'page' : undefined}
           >
             <item.icon size={22} />
             {item.label}

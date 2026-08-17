@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -26,6 +26,7 @@ import {
   Link2,
   X,
 } from 'lucide-react';
+import { useDialogFocus } from '../hooks/useDialogFocus';
 
 function formatTime(seconds) {
   if (!seconds || Number.isNaN(seconds)) return '0:00';
@@ -98,6 +99,7 @@ export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
               step={0.1}
               value={progress}
               onChange={event => seek(Number(event.target.value))}
+              aria-label="Playback position"
             />
             <span className="time-label">{formatTime(duration)}</span>
           </div>
@@ -201,6 +203,7 @@ export function PlayerBar({ player, onToggleQueue }) {
             step={0.1}
             value={progress}
             onChange={event => seek(Number(event.target.value))}
+            aria-label="Playback position"
           />
           <span className="time-label">{formatTime(duration)}</span>
         </div>
@@ -216,6 +219,7 @@ export function PlayerBar({ player, onToggleQueue }) {
           step={0.01}
           value={volume}
           onChange={event => changeVolume(Number(event.target.value))}
+          aria-label="Volume"
         />
       </div>
       {isExpanded && <ExpandedPlayer player={player} onClose={() => setIsExpanded(false)} hue={hue} onToggleQueue={onToggleQueue} />}
@@ -241,6 +245,10 @@ export function SongCard({
   const StatusIcon = status.icon;
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
+  const menuId = useId();
+  const cardRef = useRef(null);
+  const menuRef = useRef(null);
+  const menuButtonRef = useRef(null);
   const pointerRef = useRef({ active: false, startX: 0, offset: 0, swiped: false });
 
   const closeMenu = () => setMenuOpen(false);
@@ -275,123 +283,168 @@ export function SongCard({
     if (offset >= 72) onAddToPlaylist?.(song);
   };
 
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    menuRef.current?.querySelector('[role="menuitem"]')?.focus();
+    const handlePointerDownOutside = event => {
+      if (!cardRef.current?.contains(event.target)) closeMenu();
+    };
+    const handleEscape = event => {
+      if (event.key !== 'Escape') return;
+      closeMenu();
+      menuButtonRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', handlePointerDownOutside);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDownOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [menuOpen]);
+
+  const handleMenuKeyDown = event => {
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])];
+    if (!items.length) return;
+    if (event.key === 'Tab') {
+      closeMenu();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement);
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? items.length - 1
+        : event.key === 'ArrowDown'
+          ? (currentIndex + 1 + items.length) % items.length
+          : (currentIndex - 1 + items.length) % items.length;
+    items[nextIndex].focus();
+  };
+
   return (
-    <div
+    <article
+      ref={cardRef}
       className={`song-card ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''}`}
       style={isReadyLoose && dragOffset ? { transform: `translateX(${dragOffset}px)` } : undefined}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      onClick={() => {
-        if (pointerRef.current.swiped) return;
-        onPlay(song);
-      }}
-      role="button"
-      tabIndex={0}
-      onKeyDown={event => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onPlay(song);
-        }
-      }}
     >
-      <div
-        className="song-card__art"
-        style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 35%), hsl(${(hue + 60) % 360}, 70%, 20%))` }}
-      >
-        {isCurrentSong
-          ? <div className="song-card__playing-bars"><span /><span /><span /></div>
-          : <Play size={32} className="song-card__play-icon" fill="white" />
-        }
-      </div>
-      <div className="song-card__info">
-        <p className="song-card__title">{song.track}</p>
-        <p className="song-card__artist">{song.artist}</p>
-      </div>
-      <div className={`song-status ${status.className}`} title={song.downloadJob?.lastError || status.label}>
-        <StatusIcon size={12} />
-        <span>{status.label}</span>
-      </div>
-      {song.syncStatus && song.syncStatus !== 'done' && (
-        <div className="song-status song-status--downloading" title="Metadata sync is pending">
-          <Cloud size={12} />
-          <span>Sync {song.syncStatus}</span>
-        </div>
-      )}
-      {song.embeddingStatus && song.embeddingStatus !== 'done' && (
-        <div className="song-status song-status--queued" title="Embedding pipeline status">
-          <Clock3 size={12} />
-          <span>Embedding {song.embeddingStatus}</span>
-        </div>
-      )}
       <button
+        className="song-card__primary"
+        onClick={() => {
+          if (pointerRef.current.swiped) return;
+          onPlay(song);
+        }}
+        aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
+      >
+        <div
+          className="song-card__art"
+          style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 35%), hsl(${(hue + 60) % 360}, 70%, 20%))` }}
+        >
+          {isCurrentSong
+            ? <div className="song-card__playing-bars"><span /><span /><span /></div>
+            : <Play size={32} className="song-card__play-icon" fill="white" />
+          }
+        </div>
+        <div className="song-card__info">
+          <p className="song-card__title">{song.track}</p>
+          <p className="song-card__artist">{song.artist}</p>
+        </div>
+      </button>
+      <div className="song-card__footer">
+        <div className="song-card__status-stack">
+          <div className={`song-status ${status.className}`} title={song.downloadJob?.lastError || status.label}>
+            <StatusIcon size={12} />
+            <span>{status.label}</span>
+          </div>
+          {song.syncStatus && song.syncStatus !== 'done' && (
+            <div className="song-status song-status--downloading" title="Metadata sync is pending">
+              <Cloud size={12} />
+              <span>Sync {song.syncStatus}</span>
+            </div>
+          )}
+          {song.embeddingStatus && song.embeddingStatus !== 'done' && (
+            <div className="song-status song-status--queued" title="Embedding pipeline status">
+              <Clock3 size={12} />
+              <span>Embedding {song.embeddingStatus}</span>
+            </div>
+          )}
+        </div>
+        <button
+          className="song-card__dl-btn"
+          onClick={event => { event.stopPropagation(); onDownload(song); }}
+          aria-label={song.isDownloaded ? 'Offline available' : 'Cache or request song'}
+          disabled={isDownloading}
+        >
+          {isDownloading
+            ? <div className="spinner" />
+            : song.isDownloaded || song.isCached || song.hasBlob
+              ? <CheckCircle2 size={18} color="var(--green)" />
+              : <Download size={18} color="var(--text-muted)" />
+          }
+        </button>
+      </div>
+      <button
+        ref={menuButtonRef}
         className="song-card__menu-btn"
         onClick={event => {
           event.stopPropagation();
           setMenuOpen(open => !open);
         }}
         aria-label="Song actions"
+        aria-expanded={menuOpen}
+        aria-controls={menuOpen ? menuId : undefined}
+        aria-haspopup="menu"
         title="Song actions"
       >
         <MoreHorizontal size={18} />
       </button>
       {menuOpen && (
-        <div className="song-card__actions" onClick={event => event.stopPropagation()}>
-          <button onClick={event => runAction(event, onPlay)}>
+        <div ref={menuRef} id={menuId} className="song-card__actions" role="menu" onClick={event => event.stopPropagation()} onKeyDown={handleMenuKeyDown}>
+          <button role="menuitem" onClick={event => runAction(event, onPlay)}>
             <Play size={15} />
             <span>Play</span>
           </button>
           {onPlayNext && (
-            <button onClick={event => runAction(event, onPlayNext)}>
+            <button role="menuitem" onClick={event => runAction(event, onPlayNext)}>
               <SkipForward size={15} />
               <span>Play next</span>
             </button>
           )}
           {onAddToQueue && (
-            <button onClick={event => runAction(event, onAddToQueue)}>
+            <button role="menuitem" onClick={event => runAction(event, onAddToQueue)}>
               <ListMusic size={15} />
               <span>Add to queue</span>
             </button>
           )}
-          <button onClick={event => runAction(event, onDownload)} disabled={isDownloading}>
+          <button role="menuitem" onClick={event => runAction(event, onDownload)} disabled={isDownloading}>
             <Download size={15} />
             <span>{song.driveFileId ? 'Offline' : 'Download'}</span>
           </button>
           {onAddToPlaylist && (
-            <button onClick={event => runAction(event, onAddToPlaylist)}>
+            <button role="menuitem" onClick={event => runAction(event, onAddToPlaylist)}>
               <Plus size={15} />
               <span>Playlist</span>
             </button>
           )}
           {onReview && (
-            <button onClick={event => runAction(event, onReview)}>
+            <button role="menuitem" onClick={event => runAction(event, onReview)}>
               <Info size={15} />
               <span>Song details / review</span>
             </button>
           )}
           {onDeleteReady && (
-            <button className="song-card__actions-danger" onClick={event => runAction(event, onDeleteReady)}>
+            <button role="menuitem" className="song-card__actions-danger" onClick={event => runAction(event, onDeleteReady)}>
               <Trash2 size={15} />
               <span>Delete</span>
             </button>
           )}
         </div>
       )}
-      <button
-        className="song-card__dl-btn"
-        onClick={event => { event.stopPropagation(); onDownload(song); }}
-        aria-label={song.isDownloaded ? 'Offline available' : 'Cache or request song'}
-        disabled={isDownloading}
-      >
-        {isDownloading
-          ? <div className="spinner" />
-          : song.isDownloaded || song.isCached || song.hasBlob
-            ? <CheckCircle2 size={18} color="var(--green)" />
-            : <Download size={18} color="var(--text-muted)" />
-        }
-      </button>
-    </div>
+    </article>
   );
 }
 
@@ -399,16 +452,17 @@ export function SongReviewPanel({ song, onClose, onApprove, onRetryStudio, onUse
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const sourceUrl = song.sourceUrl || song.selectedSourceUrl || '';
   const job = song.downloadJob;
+  const dialogRef = useDialogFocus(true, onClose, { canClose: !busy });
 
   return (
     <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-      <section className="song-review-panel" role="dialog" aria-modal="true" aria-labelledby="song-review-title">
+      <section ref={dialogRef} className="song-review-panel" role="dialog" aria-modal="true" aria-labelledby="song-review-title" tabIndex={-1}>
         <div className="panel-header">
           <div>
             <h2 id="song-review-title">Song specification</h2>
             <p className="song-review-panel__subtitle">Review the source and replace a noisy or incorrect recording.</p>
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Close song specification"><X size={20} /></button>
+          <button data-dialog-autofocus className="icon-btn" onClick={onClose} aria-label="Close song specification"><X size={20} /></button>
         </div>
 
         <div className="song-review-panel__song">
@@ -464,7 +518,7 @@ export function SongReviewPanel({ song, onClose, onApprove, onRetryStudio, onUse
   );
 }
 
-export function LoginScreen({ onLogin, error }) {
+export function LoginScreen({ onLogin, error, busy = false }) {
   return (
     <div className="login-screen">
       <div className="login-glow" />
@@ -474,8 +528,8 @@ export function LoginScreen({ onLogin, error }) {
         </div>
         <h1 className="login-title">Sisic Music</h1>
         <p className="login-sub">Your music. Everywhere. Offline.</p>
-        <button className="btn-primary login-btn" onClick={onLogin}>
-          Sign in with Google
+        <button className="btn-primary login-btn" onClick={onLogin} disabled={busy}>
+          {busy ? 'Connecting…' : 'Sign in with Google'}
         </button>
         {error && <p className="login-error" role="alert">{error}</p>}
         <p className="login-hint">Connect to your Google Drive music library</p>
@@ -484,7 +538,7 @@ export function LoginScreen({ onLogin, error }) {
   );
 }
 
-export function SyncBanner({ isSyncing, syncStatus, error, onSync, actionLabel, onAction }) {
+export function SyncBanner({ isSyncing, syncStatus, error, onSync, actionLabel, onAction, actionDisabled = false }) {
   if (!syncStatus && !isSyncing) return null;
   return (
     <div
@@ -494,7 +548,7 @@ export function SyncBanner({ isSyncing, syncStatus, error, onSync, actionLabel, 
       {isSyncing && <div className="spinner" />}
       <span>{syncStatus}</span>
       {!isSyncing && actionLabel && onAction && (
-        <button className="sync-refresh-btn" onClick={onAction}>{actionLabel}</button>
+        <button className="sync-refresh-btn" onClick={onAction} disabled={actionDisabled}>{actionDisabled ? 'Connecting…' : actionLabel}</button>
       )}
       {!isSyncing && !error && !actionLabel && (
         <button className="sync-refresh-btn" onClick={onSync}>Sync again</button>
@@ -609,13 +663,31 @@ export function DownloadStatusPanel({
             onClick={() => setTab(item.id)}
             role="tab"
             aria-selected={tab === item.id}
+            id={`download-tab-${item.id}`}
+            aria-controls="download-tabpanel"
+            tabIndex={tab === item.id ? 0 : -1}
+            onKeyDown={event => {
+              if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+              event.preventDefault();
+              const direction = event.key === 'ArrowRight' ? 1 : -1;
+              const index = tabs.findIndex(candidate => candidate.id === item.id);
+              const nextId = tabs[(index + direction + tabs.length) % tabs.length].id;
+              setTab(nextId);
+              window.requestAnimationFrame(() => document.getElementById(`download-tab-${nextId}`)?.focus());
+            }}
           >
             {item.label} <span>{item.songs.length}</span>
           </button>
         ))}
       </div>
 
-      <div className="download-status-list">
+      <div
+        id="download-tabpanel"
+        className="download-status-list"
+        role="tabpanel"
+        aria-labelledby={`download-tab-${activeTab.id}`}
+        tabIndex={0}
+      >
         <div className="download-status-list__heading">
           <strong>{activeTab.label}</strong>
           <span>{activeTab.id === 'manual' ? 'Import an audio file when the worker cannot complete it.' : activeTab.id === 'notQueued' ? 'Queue these when you want the Mac worker to try them.' : 'The Mac worker can attempt these automatically.'}</span>
