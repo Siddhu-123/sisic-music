@@ -678,7 +678,7 @@ function App() {
   }, [loadAndPlay, playNext, resolvePlayableSong, setPlayerError]);
 
   useEffect(() => {
-    if (!activeQueueSongKey) return undefined;
+    if (!isAuthenticated || !activeQueueSongKey) return undefined;
     const song = activeQueueSongRef.current;
     if (!song) return undefined;
 
@@ -715,7 +715,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeQueueSongKey]);
+  }, [activeQueueSongKey, isAuthenticated]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;

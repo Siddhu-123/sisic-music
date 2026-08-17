@@ -3,6 +3,14 @@ const DEFAULT_CHUNK_BYTES = 256 * 1024;
 let driveAccessToken = '';
 const fileMetadataCache = new Map();
 
+async function notifyDriveAuthFailure(message) {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  clients.forEach(client => client.postMessage({
+    type: 'SISIC_DRIVE_AUTH_ERROR',
+    message,
+  }));
+}
+
 self.addEventListener('install', () => {
   self.skipWaiting();
 });
@@ -33,6 +41,7 @@ self.addEventListener('fetch', event => {
 
 async function streamDriveFile(fileId, request) {
   if (!driveAccessToken) {
+    await notifyDriveAuthFailure('Google Drive access token is not available.');
     return new Response('Drive token is not ready.', {
       status: 401,
       headers: {
@@ -49,6 +58,7 @@ async function streamDriveFile(fileId, request) {
 
     if (!upstream.ok && upstream.status !== 206) {
       const message = await upstream.text();
+      if (upstream.status === 401) await notifyDriveAuthFailure(message || 'Google Drive access expired.');
       return streamError(message || `Drive stream failed: ${upstream.status}`, upstream.status, upstream.statusText);
     }
 
@@ -72,7 +82,8 @@ async function streamDriveFile(fileId, request) {
       headers: responseHeaders,
     });
   } catch (error) {
-    return streamError(error instanceof Error ? error.message : 'Drive stream failed.', 502, 'Bad Gateway');
+    const status = Number(error?.status) === 401 ? 401 : 502;
+    return streamError(error instanceof Error ? error.message : 'Drive stream failed.', status, status === 401 ? 'Unauthorized' : 'Bad Gateway');
   }
 }
 
@@ -102,7 +113,12 @@ async function getFileMetadata(fileId) {
 
   if (!response.ok) {
     const message = await response.text();
-    throw new Error(message || `Drive metadata failed: ${response.status}`);
+    if (response.status === 401) {
+      await notifyDriveAuthFailure(message || 'Google Drive access expired.');
+    }
+    const error = new Error(message || `Drive metadata failed: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
 
   const metadata = await response.json();

@@ -155,8 +155,6 @@ export function useAudioPlayer() {
   const queueIndexRef = useRef(restoredInitialState?.queueIndex || 0);
   const repeatModeRef = useRef(restoredInitialState?.repeatMode || 'off');
   const lastPersistedAtRef = useRef(0);
-  const streamRecoveryRef = useRef({ songKey: '', attempts: 0 });
-  const streamRecoveryInFlightRef = useRef(false);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -235,10 +233,6 @@ export function useAudioPlayer() {
     audio.pause();
     audio.removeAttribute('src');
     audio.load();
-
-    if (song.songKey && streamRecoveryRef.current.songKey !== song.songKey) {
-      streamRecoveryRef.current = { songKey: song.songKey, attempts: 0 };
-    }
 
     const loadDirectDriveAudio = async () => {
       const blob = await driveService.downloadFileAsBlob(song.driveFileId);
@@ -391,6 +385,7 @@ export function useAudioPlayer() {
     }
 
     queueIndexRef.current = nextIdx;
+    setResumeOnRestore(true);
     setQueueIndex(nextIdx);
     return true;
   }, [clearSource, emitPlaybackEvent, repeatMode, shuffleMode]);
@@ -422,6 +417,7 @@ export function useAudioPlayer() {
       repeatMode,
     });
     queueIndexRef.current = previousIndex;
+    setResumeOnRestore(true);
     setQueueIndex(previousIndex);
   }, [emitPlaybackEvent, repeatMode]);
 
@@ -517,31 +513,9 @@ export function useAudioPlayer() {
           message: `Audio error ${code || 'unknown'} ${msg}`.trim(),
         });
       }
-      const recovery = streamRecoveryRef.current.songKey === key
-        ? streamRecoveryRef.current
-        : { songKey: key || '', attempts: 0 };
-      if (currentSong?.driveFileId && recovery.attempts < 3 && !streamRecoveryInFlightRef.current) {
-        const nextAttempt = recovery.attempts + 1;
-        streamRecoveryRef.current = { songKey: key || '', attempts: nextAttempt };
-        streamRecoveryInFlightRef.current = true;
-        setError(`Playback interrupted. Refreshing Drive access and retrying (${nextAttempt}/3)…`);
-        const position = Number(audio.currentTime || 0);
-        (async () => {
-          try {
-            const freshToken = await driveService.getValidAccessToken(true);
-            const restarted = await loadAndPlay(currentSong, freshToken, {
-              autoplay: true,
-              startAt: Math.max(0, position - 0.5),
-              forceDirect: nextAttempt >= 3,
-            });
-            if (!restarted) throw new Error('The audio source could not be restarted.');
-          } catch (error) {
-            failedSongKeysRef.current.add(key);
-            setError(`Playback could not continue: ${error instanceof Error ? error.message : 'Drive stream failed.'} Press play to retry.`);
-          } finally {
-            streamRecoveryInFlightRef.current = false;
-          }
-        })();
+      if (currentSong?.driveFileId && !driveService.isAuthenticated) {
+        driveService.requireAuthentication(new Error('Google Drive access expired.'));
+        setError('Google Drive access expired. Sign in again to continue.');
         return;
       }
       if (key) failedSongKeysRef.current.add(key);
@@ -653,6 +627,35 @@ export function useAudioPlayer() {
     clearSource();
     setCurrentSong(null);
   }, [clearSource, currentSong, emitPlaybackEvent]);
+
+  useEffect(() => {
+    const onKeyDown = event => {
+      if (event.defaultPrevented || event.repeat) return;
+      const target = event.target;
+      const isEditable = target instanceof HTMLElement && (
+        target.isContentEditable
+        || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName)
+      );
+      if (isEditable) return;
+
+      const key = event.key || event.code;
+      const hasModifier = event.ctrlKey || event.metaKey || event.altKey;
+      const isPlayPause = !hasModifier && (key === ' ' || key === 'Spacebar' || key === 'MediaPlayPause' || event.code === 'Space');
+      const isStop = !hasModifier && (key === 'MediaStop' || event.code === 'MediaStop');
+      const isNext = !hasModifier && (key === 'MediaTrackNext' || event.code === 'MediaTrackNext');
+      const isPrevious = !hasModifier && (key === 'MediaTrackPrevious' || event.code === 'MediaTrackPrevious');
+      if (!isPlayPause && !isStop && !isNext && !isPrevious) return;
+
+      event.preventDefault();
+      if (isPlayPause) togglePlay();
+      else if (isStop) stop();
+      else if (isNext) playNext({ reason: 'user-next' });
+      else if (isPrevious) playPrev({ reason: 'user-prev' });
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [playNext, playPrev, stop, togglePlay]);
 
   const setQueueAndPlay = useCallback((songs, startIndex = 0) => {
     setError('');

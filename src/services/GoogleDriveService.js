@@ -179,11 +179,14 @@ class GoogleDriveService {
     this.songIndexCache = null;
     this.queueIndexCache = null;
     this.tokenRefreshPromise = null;
+    this.authRequiredListeners = new Set();
+    this.authRequired = false;
   }
 
   _persistToken(token, expiry) {
     this.accessToken = token;
     this.tokenExpiry = expiry;
+    if (token && expiry) this.authRequired = false;
     if (token && expiry) {
       localStorage.setItem(TOKEN_STORAGE_KEY, token);
       localStorage.setItem(EXPIRY_STORAGE_KEY, String(expiry));
@@ -193,6 +196,30 @@ class GoogleDriveService {
       localStorage.removeItem(EXPIRY_STORAGE_KEY);
       localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
     }
+    if (token && typeof navigator !== 'undefined') {
+      navigator.serviceWorker?.controller?.postMessage({
+        type: 'SISIC_DRIVE_TOKEN',
+        accessToken: token,
+      });
+    }
+  }
+
+  subscribeAuthRequired(listener) {
+    this.authRequiredListeners.add(listener);
+    return () => this.authRequiredListeners.delete(listener);
+  }
+
+  requireAuthentication(reason = null) {
+    const error = reason instanceof Error
+      ? reason
+      : new Error(String(reason || 'Google Drive authentication is required.'));
+    const wasRequired = this.authRequired;
+    this.authRequired = true;
+    this._persistToken(null, null);
+    if (!wasRequired) {
+      this.authRequiredListeners.forEach(listener => listener(error));
+    }
+    return error;
   }
 
   initTokenClient(clientId) {
@@ -228,11 +255,16 @@ class GoogleDriveService {
     });
   }
 
-  async refreshAccessToken() {
+  async refreshAccessToken({ notifyOnFailure = true } = {}) {
     if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
-    this.tokenRefreshPromise = this.requestToken().finally(() => {
-      this.tokenRefreshPromise = null;
-    });
+    this.tokenRefreshPromise = this.requestToken()
+      .catch(error => {
+        if (notifyOnFailure) this.requireAuthentication(error);
+        throw error;
+      })
+      .finally(() => {
+        this.tokenRefreshPromise = null;
+      });
     return this.tokenRefreshPromise;
   }
 
@@ -250,8 +282,16 @@ class GoogleDriveService {
       headers: { Authorization: `Bearer ${this.accessToken}` },
     });
     if (resp.status === 401 && allowTokenRefresh && this.tokenClient) {
-      await this.refreshAccessToken();
-      return this.driveGet(url, label, false);
+      try {
+        await this.refreshAccessToken();
+        return this.driveGet(url, label, false);
+      } catch (error) {
+        this.requireAuthentication(error);
+        throw error;
+      }
+    }
+    if (resp.status === 401) {
+      this.requireAuthentication(new Error(`${label} failed: Drive API 401.`));
     }
     if (!resp.ok) {
       let details = '';
