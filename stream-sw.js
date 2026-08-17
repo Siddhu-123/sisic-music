@@ -1,13 +1,33 @@
 const DEFAULT_CHUNK_BYTES = 256 * 1024;
 
 let driveAccessToken = '';
+let driveTokenVersion = '';
 const fileMetadataCache = new Map();
+const tokenWaiters = new Set();
+
+async function requestDriveToken() {
+  if (driveAccessToken) return true;
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  if (!clients.length) return false;
+  const result = new Promise(resolve => {
+    const waiter = tokenAvailable => {
+      clearTimeout(timeout);
+      tokenWaiters.delete(waiter);
+      resolve(tokenAvailable);
+    };
+    const timeout = setTimeout(() => waiter(false), 1500);
+    tokenWaiters.add(waiter);
+  });
+  clients.forEach(client => client.postMessage({ type: 'SISIC_DRIVE_TOKEN_REQUEST' }));
+  return await result;
+}
 
 async function notifyDriveAuthFailure(message) {
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   clients.forEach(client => client.postMessage({
     type: 'SISIC_DRIVE_AUTH_ERROR',
     message,
+    tokenVersion: driveTokenVersion,
   }));
 }
 
@@ -22,6 +42,8 @@ self.addEventListener('activate', event => {
 self.addEventListener('message', event => {
   if (event.data?.type === 'SISIC_DRIVE_TOKEN') {
     driveAccessToken = event.data.accessToken || '';
+    driveTokenVersion = event.data.tokenVersion || '';
+    tokenWaiters.forEach(resolve => resolve(Boolean(driveAccessToken)));
   }
 });
 
@@ -40,13 +62,13 @@ self.addEventListener('fetch', event => {
 });
 
 async function streamDriveFile(fileId, request) {
-  if (!driveAccessToken) {
-    await notifyDriveAuthFailure('Google Drive access token is not available.');
-    return new Response('Drive token is not ready.', {
-      status: 401,
+  if (!driveAccessToken && !(await requestDriveToken())) {
+    return new Response('Drive connection is not ready.', {
+      status: 503,
       headers: {
         'Cache-Control': 'no-store',
         'Content-Type': 'text/plain',
+        'Retry-After': '1',
       },
     });
   }
