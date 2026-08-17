@@ -8,6 +8,7 @@ import {
   Download,
   CheckCircle2,
   Shuffle,
+  Repeat,
   ListMusic,
   Clock3,
   AlertTriangle,
@@ -48,7 +49,19 @@ function statusDetails(song) {
   return { label: 'Request', icon: Download, className: 'song-status--missing' };
 }
 
-export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
+export function ExpandedPlayer({
+  player,
+  onClose,
+  hue,
+  onToggleQueue,
+  onOpenSongInfo,
+  onAddToPlaylist,
+  onDelete,
+  onReview,
+  onDownload,
+  onPlayNext,
+  onAddToQueue,
+}) {
   const {
     currentSong,
     isPlaying,
@@ -60,6 +73,8 @@ export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
     playNext,
     playPrev,
     toggleShuffle,
+    repeatMode,
+    toggleRepeat,
   } = player;
 
   if (!currentSong) return null;
@@ -74,21 +89,38 @@ export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
       </div>
 
       <div className="expanded-player__content">
-        <div className="expanded-player__art-container">
-          <div
-            className={`expanded-player__art ${isPlaying ? 'expanded-player__art--playing' : ''}`}
-            style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
-          >
-            <span className="expanded-player__art-icon">♪</span>
+        <div className="expanded-player__layout">
+          <div className="expanded-player__art-container">
+            <div className={`record-player ${isPlaying ? 'record-player--playing' : ''}`}>
+              <div
+                className={`expanded-player__art ${isPlaying ? 'expanded-player__art--playing' : ''}`}
+                style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
+                aria-label="Song artwork placeholder"
+              >
+                <span className="expanded-player__art-icon">♪</span>
+              </div>
+              <span className="record-player__tonearm" aria-hidden="true" />
+            </div>
           </div>
-        </div>
 
-        <div className="expanded-player__info">
-          <h2 className="expanded-player__title">{currentSong.track}</h2>
-          <p className="expanded-player__artist">{currentSong.artist}</p>
-        </div>
+          <div className="expanded-player__details-column">
+            <div className="expanded-player__info">
+              <h2 className="expanded-player__title">{currentSong.track}</h2>
+              <p className="expanded-player__artist">{currentSong.artist}</p>
+            </div>
 
-        <div className="expanded-player__controls-area">
+            <div className="expanded-player__metadata">
+              <section className="expanded-player__text-panel">
+                <h3>Lyrics</h3>
+                <p>{currentSong.lyrics || 'Lyrics will appear here when song metadata is available.'}</p>
+              </section>
+              <section className="expanded-player__text-panel">
+                <h3>Description</h3>
+                <p>{currentSong.description || 'Song description and credits will appear here when available.'}</p>
+              </section>
+            </div>
+
+            <div className="expanded-player__controls-area">
           <div className="expanded-progress">
             <span className="time-label">{formatTime((progress / 100) * duration)}</span>
             <input
@@ -112,6 +144,9 @@ export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
             >
               <Shuffle size={24} color={shuffleMode !== 'off' ? 'var(--green)' : 'white'} />
             </button>
+            <button className={`icon-btn ${repeatMode !== 'off' ? 'icon-btn--active' : ''}`} onClick={toggleRepeat} aria-label={`Repeat: ${repeatMode}`}>
+              <Repeat size={22} color={repeatMode !== 'off' ? 'var(--green)' : 'white'} />
+            </button>
             <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
               <SkipBack size={36} color="white" />
             </button>
@@ -125,13 +160,34 @@ export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
               <ListMusic size={24} color="white" />
             </button>
           </div>
+              <div className="expanded-player__actions" aria-label="Song actions">
+                <button className="panel-action-btn" onClick={() => onOpenSongInfo?.(currentSong)}><Info size={16} /> Info</button>
+                <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(currentSong)}><Plus size={16} /> Playlist</button>
+                <button className="panel-action-btn" onClick={() => onPlayNext?.(currentSong)}><SkipForward size={16} /> Play next</button>
+                <button className="panel-action-btn" onClick={() => onAddToQueue?.(currentSong)}><ListMusic size={16} /> Queue</button>
+                <button className="panel-action-btn" onClick={() => onDownload?.(currentSong)}><Download size={16} /> Offline</button>
+                <button className="panel-action-btn" onClick={() => onReview?.(currentSong)}><RefreshCw size={16} /> Review</button>
+                <button className="panel-action-btn panel-action-btn--danger" onClick={() => onDelete?.(currentSong)}><Trash2 size={16} /> Delete</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-export function PlayerBar({ player, onToggleQueue }) {
+export function PlayerBar({
+  player,
+  onToggleQueue,
+  onOpenSongInfo,
+  onAddToPlaylist,
+  onDelete,
+  onReview,
+  onDownload,
+  onPlayNext,
+  onAddToQueue,
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hue = player.currentSong ? player.currentSong.track.charCodeAt(0) % 360 : 0;
 
@@ -164,6 +220,9 @@ export function PlayerBar({ player, onToggleQueue }) {
               ? <CheckCircle2 size={16} color="var(--green)" style={{ marginLeft: 'auto' }} />
               : <Cloud size={16} color="var(--text-muted)" style={{ marginLeft: 'auto' }} />
             }
+            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info">
+              <Info size={16} />
+            </button>
           </>
         ) : (
           <span className="player-artist">Nothing playing</span>
@@ -222,7 +281,21 @@ export function PlayerBar({ player, onToggleQueue }) {
           aria-label="Volume"
         />
       </div>
-      {isExpanded && <ExpandedPlayer player={player} onClose={() => setIsExpanded(false)} hue={hue} onToggleQueue={onToggleQueue} />}
+      {isExpanded && (
+        <ExpandedPlayer
+          player={player}
+          onClose={() => setIsExpanded(false)}
+          hue={hue}
+          onToggleQueue={onToggleQueue}
+          onOpenSongInfo={onOpenSongInfo}
+          onAddToPlaylist={onAddToPlaylist}
+          onDelete={onDelete}
+          onReview={onReview}
+          onDownload={onDownload}
+          onPlayNext={onPlayNext}
+          onAddToQueue={onAddToQueue}
+        />
+      )}
     </div>
   );
 }
@@ -236,6 +309,7 @@ export function SongCard({
   onAddToPlaylist,
   onDeleteReady,
   onReview,
+  onInfo,
   isReadyLoose = false,
   isCurrentSong,
   isDownloading,
@@ -331,6 +405,7 @@ export function SongCard({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onMouseLeave={closeMenu}
     >
       <button
         className="song-card__primary"
@@ -432,8 +507,14 @@ export function SongCard({
           )}
           {onReview && (
             <button role="menuitem" onClick={event => runAction(event, onReview)}>
+              <RefreshCw size={15} />
+              <span>Source review</span>
+            </button>
+          )}
+          {onInfo && (
+            <button role="menuitem" onClick={event => runAction(event, onInfo)}>
               <Info size={15} />
-              <span>Song details / review</span>
+              <span>Song info</span>
             </button>
           )}
           {onDeleteReady && (
@@ -445,6 +526,57 @@ export function SongCard({
         </div>
       )}
     </article>
+  );
+}
+
+export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue, onAddToPlaylist, onReview, onDelete, onDownload, isDownloading = false }) {
+  const dialogRef = useDialogFocus(true, onClose);
+  const status = statusDetails(song);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+      <section ref={dialogRef} className="song-info-panel" role="dialog" aria-modal="true" aria-labelledby="song-info-title" tabIndex={-1}>
+        <div className="panel-header">
+          <div>
+            <span className="song-info-panel__eyebrow">Song information</span>
+            <h2 id="song-info-title">{song.track}</h2>
+            <p>{song.artist}{song.album ? ` · ${song.album}` : ''}</p>
+          </div>
+          <button data-dialog-autofocus className="icon-btn" onClick={onClose} aria-label="Close song info"><X size={20} /></button>
+        </div>
+
+        <div className="song-info-panel__hero">
+          <div className="song-info-panel__art" aria-label="Song artwork placeholder">♪</div>
+          <div>
+            <strong>{status.label}</strong>
+            <span>{song.filename || song.driveFileId || 'No Drive file linked yet'}</span>
+            <span>{song.album || 'Album not available'}</span>
+          </div>
+        </div>
+
+        <div className="song-info-panel__actions">
+          <button className="panel-action-btn panel-action-btn--primary" onClick={() => onPlay?.(song)}><Play size={16} /> Play</button>
+          <button className="panel-action-btn" onClick={() => onPlayNext?.(song)}><SkipForward size={16} /> Play next</button>
+          <button className="panel-action-btn" onClick={() => onAddToQueue?.(song)}><ListMusic size={16} /> Queue</button>
+          <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(song)}><Plus size={16} /> Playlist</button>
+          <button className="panel-action-btn" onClick={() => onDownload?.(song)} disabled={isDownloading}><Download size={16} /> Offline</button>
+          <button className="panel-action-btn" onClick={() => onReview?.(song)}><RefreshCw size={16} /> Suggest source</button>
+          {onDelete && <button className="panel-action-btn panel-action-btn--danger" onClick={() => onDelete(song)}><Trash2 size={16} /> Delete</button>}
+        </div>
+
+        <div className="song-info-panel__sections">
+          <section><h3>Description</h3><p>{song.description || 'No description is available yet.'}</p></section>
+          <section><h3>Lyrics</h3><p>{song.lyrics || 'Lyrics are not available yet. They can be added by the metadata pipeline later.'}</p></section>
+        </div>
+
+        <dl className="song-info-panel__metadata">
+          <div><dt>Artist</dt><dd>{song.artist || 'Unknown artist'}</dd></div>
+          <div><dt>Created / added</dt><dd>{song.dateCreated || (song.dateAdded ? new Date(song.dateAdded).toLocaleString() : 'Unknown')}</dd></div>
+          <div><dt>Last played</dt><dd>{song.lastPlayedAt ? new Date(song.lastPlayedAt).toLocaleString() : 'Not played yet'}</dd></div>
+          <div><dt>Play count</dt><dd>{song.playCount || 0}</dd></div>
+        </dl>
+      </section>
+    </div>
   );
 }
 
@@ -567,7 +699,7 @@ const IMPORT_STATUS_LABELS = {
 };
 
 export function ImportStatusPanel({ jobs = [], embeddingJobs = [] }) {
-  const visibleJobs = jobs.slice(0, 5);
+  const visibleJobs = jobs.filter(job => !['complete', 'duplicate'].includes(job.status)).slice(0, 5);
   const visibleEmbeddings = embeddingJobs.filter(job => ['queued', 'processing', 'failed'].includes(job.status)).slice(0, 3);
   if (!visibleJobs.length && !visibleEmbeddings.length) return null;
   return (

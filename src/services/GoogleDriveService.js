@@ -733,9 +733,17 @@ class GoogleDriveService {
     return await this.mutateJsonIndex(folderId, PLAYLIST_INDEX_FILENAME, 'playlists', [], () => normalized);
   }
 
+  async readPlaybackLog(folderId) {
+    const body = await this.readJsonIndex(folderId, PLAYBACK_LOG_FILENAME, indexBody('events', []));
+    return {
+      ...body,
+      events: Array.isArray(body.events) ? body.events : [],
+    };
+  }
+
   async appendPlaybackLog(folderId, event = {}) {
     const logEntry = {
-      id: crypto.randomUUID(),
+      id: event.id || crypto.randomUUID(),
       eventType: event.eventType || 'playback-event',
       songKey: event.songKey || '',
       artist: event.artist || '',
@@ -746,7 +754,7 @@ class GoogleDriveService {
       expectedFullPlay: Boolean(event.expectedFullPlay),
       userInitiated: Boolean(event.userInitiated),
       message: event.message || '',
-      createdAt: new Date().toISOString(),
+      createdAt: event.createdAt || new Date().toISOString(),
       createdBy: CLIENT_INSTANCE_ID,
     };
     try {
@@ -760,18 +768,20 @@ class GoogleDriveService {
   }
 
   async loadDriveIndexes(folderId) {
-    const [songs, queue, deleted, playlists, quota] = await Promise.all([
+    const [songs, queue, deleted, playlists, quota, playback] = await Promise.all([
       this.readSongIndex(folderId),
       this.readQueueIndex(folderId),
       this.readDeletedIndex(folderId),
       this.readPlaylistIndex(folderId),
       this.fetchStorageQuota(),
+      this.readPlaybackLog(folderId),
     ]);
     return {
       songs: songs.songs || [],
       jobs: queue.jobs || [],
       deleted: deleted.deleted || [],
       playlists: playlists.playlists || [],
+      playbackEvents: playback.events || [],
       quota,
     };
   }

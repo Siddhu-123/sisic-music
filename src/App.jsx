@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
@@ -13,6 +13,7 @@ import {
   getPlaylistSnapshotForDrive,
   markSongPlayable,
   resetLocalDatabase,
+  recordPlaybackEvent,
   syncDownloadJobsToDb,
   touchSongPlayed,
   syncPlaylistIndexToDb,
@@ -23,7 +24,7 @@ import {
 import { driveService } from './services/GoogleDriveService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth';
-import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components';
+import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components';
 import { QueuePanel } from './components/QueuePanel';
 import { ToastContainer } from './components/Toast';
 import { useToast } from './hooks/useToast';
@@ -34,7 +35,7 @@ import { processPendingEmbeddingJobs } from './services/embeddingService';
 import './App.css';
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DOWNLOADS: 'downloads' };
-const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], error: '' };
+const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
 const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
 const LISTENING_HISTORY_KEY = 'listening history';
@@ -74,6 +75,73 @@ function currentGreeting() {
 
 function isPlayable(song) {
   return Boolean(song?.driveFileId || song?.isDownloaded || song?.isCached || song?.hasBlob);
+}
+
+function buildAnalyticsExport({ songs = [], playlists = [], downloadJobs = [], importJobs = [], embeddingJobs = [], playbackEvents = [], drivePlaybackEvents = [], syncOutbox = [] }) {
+  const queuedEvents = syncOutbox
+    .filter(item => item.entityType === 'playback-event' && item.payload?.id)
+    .map(item => item.payload);
+  const eventsById = new Map([...drivePlaybackEvents, ...playbackEvents, ...queuedEvents].map(event => [event.id || event.eventId, event]));
+  const events = [...eventsById.values()].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  const starts = events.filter(event => ['playback-start', 'playback-resume'].includes(event.eventType));
+  const listenedSeconds = events
+    .filter(event => ['playback-complete', 'playback-short-ended', 'playback-pause', 'playback-stop', 'user-skip', 'playback-stream-error'].includes(event.eventType))
+    .reduce((total, event) => total + Math.max(0, Number(event.positionSeconds) || 0), 0);
+  const songByKey = new Map(songs.map(song => [song.songKey, song]));
+  const countBy = (items, key) => items.reduce((counts, item) => {
+    const value = String(item[key] || 'Unknown').trim() || 'Unknown';
+    counts[value] = (counts[value] || 0) + 1;
+    return counts;
+  }, {});
+  const artistListening = {};
+  const artistListeningSeconds = {};
+  const startsBySong = {};
+  for (const event of starts) {
+    const artist = event.artist || songByKey.get(event.songKey)?.artist || 'Unknown';
+    artistListening[artist] = (artistListening[artist] || 0) + 1;
+    startsBySong[event.songKey] = (startsBySong[event.songKey] || 0) + 1;
+  }
+  for (const event of events.filter(item => ['playback-complete', 'playback-short-ended', 'playback-pause', 'playback-stop', 'user-skip', 'playback-stream-error'].includes(item.eventType))) {
+    const artist = event.artist || songByKey.get(event.songKey)?.artist || 'Unknown';
+    artistListeningSeconds[artist] = (artistListeningSeconds[artist] || 0) + Math.max(0, Number(event.positionSeconds) || 0);
+  }
+
+  return {
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    songs: songs.map(song => ({ ...song })),
+    playlists: playlists.map(playlist => ({ ...playlist })),
+    downloadJobs: downloadJobs.map(job => ({ ...job })),
+    importJobs: importJobs.map(job => ({ ...job })),
+    embeddingJobs: embeddingJobs.map(job => ({ ...job })),
+    metrics: {
+      totalSongs: songs.length,
+      totalArtists: new Set(songs.map(song => song.artist).filter(Boolean)).size,
+      totalPlayCount: songs.reduce((total, song) => total + (Number(song.playCount) || 0), 0),
+      totalPlaybackEvents: events.length,
+      totalPlaybackStarts: starts.length,
+      replayCount: Object.values(startsBySong).reduce((total, count) => total + Math.max(0, count - 1), 0),
+      skipCount: events.filter(event => event.eventType === 'user-skip').length,
+      estimatedListeningSeconds: Math.round(listenedSeconds),
+      estimatedListeningMinutes: Math.round(listenedSeconds / 60),
+      uniquePlayedSongs: new Set(starts.map(event => event.songKey).filter(Boolean)).size,
+      uniquePlayedArtists: new Set(starts.map(event => event.artist || songByKey.get(event.songKey)?.artist).filter(Boolean)).size,
+      playbackEventTypes: countBy(events, 'eventType'),
+      topArtistsByStarts: Object.entries(artistListening)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 25)
+        .map(([artist, plays]) => ({ artist, plays })),
+      topArtistsByListeningSeconds: Object.entries(artistListeningSeconds)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 25)
+        .map(([artist, seconds]) => ({ artist, seconds: Math.round(seconds) })),
+      replaysBySong: Object.entries(startsBySong)
+        .map(([songKey, count]) => ({ songKey, track: songByKey.get(songKey)?.track || '', artist: songByKey.get(songKey)?.artist || '', plays: count, replays: Math.max(0, count - 1) }))
+        .filter(item => item.replays > 0)
+        .sort((a, b) => b.replays - a.replays),
+    },
+    playbackEvents: events,
+  };
 }
 
 function mergeJob(song, jobBySongKey) {
@@ -128,10 +196,12 @@ function App() {
   const [catalogue, setCatalogue] = useState([]);
   const [driveIndexSongs, setDriveIndexSongs] = useState([]);
   const [driveDeletedSongs, setDriveDeletedSongs] = useState([]);
+  const [drivePlaybackEvents, setDrivePlaybackEvents] = useState([]);
   const [driveQuota, setDriveQuota] = useState(null);
   const [showStoragePanel, setShowStoragePanel] = useState(false);
   const [playlistPicker, setPlaylistPicker] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [songInfo, setSongInfo] = useState(null);
   const [reviewSong, setReviewSong] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
@@ -201,9 +271,10 @@ function App() {
   const allSongs = safeLibraryData.songs;
   const playlists = safeLibraryData.playlists;
   const localDbError = safeLibraryData.error;
-  const importJobs = safeLibraryData.importJobs || [];
+  const importJobs = useMemo(() => safeLibraryData.importJobs || [], [safeLibraryData.importJobs]);
   const embeddingJobs = useMemo(() => safeLibraryData.embeddingJobs || [], [safeLibraryData.embeddingJobs]);
   const syncOutbox = useMemo(() => safeLibraryData.syncOutbox || [], [safeLibraryData.syncOutbox]);
+  const playbackEvents = useMemo(() => safeLibraryData.playbackEvents || [], [safeLibraryData.playbackEvents]);
 
   const runImport = useCallback(async (files = []) => {
     const audioFiles = files.filter(file => file?.name);
@@ -524,6 +595,7 @@ function App() {
         if (cancelled) return;
         setDriveIndexSongs(result.songs || []);
         setDriveDeletedSongs(result.deleted || []);
+        setDrivePlaybackEvents(result.playbackEvents || []);
         setDriveQuota(result.quota || null);
         await syncDownloadJobsToDb(result.jobs || []);
         await syncPlaylistIndexToDb(result.playlists || []);
@@ -831,6 +903,7 @@ function App() {
       console.warn('Playback anomaly:', playbackEvent);
     }
     const syncPlaybackEvent = async () => {
+      await recordPlaybackEvent(playbackEvent);
       if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) {
         await enqueueSyncOutbox({
           entityType: 'playback-event',
@@ -853,6 +926,29 @@ function App() {
     };
     syncPlaybackEvent().catch(error => console.warn('Playback telemetry queue failed:', error));
   }, [isAuthenticated, playbackEvent]);
+
+  const handleExportData = useCallback(() => {
+    const exportData = buildAnalyticsExport({
+      songs: allSongs,
+      playlists,
+      downloadJobs: safeLibraryData.downloadJobs || [],
+      importJobs,
+      embeddingJobs,
+      playbackEvents,
+      drivePlaybackEvents,
+      syncOutbox,
+    });
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `sisic-music-export-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    addToast(`Exported ${exportData.songs.length} songs and ${exportData.playbackEvents.length} playback events`);
+  }, [addToast, allSongs, drivePlaybackEvents, embeddingJobs, importJobs, playbackEvents, playlists, safeLibraryData.downloadJobs, syncOutbox]);
 
   // Streaming is the default. Full audio downloads only happen through the explicit offline button.
 
@@ -1096,6 +1192,7 @@ function App() {
       onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
       onAddToPlaylist={openPlaylistPicker}
       onReview={setReviewSong}
+      onInfo={setSongInfo}
       onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
       isCurrentSong={player.currentSongKey === song.songKey}
@@ -1106,9 +1203,14 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar__logo">
+        <button
+          type="button"
+          className="sidebar__logo"
+          onClick={() => { setView(VIEWS.HOME); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); }}
+          aria-label="Go to Sisic Music home"
+        >
           <span>♪</span> Sisic Music
-        </div>
+        </button>
 
         <nav className="sidebar__nav" aria-label="Main navigation">
           {navItems.map(item => (
@@ -1138,9 +1240,9 @@ function App() {
         />
 
         {visiblePlaylists.length > 0 && (
-          <>
+          <div className="sidebar__playlists">
             <div className="sidebar__section-label">Playlists</div>
-            <div>
+            <div className="sidebar__playlist-list">
               {visiblePlaylists.map(playlist => (
                 <button
                   key={playlist.playlistKey}
@@ -1151,7 +1253,7 @@ function App() {
                 </button>
               ))}
             </div>
-          </>
+          </div>
         )}
       </aside>
 
@@ -1193,6 +1295,10 @@ function App() {
           <button className="drive-summary__button" onClick={() => setShowStoragePanel(true)}>
             <BarChart3 size={16} />
             <span>Storage</span>
+          </button>
+          <button className="drive-summary__button" onClick={handleExportData} title="Export songs, playlists, metrics, and playback history">
+            <FileDown size={16} />
+            <span>Export</span>
           </button>
         </section>
 
@@ -1386,15 +1492,19 @@ function App() {
                 <RefreshCw size={16} />
                 <span>Reconcile</span>
               </button>
+              <button className="panel-action-btn" onClick={handleExportData}>
+                <FileDown size={16} />
+                <span>Export full data</span>
+              </button>
             </div>
             {largestReadySongs.length > 0 && (
               <div className="storage-list">
                 <h3>Largest Ready Songs</h3>
                 {largestReadySongs.map(song => (
-                  <div key={song.songKey} className="storage-list__row">
-                    <span>{song.track}</span>
+                  <button key={song.songKey} type="button" className="storage-list__row" onClick={() => setSongInfo(song)}>
+                    <span>{song.track}<small>{song.artist}</small></span>
                     <em>{formatBytes(song.size)}</em>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -1451,6 +1561,20 @@ function App() {
       )}
 
       {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />}
+      {songInfo && (
+        <SongInfoPanel
+          song={songInfo}
+          onClose={() => setSongInfo(null)}
+          onPlay={song => handlePlaySong(song, [song])}
+          onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
+          onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+          onAddToPlaylist={openPlaylistPicker}
+          onReview={song => { setSongInfo(null); setReviewSong(song); }}
+          onDelete={handleDeleteReadySong}
+          onDownload={handleDownload}
+          isDownloading={downloadingKeys.has(songInfo.songKey)}
+        />
+      )}
       {reviewSong && (
         <SongReviewPanel
           song={reviewSong}
@@ -1461,7 +1585,17 @@ function App() {
           busy={reviewBusy}
         />
       )}
-      <PlayerBar player={player} onToggleQueue={() => setShowQueue(open => !open)} />
+      <PlayerBar
+        player={player}
+        onToggleQueue={() => setShowQueue(open => !open)}
+        onOpenSongInfo={setSongInfo}
+        onAddToPlaylist={openPlaylistPicker}
+        onDelete={handleDeleteReadySong}
+        onReview={setReviewSong}
+        onDownload={handleDownload}
+        onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
+        onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+      />
       <ToastContainer toasts={toasts} />
 
       <nav className="mobile-nav" aria-label="Mobile navigation">

@@ -27,6 +27,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
     removeFromQueue,
     reorderQueue,
     clearQueue,
+    playQueueItem,
   } = player;
   const upcoming = queue.slice(queueIndex + 1, queueIndex + 21);
 
@@ -86,7 +87,22 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
       {player.currentSong && (
         <div className="queue-section">
           <div className="queue-section__label">Now Playing</div>
-          <div className="queue-item queue-item--active">
+          <div
+            className="queue-item queue-item--active queue-item--clickable"
+            role="button"
+            tabIndex={0}
+            onClick={event => {
+              if (event.target.closest('button')) return;
+              playQueueItem(queueIndex);
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                playQueueItem(queueIndex);
+              }
+            }}
+            title="Pause or resume"
+          >
             <div className="queue-item__bars"><span /><span /><span /></div>
             <div className="queue-item__info">
               <span className="queue-item__title">{player.currentSong.track}</span>
@@ -108,7 +124,24 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
             {upcoming.map((song, index) => {
               const queuePosition = queueIndex + 1 + index;
               return (
-              <div key={`${song.songKey}-${index}`} className="queue-item">
+              <div
+                key={`${song.songKey}-${index}`}
+                className="queue-item queue-item--clickable"
+                role="button"
+                tabIndex={0}
+                onClick={event => {
+                  if (event.target.closest('button')) return;
+                  playQueueItem(queuePosition);
+                }}
+                onKeyDown={event => {
+                  if (event.target.closest('button')) return;
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    playQueueItem(queuePosition);
+                  }
+                }}
+                title={`Play ${song.track}`}
+              >
                 <span className="queue-item__num">{index + 1}</span>
                 <div className="queue-item__info">
                   <span className="queue-item__title">{song.track}</span>

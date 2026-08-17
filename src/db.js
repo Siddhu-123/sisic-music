@@ -151,6 +151,21 @@ db.version(6).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 6 });
 });
 
+db.version(7).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, isDownloaded, isCached, playCount, lastPlayedAt, cachedAt, fileIdentity, importStatus, syncStatus, embeddingStatus',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songAudio: '&songKey, cachedAt, cacheSizeBytes, explicit',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  playbackEvents: '&eventId, songKey, eventType, createdAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 7 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -162,6 +177,14 @@ function normalizeSongInput(input = {}) {
     track: song.track,
     artist: song.artist,
     album: song.album || '',
+    description: song.description || '',
+    lyrics: song.lyrics || '',
+    genre: song.genre || '',
+    releaseDate: song.releaseDate || '',
+    dateCreated: song.dateCreated || '',
+    coverArtUrl: song.coverArtUrl || '',
+    metadataStatus: song.metadataStatus || '',
+    metadataSource: song.metadataSource || '',
     driveFileId: song.driveFileId || null,
     isDownloaded: Boolean(song.isDownloaded),
     isCached: Boolean(song.isCached),
@@ -189,6 +212,14 @@ function bestSongMerge(previous, incoming) {
     track: incoming.track || previous.track,
     artist: incoming.artist || previous.artist,
     album: incoming.album || previous.album || '',
+    description: incoming.description || previous.description || '',
+    lyrics: incoming.lyrics || previous.lyrics || '',
+    genre: incoming.genre || previous.genre || '',
+    releaseDate: incoming.releaseDate || previous.releaseDate || '',
+    dateCreated: incoming.dateCreated || previous.dateCreated || '',
+    coverArtUrl: incoming.coverArtUrl || previous.coverArtUrl || '',
+    metadataStatus: incoming.metadataStatus || previous.metadataStatus || '',
+    metadataSource: incoming.metadataSource || previous.metadataSource || '',
     driveFileId: incoming.driveFileId || previous.driveFileId || null,
     isDownloaded: Boolean(previous.isDownloaded || incoming.isDownloaded),
     isCached: Boolean(previous.isCached || incoming.isCached),
@@ -433,6 +464,13 @@ export async function touchSongPlayed(songKey) {
   });
 }
 
+export async function recordPlaybackEvent(event = {}) {
+  if (!event?.id) return null;
+  const row = { eventId: event.id, ...event };
+  await db.playbackEvents.put(row);
+  return row;
+}
+
 export async function cacheSongBlob(songKey, blob, driveFileId, { explicit = false } = {}) {
   if (!songKey || !blob) return;
   const song = await db.songs.where('songKey').equals(songKey).first();
@@ -605,7 +643,7 @@ export async function syncDownloadJobsToDb(jobs = []) {
 
 export async function getLibrarySnapshot() {
   try {
-    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, importJobs, embeddingJobs, syncOutbox] = await Promise.all([
+    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
       db.songs.toArray(),
       db.playlists.toArray(),
       db.playlistSongs.toArray(),
@@ -614,6 +652,7 @@ export async function getLibrarySnapshot() {
       db.importJobs.toArray(),
       db.embeddingJobs.toArray(),
       db.syncOutbox.toArray(),
+      db.playbackEvents.toArray(),
     ]);
 
     const playlistByKey = new Map(playlistsRaw.map(pl => [pl.playlistKey, pl]));
@@ -670,11 +709,12 @@ export async function getLibrarySnapshot() {
       importJobs: importJobs.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
       embeddingJobs: embeddingJobs.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
       syncOutbox: syncOutbox.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
+      playbackEvents: playbackEvents.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || ''))),
       error: '',
     };
   } catch (error) {
     console.error('Local music cache failed:', error);
-    return { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], error: `Local music cache is unavailable: ${errorMessage(error)}` };
+    return { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: `Local music cache is unavailable: ${errorMessage(error)}` };
   }
 }
 

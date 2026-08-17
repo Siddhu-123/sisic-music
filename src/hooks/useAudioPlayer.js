@@ -781,6 +781,20 @@ export function useAudioPlayer() {
     });
   }, []);
 
+  const playQueueItem = useCallback((index) => {
+    const activeQueue = queueRef.current;
+    if (index < 0 || index >= activeQueue.length) return false;
+    if (index === queueIndexRef.current && currentSong) {
+      togglePlay();
+      return true;
+    }
+    setError('');
+    queueIndexRef.current = index;
+    setQueueIndex(index);
+    setResumeOnRestore(true);
+    return true;
+  }, [currentSong, togglePlay]);
+
   return {
     audioRef,
     currentSong,
@@ -812,6 +826,7 @@ export function useAudioPlayer() {
     reorderQueue: reorderQueueItems,
     clearQueue,
     setQueueAndPlay,
+    playQueueItem,
     toggleShuffle,
     toggleRepeat,
   };
