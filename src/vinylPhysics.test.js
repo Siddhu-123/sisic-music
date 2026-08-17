@@ -29,5 +29,5 @@ test('tonearm progress covers the center-to-edge groove arc', () => {
   assert.equal(tonearmProgressFromAngle(TONEARM_END_ANGLE), 100);
   assert.equal(tonearmAngleFromProgress(0), TONEARM_START_ANGLE);
   assert.equal(tonearmAngleFromProgress(100), TONEARM_END_ANGLE);
-  assert.equal(tonearmProgressFromAngle(-27), 50);
+  assert.equal(tonearmProgressFromAngle((TONEARM_START_ANGLE + TONEARM_END_ANGLE) / 2), 50);
 });

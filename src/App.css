@@ -3123,6 +3123,7 @@ input:focus-visible {
   display: grid;
   place-items: center;
   isolation: isolate;
+  container-type: inline-size;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -3140,16 +3141,136 @@ input:focus-visible {
 .record-player__scratch-layer--dragging { cursor: grabbing; }
 
 .record-player .expanded-player__art {
+  position: relative;
   width: 100%;
   height: 100%;
   max-width: none;
   max-height: none;
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background:
+    /* Layer 1: Primary Butterfly / Anisotropic Light Reflection (Opposing Beams) */
+    conic-gradient(
+      from 45deg,
+      rgba(255, 255, 255, 0) 0deg,
+      rgba(255, 255, 255, 0.15) 24deg,
+      rgba(255, 255, 255, 0) 48deg,
+      rgba(255, 255, 255, 0) 180deg,
+      rgba(255, 255, 255, 0.15) 204deg,
+      rgba(255, 255, 255, 0) 228deg,
+      rgba(255, 255, 255, 0) 360deg
+    ),
+    /* Layer 2: Secondary Softer Ambient Reflection */
+    conic-gradient(
+      from 135deg,
+      rgba(255, 255, 255, 0) 0deg,
+      rgba(255, 255, 255, 0.07) 28deg,
+      rgba(255, 255, 255, 0) 56deg,
+      rgba(255, 255, 255, 0) 180deg,
+      rgba(255, 255, 255, 0.07) 208deg,
+      rgba(255, 255, 255, 0) 236deg,
+      rgba(255, 255, 255, 0) 360deg
+    ),
+    /* Layer 3: Track Bands, Dead-wax (Run-out Groove), and Outer Edge Rim */
+    radial-gradient(
+      circle at center,
+      transparent 0%,
+      transparent 33%,
+      rgba(15, 16, 20, 0.96) 34%,
+      rgba(8, 9, 12, 0.25) 39%,
+      rgba(8, 9, 12, 0.1) 88%,
+      rgba(20, 22, 27, 0.94) 89%,
+      #07080a 97%,
+      #040506 100%
+    ),
+    /* Layer 4: Micro-Grooves (Concentric Cut Lines scaled with container size) */
+    repeating-radial-gradient(
+      circle at center,
+      #14161c 0px,
+      #14161c 0.3cqi,
+      #08090c 0.5cqi,
+      #22252e 0.7cqi,
+      #08090c 0.9cqi
+    ) !important;
+  box-shadow:
+    0 3.6cqi 8cqi rgba(0, 0, 0, 0.65),
+    0 0.8cqi 2.4cqi rgba(0, 0, 0, 0.45),
+    inset 0 0 0 0.3cqi rgba(255, 255, 255, 0.08),
+    inset 0 0 1.6cqi 0.6cqi rgba(0, 0, 0, 0.85);
   animation: record-spin 1.333333s linear infinite;
   animation-play-state: paused;
   will-change: transform;
 }
 
+.record-player .expanded-player__art::before,
+.record-player .expanded-player__art::after {
+  content: none;
+}
+
 .record-player--playing .expanded-player__art { animation-play-state: running; }
+
+/* Center Album Label on Vinyl */
+.record-player__center-label {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 36%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  box-shadow:
+    0 0 0 0.4cqi rgba(0, 0, 0, 0.75),
+    0 0 2.4cqi rgba(0, 0, 0, 0.6),
+    inset 0 0 0 0.2cqi rgba(255, 255, 255, 0.2);
+  z-index: 2;
+}
+
+/* Album artwork image */
+.record-player__center-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+}
+
+/* Fallback gradient if no artwork URL */
+.record-player__center-fallback {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+
+/* Center Spindle Hole & Metallic Bezel */
+.record-player__spindle-hole {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 18%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at center,
+    #050505 0%,
+    #0d0e12 50%,
+    #636877 78%,
+    #9aa0b0 90%,
+    #2c2f38 100%
+  );
+  box-shadow:
+    inset 0 0.4cqi 0.8cqi rgba(0, 0, 0, 0.95),
+    0 0.2cqi 0.4cqi rgba(255, 255, 255, 0.3);
+  z-index: 3;
+  pointer-events: none;
+}
 
 .record-player__tonearm {
   position: absolute;
@@ -3157,15 +3278,15 @@ input:focus-visible {
   top: 1%;
   right: -1%;
   width: 62%;
-  height: 64px;
+  height: 12.8cqi;
   padding: 0;
   border: 0;
-  border-radius: 32px;
+  border-radius: 6.4cqi;
   color: inherit;
   background: transparent;
   box-shadow: none;
-  transform: rotate(var(--tonearm-angle, -42deg));
-  transform-origin: calc(100% - 15px) 50%;
+  transform: rotate(var(--tonearm-angle, -14deg));
+  transform-origin: calc(100% - 3cqi) 50%;
   transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), filter 0.2s ease;
   cursor: grab;
   touch-action: none;
@@ -3174,31 +3295,31 @@ input:focus-visible {
 
 .record-player__tonearm:hover { background: transparent; box-shadow: none; }
 .record-player__tonearm::after { content: none; }
-.record-player__tonearm--dragging { transition: none; cursor: grabbing; filter: drop-shadow(0 12px 12px rgba(38, 41, 49, 0.28)); }
-.record-player__tonearm--lifted { filter: drop-shadow(0 13px 12px rgba(38, 41, 49, 0.3)); }
+.record-player__tonearm--dragging { transition: none; cursor: grabbing; filter: drop-shadow(0 2.4cqi 2.4cqi rgba(38, 41, 49, 0.28)); }
+.record-player__tonearm--lifted { filter: drop-shadow(0 2.6cqi 2.4cqi rgba(38, 41, 49, 0.3)); }
 
 .record-player__tonearm-pivot {
   position: absolute;
   right: 0;
   top: 50%;
-  width: 30px;
-  height: 30px;
-  border: 5px solid #d9dce2;
+  width: 6cqi;
+  height: 6cqi;
+  border: 1cqi solid #d9dce2;
   border-radius: 50%;
   background: #17191e;
-  box-shadow: 4px 4px 9px rgba(95, 100, 111, 0.46), -3px -3px 7px rgba(255, 255, 255, 0.88);
+  box-shadow: 0.8cqi 0.8cqi 1.8cqi rgba(95, 100, 111, 0.46), -0.6cqi -0.6cqi 1.4cqi rgba(255, 255, 255, 0.88);
   transform: translateY(-50%);
 }
 
 .record-player__tonearm-shaft {
   position: absolute;
   left: 8%;
-  right: 24px;
+  right: 4.8cqi;
   top: 50%;
-  height: 8px;
+  height: 1.6cqi;
   border-radius: 999px;
   background: linear-gradient(180deg, #747985, #2f323a 58%, #15171c);
-  box-shadow: 0 3px 5px rgba(33, 35, 42, 0.34), inset 0 1px 1px rgba(255, 255, 255, 0.5);
+  box-shadow: 0 0.6cqi 1cqi rgba(33, 35, 42, 0.34), inset 0 0.2cqi 0.2cqi rgba(255, 255, 255, 0.5);
   transform: translateY(-50%);
 }
 
@@ -3206,21 +3327,21 @@ input:focus-visible {
   position: absolute;
   left: 0;
   top: 50%;
-  width: 54px;
-  height: 24px;
-  border-radius: 8px 4px 4px 8px;
+  width: 10.8cqi;
+  height: 4.8cqi;
+  border-radius: 1.6cqi 0.8cqi 0.8cqi 1.6cqi;
   background: linear-gradient(145deg, #30333a, #111216);
-  box-shadow: 3px 4px 8px rgba(25, 27, 32, 0.35);
+  box-shadow: 0.6cqi 0.8cqi 1.6cqi rgba(25, 27, 32, 0.35);
   transform: translateY(-50%) rotate(-4deg);
 }
 
 .record-player__stylus {
   position: absolute;
-  left: 9px;
-  bottom: -7px;
-  width: 4px;
-  height: 10px;
-  border-radius: 2px;
+  left: 1.8cqi;
+  bottom: -1.4cqi;
+  width: 0.8cqi;
+  height: 2cqi;
+  border-radius: 0.4cqi;
   background: var(--green);
   transform-origin: 50% 0;
   transition: transform 0.2s ease, opacity 0.2s ease;
@@ -3228,23 +3349,23 @@ input:focus-visible {
 
 .record-player__tonearm--lifted .record-player__stylus {
   opacity: 0.72;
-  transform: translateY(-9px);
+  transform: translateY(-1.8cqi);
 }
 
 .record-player__readout {
   position: absolute;
   z-index: 8;
   left: 50%;
-  bottom: -42px;
+  bottom: -8.4cqi;
   width: max-content;
   max-width: 94%;
-  padding: 7px 12px;
+  padding: 1.4cqi 2.4cqi;
   overflow: hidden;
   border-radius: 999px;
   color: var(--text-muted);
   background: rgba(231, 232, 236, 0.88);
   box-shadow: var(--shadow-soft);
-  font-size: 0.72rem;
+  font-size: clamp(0.68rem, 2.4cqi, 0.72rem);
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;

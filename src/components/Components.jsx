@@ -224,6 +224,7 @@ export function ExpandedPlayer({
 
   if (!currentSong) return null;
 
+  const songCover = currentSong.coverArtUrl || currentSong.artwork || currentSong.image || currentSong.cover || '';
   const displayedProgress = clamp(previewProgress ?? progress, 0, 100);
   const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
   const tonearmAngle = completed
@@ -272,10 +273,25 @@ export function ExpandedPlayer({
               >
                 <div
                   className="expanded-player__art"
-                  style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
-                  aria-label="Song artwork placeholder"
+                  aria-label={`${currentSong.track} by ${currentSong.artist}`}
                 >
-                  <span className="expanded-player__art-icon">♪</span>
+                  <div className="record-player__center-label">
+                    {songCover ? (
+                      <img
+                        src={songCover}
+                        alt={`${currentSong.track} cover`}
+                        className="record-player__center-img"
+                      />
+                    ) : (
+                      <div
+                        className="record-player__center-fallback"
+                        style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
+                      >
+                        <span className="expanded-player__art-icon">♪</span>
+                      </div>
+                    )}
+                    <span className="record-player__spindle-hole" />
+                  </div>
                 </div>
               </div>
               <button

@@ -1,7 +1,7 @@
 export const VINYL_RPM = 45;
 export const VINYL_SECONDS_PER_TURN = 60 / VINYL_RPM;
-export const TONEARM_START_ANGLE = -42;
-export const TONEARM_END_ANGLE = -12;
+export const TONEARM_START_ANGLE = -14;
+export const TONEARM_END_ANGLE = 17;
 export const TONEARM_LIFTED_ANGLE = 6;
 
 export function clamp(value, minimum, maximum) {
