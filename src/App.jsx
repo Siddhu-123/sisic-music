@@ -129,7 +129,6 @@ function App() {
   const loadAndPlayRef = useRef(null);
   const playNextRef = useRef(null);
   const setPlayerErrorRef = useRef(null);
-  const manualQueueSelectionRef = useRef(false);
   const {
     currentSongKey,
     isPlaying,
@@ -295,36 +294,21 @@ function App() {
     return map;
   }, [safeLibraryData.downloadJobs]);
 
-  const driveIndexByKey = useMemo(() => (
-    new Map(driveIndexSongs.filter(song => song.songKey).map(song => [song.songKey, song]))
-  ), [driveIndexSongs]);
-
-  const allSongsWithDrive = useMemo(() => allSongs.map(song => {
-    const indexed = driveIndexByKey.get(song.songKey);
-    if (!indexed?.driveFileId) return mergeJob(song, jobBySongKey);
-    return mergeJob({
-      ...song,
-      driveFileId: indexed.driveFileId,
-      filename: indexed.filename || song.filename || '',
-      mimeType: indexed.mimeType || song.mimeType || 'audio/mpeg',
-      size: Number(indexed.size || song.size || 0),
-    }, jobBySongKey);
-  }), [allSongs, driveIndexByKey, jobBySongKey]);
-
   const allSongsByKey = useMemo(() => {
-    return new Map(allSongsWithDrive.map(song => [song.songKey, song]));
-  }, [allSongsWithDrive]);
+    return new Map(allSongs.map(song => [song.songKey, mergeJob(song, jobBySongKey)]));
+  }, [allSongs, jobBySongKey]);
 
   const topPlayed = useMemo(() => {
-    return [...allSongsWithDrive]
+    return [...allSongs]
       .filter(song => (song.playCount || 0) > 0)
       .sort((a, b) => (b.playCount || 0) - (a.playCount || 0))
-      .slice(0, 8);
-  }, [allSongsWithDrive]);
+      .slice(0, 8)
+      .map(song => mergeJob(song, jobBySongKey));
+  }, [allSongs, jobBySongKey]);
 
   const availableSongs = useMemo(() => {
-    return allSongsWithDrive.filter(isPlayable);
-  }, [allSongsWithDrive]);
+    return allSongs.filter(isPlayable).map(song => mergeJob(song, jobBySongKey));
+  }, [allSongs, jobBySongKey]);
 
   const driveSongKeySet = useMemo(() => {
     return new Set(driveIndexSongs.map(song => song.songKey).filter(Boolean));
@@ -409,10 +393,10 @@ function App() {
 
   const librarySongs = useMemo(() => {
     if (!selectedPlaylistKey) return readyFolderSongs;
-    return allSongsWithDrive
+    return allSongs
       .filter(song => song.playlistKeys?.includes(selectedPlaylistKey))
       .map(song => mergeJob(song, jobBySongKey));
-  }, [allSongsWithDrive, selectedPlaylistKey, readyFolderSongs, jobBySongKey]);
+  }, [allSongs, selectedPlaylistKey, readyFolderSongs, jobBySongKey]);
 
   // Track whether we have pending jobs that need polling
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
@@ -605,8 +589,6 @@ function App() {
     let cancelled = false;
 
     const playSong = async () => {
-      const manuallySelected = manualQueueSelectionRef.current;
-      manualQueueSelectionRef.current = false;
       try {
         const resolved = await resolvePlayableSongRef.current(song, { queueIfMissing: true, showToast: false });
         if (cancelled || requestId !== playbackRequestRef.current) return;
@@ -618,7 +600,7 @@ function App() {
           return;
         }
         setPlayerErrorRef.current(`"${song.track}" is queued for download.`);
-        if (!manuallySelected && queueRef.current.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
+        if (queueRef.current.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
           window.setTimeout(() => {
             if (!cancelled && requestId === playbackRequestRef.current) {
               playNextRef.current({ avoidCurrent: true, stopOnBlocked: true });
@@ -883,11 +865,6 @@ function App() {
       setActionError(`Local cache reset failed: ${errorMessage(error)}`);
     }
   }, []);
-
-  const handlePlayQueueItem = useCallback((index) => {
-    manualQueueSelectionRef.current = true;
-    player.playQueueItem(index);
-  }, [player]);
 
   if (!isAuthenticated) {
     return <LoginScreen onLogin={login} error={authError} />;
@@ -1254,15 +1231,7 @@ function App() {
         </div>
       )}
 
-      {showQueue && (
-        <QueuePanel
-          player={player}
-          jobBySongKey={jobBySongKey}
-          onClose={() => setShowQueue(false)}
-          onRetry={handleDownload}
-          onPlayQueueItem={handlePlayQueueItem}
-        />
-      )}
+      {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />}
       <PlayerBar player={player} onToggleQueue={() => setShowQueue(open => !open)} />
       <ToastContainer toasts={toasts} />
 

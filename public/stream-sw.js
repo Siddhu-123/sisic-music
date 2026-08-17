@@ -52,11 +52,7 @@ async function streamDriveFile(fileId, request) {
       return streamError(message || `Drive stream failed: ${upstream.status}`, upstream.status, upstream.statusText);
     }
 
-    const upstreamBody = await upstream.arrayBuffer();
-    const body = sliceRangeBody(upstreamBody, upstream, start, end);
-    if (body.byteLength === 0) {
-      throw new Error(`Drive returned an empty range for bytes ${start}-${end}.`);
-    }
+    const body = await upstream.arrayBuffer();
     const actualEnd = start + body.byteLength - 1;
     const responseHeaders = new Headers({
       'Accept-Ranges': 'bytes',
@@ -74,16 +70,6 @@ async function streamDriveFile(fileId, request) {
   } catch (error) {
     return streamError(error instanceof Error ? error.message : 'Drive stream failed.', 502, 'Bad Gateway');
   }
-}
-
-function sliceRangeBody(buffer, response, requestedStart, requestedEnd) {
-  const bytes = new Uint8Array(buffer);
-  const requestedLength = requestedEnd - requestedStart + 1;
-  const contentRange = response.headers.get('Content-Range') || '';
-  const rangeMatch = /^bytes\s+(\d+)-(\d+)\//i.exec(contentRange);
-  const upstreamStart = rangeMatch ? Number(rangeMatch[1]) : (response.status === 200 ? 0 : requestedStart);
-  const offset = Math.max(0, requestedStart - upstreamStart);
-  return bytes.slice(offset, offset + requestedLength);
 }
 
 async function getFileMetadata(fileId) {
@@ -160,28 +146,17 @@ function requestedRange(rangeHeader, fileSize) {
   };
 }
 
-async function fetchDriveRange(fileId, start, end, attempt = 0) {
-  try {
-    const response = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
-      {
-        cache: 'no-store',
-        headers: {
-          Authorization: `Bearer ${driveAccessToken}`,
-          Range: `bytes=${start}-${end}`,
-        },
-      }
-    );
-    if (response.status >= 500 && attempt < 2) {
-      await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
-      return fetchDriveRange(fileId, start, end, attempt + 1);
+function fetchDriveRange(fileId, start, end) {
+  return fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
+    {
+      cache: 'no-store',
+      headers: {
+        Authorization: `Bearer ${driveAccessToken}`,
+        Range: `bytes=${start}-${end}`,
+      },
     }
-    return response;
-  } catch (error) {
-    if (attempt >= 2) throw error;
-    await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
-    return fetchDriveRange(fileId, start, end, attempt + 1);
-  }
+  );
 }
 
 function streamError(message, status, statusText = '') {

@@ -81,12 +81,6 @@ export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
           <p className="expanded-player__artist">{currentSong.artist}</p>
         </div>
 
-        <div className="expanded-player__details" aria-label="Song details">
-          <div><span>Album</span><strong>{currentSong.album || 'Single'}</strong></div>
-          <div><span>Duration</span><strong>{formatTime(duration || currentSong.durationSeconds)}</strong></div>
-          <div><span>Source</span><strong>{currentSong.driveFileId ? 'Google Drive' : 'Offline cache'}</strong></div>
-        </div>
-
         <div className="expanded-player__controls-area">
           <div className="expanded-progress">
             <span className="time-label">{formatTime((progress / 100) * duration)}</span>

@@ -14,7 +14,7 @@ function queueStatus(song, jobBySongKey) {
   return null;
 }
 
-export function QueuePanel({ player, jobBySongKey, onClose, onRetry, onPlayQueueItem }) {
+export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
   const {
     queue,
     queueIndex,
@@ -36,7 +36,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry, onPlayQueue
       <span className={`queue-pill ${status.className}`}>
         <Icon size={11} /> {status.label}
         {(status.className === 'queue-pill--error' || status.className === 'queue-pill--queued') && onRetry && (
-          <button className="queue-pill__retry" onClick={event => { event.stopPropagation(); onRetry(song); }} aria-label={`Retry ${song.track}`}>
+          <button className="queue-pill__retry" onClick={() => onRetry(song)} aria-label={`Retry ${song.track}`}>
             Retry
           </button>
         )}
@@ -100,27 +100,14 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry, onPlayQueue
             {upcoming.map((song, index) => {
               const queuePosition = queueIndex + 1 + index;
               return (
-              <div
-                key={`${song.songKey}-${index}`}
-                className="queue-item queue-item--clickable"
-                onClick={() => onPlayQueueItem?.(queuePosition)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onPlayQueueItem?.(queuePosition);
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-                title={`Play ${song.track}`}
-              >
+              <div key={`${song.songKey}-${index}`} className="queue-item">
                 <span className="queue-item__num">{index + 1}</span>
                 <div className="queue-item__info">
                   <span className="queue-item__title">{song.track}</span>
                   <span className="queue-item__artist">{song.artist}</span>
                 </div>
                 {renderStatus(song)}
-                <div className="queue-item__actions" onClick={event => event.stopPropagation()}>
+                <div className="queue-item__actions">
                   <button className="icon-btn" onClick={() => reorderQueue(queuePosition, queuePosition - 1)} aria-label={`Move ${song.track} up`} title="Move up">
                     <ChevronUp size={14} />
                   </button>

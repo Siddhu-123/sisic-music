@@ -719,20 +719,6 @@ export function useAudioPlayer() {
     setResumeOnRestore(false);
   }, [clearSource]);
 
-  const playQueueItem = useCallback((index) => {
-    const activeQueue = queueRef.current;
-    if (index < 0 || index >= activeQueue.length) return false;
-    if (index !== queueIndexRef.current) {
-      clearSource();
-      setCurrentSong(null);
-    }
-    queueIndexRef.current = index;
-    setQueueIndex(index);
-    setResumeOnRestore(true);
-    setResumePosition(0);
-    return true;
-  }, [clearSource]);
-
   const toggleRepeat = useCallback(() => {
     setRepeatMode(previous => {
       const modes = ['off', 'one', 'all'];
@@ -772,7 +758,6 @@ export function useAudioPlayer() {
     removeFromQueue,
     reorderQueue: reorderQueueItems,
     clearQueue,
-    playQueueItem,
     setQueueAndPlay,
     toggleShuffle,
     toggleRepeat,
