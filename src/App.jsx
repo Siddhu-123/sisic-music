@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
   cacheSongBlob,
   clearSongPlayable,
+  enqueueSyncOutbox,
   enforceAudioCacheLimit,
   getCachedSongAudio,
   getLibrarySnapshot,
@@ -15,26 +16,40 @@ import {
   syncDownloadJobsToDb,
   touchSongPlayed,
   syncPlaylistIndexToDb,
+  updateSongPipelineStatus,
+  updateSyncOutbox,
   upsertSongToDb,
 } from './db';
 import { driveService } from './services/GoogleDriveService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth';
-import { PlayerBar, SongCard, LoginScreen, SyncBanner } from './components/Components';
+import { ImportStatusPanel, PlayerBar, SongCard, LoginScreen, SyncBanner } from './components/Components';
 import { QueuePanel } from './components/QueuePanel';
 import { ToastContainer } from './components/Toast';
 import { useToast } from './hooks/useToast';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity';
+import { collectAudioFiles, importAudioFiles } from './services/importService';
+import { processPendingEmbeddingJobs } from './services/embeddingService';
 import './App.css';
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
-const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], error: '' };
+const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], error: '' };
 const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
 const LISTENING_HISTORY_KEY = 'listening history';
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
+}
+
+function isSyncRetryReady(operation) {
+  if (!operation.nextAttemptAt) return true;
+  const retryAt = Date.parse(operation.nextAttemptAt);
+  return !Number.isFinite(retryAt) || retryAt <= Date.now();
+}
+
+function syncRetryDelayMs(attempts) {
+  return Math.min(5 * 60 * 1000, 30 * 1000 * (2 ** Math.max(0, attempts - 1)));
 }
 
 function formatBytes(bytes = 0) {
@@ -101,6 +116,9 @@ function App() {
   const [driveQuota, setDriveQuota] = useState(null);
   const [showStoragePanel, setShowStoragePanel] = useState(false);
   const [playlistPicker, setPlaylistPicker] = useState(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [syncRetryTick, setSyncRetryTick] = useState(0);
+  const fileInputRef = useRef(null);
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
@@ -119,6 +137,8 @@ function App() {
     playbackEvent,
     queue,
     queueIndex,
+    resumeOnRestore,
+    resumePosition,
     setPlayerError,
   } = player;
   const activeQueueSong = queue[queueIndex] || null;
@@ -154,6 +174,108 @@ function App() {
   const allSongs = safeLibraryData.songs;
   const playlists = safeLibraryData.playlists;
   const localDbError = safeLibraryData.error;
+  const importJobs = safeLibraryData.importJobs || [];
+  const embeddingJobs = useMemo(() => safeLibraryData.embeddingJobs || [], [safeLibraryData.embeddingJobs]);
+  const syncOutbox = useMemo(() => safeLibraryData.syncOutbox || [], [safeLibraryData.syncOutbox]);
+
+  const runImport = useCallback(async (files = []) => {
+    const audioFiles = files.filter(file => file?.name);
+    if (!audioFiles.length) {
+      addToast('No supported audio files found.');
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const results = await importAudioFiles(audioFiles);
+      const completed = results.filter(result => result.status === 'complete').length;
+      const duplicates = results.filter(result => result.status === 'duplicate').length;
+      const failed = results.filter(result => result.status === 'failed').length;
+      addToast(`Imported ${completed}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? '' : 's'}` : ''}${failed ? ` · ${failed} failed` : ''}`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(`Import failed: ${message}`);
+    } finally {
+      setIsImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }, [addToast]);
+
+  const handleImportInput = useCallback(async event => {
+    await runImport([...event.target.files]);
+  }, [runImport]);
+
+  const handleDrop = useCallback(async event => {
+    event.preventDefault();
+    const items = event.dataTransfer?.items?.length
+      ? [...event.dataTransfer.items]
+      : [...(event.dataTransfer?.files || [])];
+    const files = await collectAudioFiles(items);
+    await runImport(files);
+  }, [runImport]);
+
+  useEffect(() => {
+    processPendingEmbeddingJobs({ limit: 2 }).catch(error => console.warn('Embedding queue processing failed:', error));
+  }, [embeddingJobs]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    const retryTimes = syncOutbox
+      .filter(item => item.status === 'queued' && item.nextAttemptAt)
+      .map(item => Date.parse(item.nextAttemptAt))
+      .filter(Number.isFinite);
+    if (!retryTimes.length) return undefined;
+    const delay = Math.max(1000, Math.min(...retryTimes) - Date.now());
+    const timer = window.setTimeout(() => setSyncRetryTick(value => value + 1), delay);
+    return () => window.clearTimeout(timer);
+  }, [isAuthenticated, syncOutbox]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
+    const pending = syncOutbox
+      .filter(item => item.status === 'queued' && isSyncRetryReady(item))
+      .slice(0, 3);
+    if (!pending.length) return undefined;
+    let cancelled = false;
+    const flushSyncOutbox = async () => {
+      for (const operation of pending) {
+        if (cancelled) return;
+        await updateSyncOutbox(operation.opId, { status: 'processing' });
+        try {
+          if (operation.entityType === 'playback-event') {
+            await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, operation.payload);
+          } else {
+            await driveService.mutateJsonIndex(DRIVE_FOLDER_ID, 'sisic-imports.json', 'imports', [], imports => {
+              const byKey = new Map(imports.filter(item => item.entityKey).map(item => [item.entityKey, item]));
+              byKey.set(operation.entityKey, {
+                ...operation.payload,
+                entityKey: operation.entityKey,
+                updatedAt: new Date().toISOString(),
+              });
+              return [...byKey.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+            });
+          }
+          await updateSyncOutbox(operation.opId, { status: 'done', error: '' });
+          if (operation.entityType === 'song') {
+            await updateSongPipelineStatus(operation.entityKey, { syncStatus: 'done' });
+          }
+        } catch (error) {
+          const attempts = Number(operation.attempts || 0) + 1;
+          await updateSyncOutbox(operation.opId, {
+            status: 'queued',
+            attempts,
+            error: errorMessage(error),
+            nextAttemptAt: new Date(Date.now() + syncRetryDelayMs(attempts)).toISOString(),
+          });
+          if (operation.entityType === 'song') {
+            await updateSongPipelineStatus(operation.entityKey, { syncStatus: 'queued' });
+          }
+        }
+      }
+    };
+    flushSyncOutbox();
+    return () => { cancelled = true; };
+  }, [isAuthenticated, syncOutbox, syncRetryTick]);
 
   const visiblePlaylists = useMemo(() => {
     return playlists.filter(playlist => playlist.playlistKey !== LISTENING_HISTORY_KEY);
@@ -471,7 +593,10 @@ function App() {
         const resolved = await resolvePlayableSongRef.current(song, { queueIfMissing: true, showToast: false });
         if (cancelled || requestId !== playbackRequestRef.current) return;
         if (resolved) {
-          await loadAndPlayRef.current(resolved, driveService.accessToken);
+          await loadAndPlayRef.current(resolved, driveService.accessToken, {
+            autoplay: resumeOnRestore,
+            startAt: resumePosition,
+          });
           return;
         }
         setPlayerErrorRef.current(`"${song.track}" is queued for download.`);
@@ -493,7 +618,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeQueueSongKey, queueIndex]);
+  }, [activeQueueSongKey, queueIndex, resumeOnRestore, resumePosition]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -503,13 +628,33 @@ function App() {
   }, [currentSongKey, isPlaying]);
 
   useEffect(() => {
-    if (!playbackEvent || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
+    if (!playbackEvent) return;
     if (playbackEvent.eventType === 'unexpected-playback-skip' || playbackEvent.eventType === 'playback-short-ended') {
       console.warn('Playback anomaly:', playbackEvent);
     }
-    driveService.appendPlaybackLog(DRIVE_FOLDER_ID, playbackEvent)
-      .catch(error => console.warn('Playback log write failed:', error));
-  }, [playbackEvent]);
+    const syncPlaybackEvent = async () => {
+      if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) {
+        await enqueueSyncOutbox({
+          entityType: 'playback-event',
+          entityKey: playbackEvent.id,
+          payload: playbackEvent,
+        });
+        return;
+      }
+      try {
+        await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, playbackEvent);
+      } catch (error) {
+        await enqueueSyncOutbox({
+          entityType: 'playback-event',
+          entityKey: playbackEvent.id,
+          payload: playbackEvent,
+          error: errorMessage(error),
+        });
+        console.warn('Playback log write failed; queued for retry:', error);
+      }
+    };
+    syncPlaybackEvent().catch(error => console.warn('Playback telemetry queue failed:', error));
+  }, [isAuthenticated, playbackEvent]);
 
   // Streaming is the default. Full audio downloads only happen through the explicit offline button.
 
@@ -748,6 +893,8 @@ function App() {
       song={{ ...song, isDeleted: deletedSongKeySet.has(song.songKey), status: playableStatus({ ...song, isDeleted: deletedSongKeySet.has(song.songKey) }) }}
       onPlay={(selected) => handlePlaySong(selected, list)}
       onDownload={handleDownload}
+      onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
+      onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
       onAddToPlaylist={openPlaylistPicker}
       onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
@@ -776,6 +923,19 @@ function App() {
           ))}
         </nav>
 
+        <button className="sidebar__import-btn" onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
+          <FolderOpen size={18} />
+          {isImporting ? 'Importing…' : 'Import music'}
+        </button>
+        <input
+          ref={fileInputRef}
+          className="import-input"
+          type="file"
+          accept="audio/*,.aac,.aiff,.flac,.m4a,.mp3,.ogg,.opus,.wav"
+          multiple
+          onChange={handleImportInput}
+        />
+
         {visiblePlaylists.length > 0 && (
           <>
             <div className="sidebar__section-label">Playlists</div>
@@ -794,7 +954,7 @@ function App() {
         )}
       </aside>
 
-      <main className="main-view">
+      <main className="main-view" onDragOver={event => event.preventDefault()} onDrop={handleDrop}>
         <SyncBanner
           isSyncing={isSyncing}
           syncStatus={bannerStatus}
@@ -803,6 +963,7 @@ function App() {
           actionLabel={localDbError ? 'Reset local cache' : ''}
           onAction={localDbError ? handleResetLocalCache : undefined}
         />
+        <ImportStatusPanel jobs={importJobs} embeddingJobs={embeddingJobs} />
 
         <section className="drive-summary" aria-label="Drive storage summary">
           <div>
@@ -1070,7 +1231,7 @@ function App() {
         </div>
       )}
 
-      {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} />}
+      {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />}
       <PlayerBar player={player} onToggleQueue={() => setShowQueue(open => !open)} />
       <ToastContainer toasts={toasts} />
 

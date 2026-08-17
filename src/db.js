@@ -137,6 +137,20 @@ db.version(5).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 5 });
 });
 
+db.version(6).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, isDownloaded, isCached, playCount, lastPlayedAt, cachedAt, fileIdentity, importStatus, syncStatus, embeddingStatus',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songAudio: '&songKey, cachedAt, cacheSizeBytes, explicit',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 6 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -156,6 +170,14 @@ function normalizeSongInput(input = {}) {
     playCount: song.playCount || 0,
     lastPlayedAt: song.lastPlayedAt || null,
     dateAdded: song.dateAdded || Date.now(),
+    durationSeconds: Number(song.durationSeconds || 0) || null,
+    format: song.format || '',
+    fileIdentity: song.fileIdentity || '',
+    localFileName: song.localFileName || '',
+    sourceType: song.sourceType || '',
+    importStatus: song.importStatus || '',
+    syncStatus: song.syncStatus || '',
+    embeddingStatus: song.embeddingStatus || '',
   };
 }
 
@@ -174,6 +196,14 @@ function bestSongMerge(previous, incoming) {
     playCount: Math.max(previous.playCount || 0, incoming.playCount || 0),
     lastPlayedAt: previous.lastPlayedAt || incoming.lastPlayedAt || null,
     dateAdded: previous.dateAdded || incoming.dateAdded || Date.now(),
+    durationSeconds: previous.durationSeconds || incoming.durationSeconds || null,
+    format: previous.format || incoming.format || '',
+    fileIdentity: previous.fileIdentity || incoming.fileIdentity || '',
+    localFileName: previous.localFileName || incoming.localFileName || '',
+    sourceType: previous.sourceType || incoming.sourceType || '',
+    importStatus: incoming.importStatus || previous.importStatus || '',
+    syncStatus: incoming.syncStatus || previous.syncStatus || '',
+    embeddingStatus: incoming.embeddingStatus || previous.embeddingStatus || '',
   };
 }
 
@@ -238,6 +268,109 @@ export async function upsertSongToDb(input, playlistName = '') {
     }
     return await db.songs.where('songKey').equals(incoming.songKey).first();
   });
+}
+
+function jobTimestamp() {
+  return new Date().toISOString();
+}
+
+export async function findSongByFileIdentity(fileIdentity) {
+  if (!fileIdentity) return null;
+  return await db.songs.where('fileIdentity').equals(fileIdentity).first();
+}
+
+export async function createImportJob(input = {}) {
+  const now = jobTimestamp();
+  const job = {
+    schemaVersion: 1,
+    jobId: input.jobId || crypto.randomUUID(),
+    songKey: input.songKey || '',
+    fileIdentity: input.fileIdentity || '',
+    fileName: input.fileName || '',
+    status: input.status || 'waiting',
+    progress: Number(input.progress || 0),
+    message: input.message || '',
+    error: input.error || '',
+    createdAt: input.createdAt || now,
+    updatedAt: now,
+  };
+  await db.importJobs.put(job);
+  return job;
+}
+
+export async function updateImportJob(jobId, updates = {}) {
+  const existing = await db.importJobs.get(jobId);
+  if (!existing) return null;
+  const next = { ...existing, ...updates, updatedAt: jobTimestamp() };
+  await db.importJobs.put(next);
+  return next;
+}
+
+export async function enqueueEmbeddingJob(songInput) {
+  const song = asSongRecord(songInput);
+  const existing = await db.embeddingJobs.where('songKey').equals(song.songKey).toArray();
+  const active = existing.find(job => ['queued', 'processing', 'done'].includes(job.status));
+  if (active) return active;
+  const now = jobTimestamp();
+  const job = {
+    schemaVersion: 1,
+    jobId: crypto.randomUUID(),
+    songKey: song.songKey,
+    status: 'queued',
+    attempts: 0,
+    progress: 0,
+    provider: '',
+    error: '',
+    createdAt: now,
+    updatedAt: now,
+  };
+  await db.transaction('rw', db.embeddingJobs, db.songs, async () => {
+    await db.embeddingJobs.put(job);
+    const stored = await db.songs.where('songKey').equals(song.songKey).first();
+    if (stored) await db.songs.update(stored.id, { embeddingStatus: 'queued' });
+  });
+  return job;
+}
+
+export async function enqueueSyncOutbox(input = {}) {
+  const entityKey = input.entityKey || input.songKey || '';
+  if (!entityKey) return null;
+  const existing = await db.syncOutbox
+    .where('entityType').equals(input.entityType || 'song')
+    .filter(item => item.entityKey === entityKey && ['queued', 'processing'].includes(item.status))
+    .first();
+  if (existing) return existing;
+  const now = jobTimestamp();
+  const operation = {
+    schemaVersion: 1,
+    opId: crypto.randomUUID(),
+    entityType: input.entityType || 'song',
+    entityKey,
+    payload: input.payload || {},
+    status: 'queued',
+    attempts: 0,
+    error: input.error || '',
+    nextAttemptAt: input.nextAttemptAt || '',
+    createdAt: now,
+    updatedAt: now,
+  };
+  await db.syncOutbox.put(operation);
+  return operation;
+}
+
+export async function updateSyncOutbox(opId, updates = {}) {
+  const existing = await db.syncOutbox.get(opId);
+  if (!existing) return null;
+  const next = { ...existing, ...updates, updatedAt: jobTimestamp() };
+  await db.syncOutbox.put(next);
+  return next;
+}
+
+export async function updateSongPipelineStatus(songKey, updates = {}) {
+  const song = await db.songs.where('songKey').equals(songKey).first();
+  if (!song) return null;
+  await db.songs.update(song.id, updates);
+  return await db.songs.get(song.id);
 }
 
 export async function addSongToPlaylist(songInput, playlistName, source = 'sisic') {
@@ -470,12 +603,15 @@ export async function syncDownloadJobsToDb(jobs = []) {
 
 export async function getLibrarySnapshot() {
   try {
-    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows] = await Promise.all([
+    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, importJobs, embeddingJobs, syncOutbox] = await Promise.all([
       db.songs.toArray(),
       db.playlists.toArray(),
       db.playlistSongs.toArray(),
       db.downloadJobs.toArray(),
       db.songAudio.toArray(),
+      db.importJobs.toArray(),
+      db.embeddingJobs.toArray(),
+      db.syncOutbox.toArray(),
     ]);
 
     const playlistByKey = new Map(playlistsRaw.map(pl => [pl.playlistKey, pl]));
@@ -525,10 +661,18 @@ export async function getLibrarySnapshot() {
       .filter(pl => pl.count > 0)
       .sort((a, b) => a.name.localeCompare(b.name));
 
-    return { songs, playlists, downloadJobs: jobsRaw, error: '' };
+    return {
+      songs,
+      playlists,
+      downloadJobs: jobsRaw,
+      importJobs: importJobs.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
+      embeddingJobs: embeddingJobs.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
+      syncOutbox: syncOutbox.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
+      error: '',
+    };
   } catch (error) {
     console.error('Local music cache failed:', error);
-    return { songs: [], playlists: [], downloadJobs: [], error: `Local music cache is unavailable: ${errorMessage(error)}` };
+    return { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], error: `Local music cache is unavailable: ${errorMessage(error)}` };
   }
 }
 

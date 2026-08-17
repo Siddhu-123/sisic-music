@@ -1,7 +1,8 @@
 import React from 'react';
-import { X, Shuffle, Clock3, AlertTriangle, Cloud, HardDriveDownload } from 'lucide-react';
+import { X, Shuffle, Repeat, Clock3, AlertTriangle, Cloud, HardDriveDownload, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
 
 const SHUFFLE_LABELS = { off: 'Off', shuffle: 'Shuffle', smart: 'Smart' };
+const REPEAT_LABELS = { off: 'Repeat off', one: 'Repeat one', all: 'Repeat all' };
 
 function queueStatus(song, jobBySongKey) {
   const job = jobBySongKey?.get(song.songKey) || song.downloadJob;
@@ -13,8 +14,18 @@ function queueStatus(song, jobBySongKey) {
   return null;
 }
 
-export function QueuePanel({ player, jobBySongKey, onClose }) {
-  const { queue, queueIndex, shuffleMode, toggleShuffle } = player;
+export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
+  const {
+    queue,
+    queueIndex,
+    shuffleMode,
+    toggleShuffle,
+    repeatMode,
+    toggleRepeat,
+    removeFromQueue,
+    reorderQueue,
+    clearQueue,
+  } = player;
   const upcoming = queue.slice(queueIndex + 1, queueIndex + 21);
 
   const renderStatus = (song) => {
@@ -24,6 +35,11 @@ export function QueuePanel({ player, jobBySongKey, onClose }) {
     return (
       <span className={`queue-pill ${status.className}`}>
         <Icon size={11} /> {status.label}
+        {(status.className === 'queue-pill--error' || status.className === 'queue-pill--queued') && onRetry && (
+          <button className="queue-pill__retry" onClick={() => onRetry(song)} aria-label={`Retry ${song.track}`}>
+            Retry
+          </button>
+        )}
       </span>
     );
   };
@@ -40,6 +56,18 @@ export function QueuePanel({ player, jobBySongKey, onClose }) {
           >
             <Shuffle size={16} />
             <span className="queue-shuffle-label">{SHUFFLE_LABELS[shuffleMode]}</span>
+          </button>
+          <button
+            className={`icon-btn queue-shuffle-btn ${repeatMode !== 'off' ? 'queue-shuffle-btn--active' : ''}`}
+            onClick={toggleRepeat}
+            title={REPEAT_LABELS[repeatMode]}
+            aria-label={REPEAT_LABELS[repeatMode]}
+          >
+            <Repeat size={16} />
+            <span className="queue-shuffle-label">{repeatMode === 'one' ? 'One' : repeatMode === 'all' ? 'All' : 'Off'}</span>
+          </button>
+          <button className="icon-btn" onClick={clearQueue} aria-label="Clear queue" title="Clear queue">
+            <Trash2 size={16} />
           </button>
           <button className="icon-btn" onClick={onClose} aria-label="Close queue">
             <X size={18} />
@@ -69,7 +97,9 @@ export function QueuePanel({ player, jobBySongKey, onClose }) {
           <div className="queue-empty">No songs in queue</div>
         ) : (
           <div className="queue-list">
-            {upcoming.map((song, index) => (
+            {upcoming.map((song, index) => {
+              const queuePosition = queueIndex + 1 + index;
+              return (
               <div key={`${song.songKey}-${index}`} className="queue-item">
                 <span className="queue-item__num">{index + 1}</span>
                 <div className="queue-item__info">
@@ -77,8 +107,20 @@ export function QueuePanel({ player, jobBySongKey, onClose }) {
                   <span className="queue-item__artist">{song.artist}</span>
                 </div>
                 {renderStatus(song)}
+                <div className="queue-item__actions">
+                  <button className="icon-btn" onClick={() => reorderQueue(queuePosition, queuePosition - 1)} aria-label={`Move ${song.track} up`} title="Move up">
+                    <ChevronUp size={14} />
+                  </button>
+                  <button className="icon-btn" onClick={() => reorderQueue(queuePosition, queuePosition + 1)} disabled={queuePosition >= queue.length - 1} aria-label={`Move ${song.track} down`} title="Move down">
+                    <ChevronDown size={14} />
+                  </button>
+                  <button className="icon-btn" onClick={() => removeFromQueue(queuePosition)} aria-label={`Remove ${song.track} from queue`} title="Remove from queue">
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

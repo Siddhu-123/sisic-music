@@ -16,6 +16,9 @@ import {
   MoreHorizontal,
   Plus,
   Trash2,
+  ChevronDown,
+  UploadCloud,
+  BrainCircuit,
 } from 'lucide-react';
 
 function formatTime(seconds) {
@@ -38,7 +41,92 @@ function statusDetails(song) {
   return { label: 'Request', icon: Download, className: 'song-status--missing' };
 }
 
+export function ExpandedPlayer({ player, onClose, hue, onToggleQueue }) {
+  const {
+    currentSong,
+    isPlaying,
+    progress,
+    duration,
+    shuffleMode,
+    togglePlay,
+    seek,
+    playNext,
+    playPrev,
+    toggleShuffle,
+  } = player;
+
+  if (!currentSong) return null;
+
+  return (
+    <div className="expanded-player">
+      <div className="expanded-player__bg" style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 15%), hsl(${(hue + 60) % 360}, 70%, 5%))` }} />
+      <div className="expanded-player__header">
+        <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onClose(); }} aria-label="Minimize player">
+          <ChevronDown size={28} color="white" />
+        </button>
+      </div>
+
+      <div className="expanded-player__content">
+        <div className="expanded-player__art-container">
+          <div
+            className={`expanded-player__art ${isPlaying ? 'expanded-player__art--playing' : ''}`}
+            style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
+          >
+            <span className="expanded-player__art-icon">♪</span>
+          </div>
+        </div>
+
+        <div className="expanded-player__info">
+          <h2 className="expanded-player__title">{currentSong.track}</h2>
+          <p className="expanded-player__artist">{currentSong.artist}</p>
+        </div>
+
+        <div className="expanded-player__controls-area">
+          <div className="expanded-progress">
+            <span className="time-label">{formatTime((progress / 100) * duration)}</span>
+            <input
+              type="range"
+              className="progress-bar"
+              min={0}
+              max={100}
+              step={0.1}
+              value={progress}
+              onChange={event => seek(Number(event.target.value))}
+            />
+            <span className="time-label">{formatTime(duration)}</span>
+          </div>
+
+          <div className="expanded-controls">
+            <button
+              className={`icon-btn ${shuffleMode !== 'off' ? 'icon-btn--active' : ''}`}
+              onClick={toggleShuffle}
+              aria-label={`Shuffle: ${shuffleMode}`}
+            >
+              <Shuffle size={24} color={shuffleMode !== 'off' ? 'var(--green)' : 'white'} />
+            </button>
+            <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
+              <SkipBack size={36} color="white" />
+            </button>
+            <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play'}>
+              {isPlaying ? <Pause size={32} fill="black" /> : <Play size={32} fill="black" />}
+            </button>
+            <button className="icon-btn" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">
+              <SkipForward size={36} color="white" />
+            </button>
+            <button className="icon-btn" onClick={onToggleQueue} aria-label="Queue" title="Queue">
+              <ListMusic size={24} color="white" />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PlayerBar({ player, onToggleQueue }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const hue = player.currentSong ? player.currentSong.track.charCodeAt(0) % 360 : 0;
+
   const {
     currentSong,
     isPlaying,
@@ -56,7 +144,7 @@ export function PlayerBar({ player, onToggleQueue }) {
 
   return (
     <div className="player-bar">
-      <div className="player-song-info">
+      <div className="player-song-info" onClick={() => currentSong && setIsExpanded(true)} style={{ cursor: currentSong ? 'pointer' : 'default' }}>
         {currentSong ? (
           <>
             <div className="player-thumb" />
@@ -124,6 +212,7 @@ export function PlayerBar({ player, onToggleQueue }) {
           onChange={event => changeVolume(Number(event.target.value))}
         />
       </div>
+      {isExpanded && <ExpandedPlayer player={player} onClose={() => setIsExpanded(false)} hue={hue} onToggleQueue={onToggleQueue} />}
     </div>
   );
 }
@@ -132,6 +221,8 @@ export function SongCard({
   song,
   onPlay,
   onDownload,
+  onAddToQueue,
+  onPlayNext,
   onAddToPlaylist,
   onDeleteReady,
   isReadyLoose = false,
@@ -215,6 +306,18 @@ export function SongCard({
         <StatusIcon size={12} />
         <span>{status.label}</span>
       </div>
+      {song.syncStatus && song.syncStatus !== 'done' && (
+        <div className="song-status song-status--downloading" title="Metadata sync is pending">
+          <Cloud size={12} />
+          <span>Sync {song.syncStatus}</span>
+        </div>
+      )}
+      {song.embeddingStatus && song.embeddingStatus !== 'done' && (
+        <div className="song-status song-status--queued" title="Embedding pipeline status">
+          <Clock3 size={12} />
+          <span>Embedding {song.embeddingStatus}</span>
+        </div>
+      )}
       <button
         className="song-card__menu-btn"
         onClick={event => {
@@ -232,6 +335,18 @@ export function SongCard({
             <Play size={15} />
             <span>Play</span>
           </button>
+          {onPlayNext && (
+            <button onClick={event => runAction(event, onPlayNext)}>
+              <SkipForward size={15} />
+              <span>Play next</span>
+            </button>
+          )}
+          {onAddToQueue && (
+            <button onClick={event => runAction(event, onAddToQueue)}>
+              <ListMusic size={15} />
+              <span>Add to queue</span>
+            </button>
+          )}
           <button onClick={event => runAction(event, onDownload)} disabled={isDownloading}>
             <Download size={15} />
             <span>{song.driveFileId ? 'Offline' : 'Download'}</span>
@@ -303,5 +418,55 @@ export function SyncBanner({ isSyncing, syncStatus, error, onSync, actionLabel, 
         <button className="sync-refresh-btn" onClick={onSync}>Sync again</button>
       )}
     </div>
+  );
+}
+
+const IMPORT_STATUS_LABELS = {
+  waiting: 'Waiting',
+  importing: 'Importing',
+  'reading-metadata': 'Reading metadata',
+  duplicate: 'Duplicate detected',
+  complete: 'Complete',
+  failed: 'Failed',
+};
+
+export function ImportStatusPanel({ jobs = [], embeddingJobs = [] }) {
+  const visibleJobs = jobs.slice(0, 5);
+  const visibleEmbeddings = embeddingJobs.filter(job => ['queued', 'processing', 'failed'].includes(job.status)).slice(0, 3);
+  if (!visibleJobs.length && !visibleEmbeddings.length) return null;
+  return (
+    <section className="import-status-panel" aria-label="Import pipeline status">
+      <div className="import-status-panel__header">
+        <div>
+          <UploadCloud size={18} />
+          <strong>Import pipeline</strong>
+        </div>
+        <span>{jobs.filter(job => !['complete', 'duplicate'].includes(job.status)).length || 'Ready'}</span>
+      </div>
+      <div className="import-status-panel__list">
+        {visibleJobs.map(job => (
+          <div className="import-status-row" key={job.jobId}>
+            <div className="import-status-row__copy">
+              <span>{job.fileName || job.songKey || 'Audio file'}</span>
+              <small>{IMPORT_STATUS_LABELS[job.status] || job.status}{job.message ? ` · ${job.message}` : ''}</small>
+            </div>
+            <div className="import-progress" aria-label={`${Math.round((job.progress || 0) * 100)} percent complete`}>
+              <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
+            </div>
+          </div>
+        ))}
+        {visibleEmbeddings.map(job => (
+          <div className="import-status-row import-status-row--embedding" key={job.jobId}>
+            <div className="import-status-row__copy">
+              <span><BrainCircuit size={14} /> Embedding {job.songKey}</span>
+              <small>{job.status === 'processing' ? 'Generating embedding' : job.status === 'failed' ? 'Retry required' : 'Queued'}</small>
+            </div>
+            <div className="import-progress" aria-label="Embedding status">
+              <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
