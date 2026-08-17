@@ -1226,6 +1226,227 @@ body {
   }
 }
 
+.download-status-panel {
+  display: grid;
+  gap: 20px;
+  padding: 22px;
+  border-radius: 24px;
+  background: var(--bg);
+  box-shadow: var(--shadow-inset);
+}
+
+.download-status-panel__header,
+.download-status-panel__header > div,
+.download-status-row,
+.download-status-list__heading {
+  display: flex;
+  align-items: center;
+}
+
+.download-status-panel__header {
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.download-status-panel__header > div {
+  gap: 12px;
+}
+
+.download-status-panel__header > div > svg {
+  flex-shrink: 0;
+  color: var(--green);
+}
+
+.download-status-panel__header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.download-status-panel__header p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.download-status-panel__import {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.download-status-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.download-status-metrics > div {
+  display: grid;
+  gap: 5px;
+  padding: 13px 14px;
+  border-radius: 16px;
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+}
+
+.download-status-metrics span {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.download-status-metrics strong {
+  font-size: 1.25rem;
+}
+
+.download-status-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.download-status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 12px;
+  color: var(--text-muted);
+  background: var(--bg);
+  box-shadow: var(--shadow-inset);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.download-status-tab span {
+  min-width: 20px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  text-align: center;
+}
+
+.download-status-tab--active {
+  color: var(--green);
+  box-shadow: var(--shadow-soft);
+}
+
+.download-status-list {
+  display: grid;
+  gap: 8px;
+  max-height: 540px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.download-status-list__heading {
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 5px;
+}
+
+.download-status-list__heading strong {
+  font-size: 0.85rem;
+}
+
+.download-status-list__heading span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.download-status-row {
+  gap: 14px;
+  min-height: 62px;
+  padding: 10px 12px;
+  border-radius: 15px;
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+}
+
+.download-status-row__copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.download-status-row__copy strong,
+.download-status-row__copy span,
+.download-status-row__copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-status-row__copy strong {
+  font-size: 0.82rem;
+}
+
+.download-status-row__copy span,
+.download-status-row__copy small {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.download-status-row__copy small {
+  color: var(--green);
+}
+
+.download-status-row__action {
+  flex-shrink: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.download-status-row__action:hover {
+  color: var(--green);
+}
+
+.download-status-empty {
+  padding: 28px 12px;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 0.8rem;
+}
+
+@media (max-width: 768px) {
+  .download-status-panel__header,
+  .download-status-panel__header > div,
+  .download-status-list__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .download-status-panel__import {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .download-status-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .download-status-list__heading span {
+    text-align: left;
+  }
+}
+
 /* Expanded Player */
 .expanded-player {
   position: fixed;

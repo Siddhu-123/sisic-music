@@ -60,6 +60,7 @@ function isAudioFileMetadata(file = {}) {
   const appProperties = file.appProperties || {};
 
   if (appProperties.sisicJob === 'true') return false;
+  if (appProperties.sisicImportSource === 'true') return false;
   if (name.startsWith('sisic-job-') || name.endsWith('.json')) return false;
   if (mimeType === JOB_MIME_TYPE || mimeType.includes('json')) return false;
 
@@ -177,6 +178,7 @@ class GoogleDriveService {
     this.indexFileCache = new Map();
     this.songIndexCache = null;
     this.queueIndexCache = null;
+    this.tokenRefreshPromise = null;
   }
 
   _persistToken(token, expiry) {
@@ -226,14 +228,31 @@ class GoogleDriveService {
     });
   }
 
+  async refreshAccessToken() {
+    if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
+    this.tokenRefreshPromise = this.requestToken().finally(() => {
+      this.tokenRefreshPromise = null;
+    });
+    return this.tokenRefreshPromise;
+  }
+
+  async getValidAccessToken(forceRefresh = false) {
+    if (!forceRefresh && this.isAuthenticated) return this.accessToken;
+    return this.refreshAccessToken();
+  }
+
   get isAuthenticated() {
     return Boolean(this.accessToken && Date.now() < (this.tokenExpiry || 0));
   }
 
-  async driveGet(url, label = 'Drive request') {
+  async driveGet(url, label = 'Drive request', allowTokenRefresh = true) {
     const resp = await fetch(url, {
       headers: { Authorization: `Bearer ${this.accessToken}` },
     });
+    if (resp.status === 401 && allowTokenRefresh && this.tokenClient) {
+      await this.refreshAccessToken();
+      return this.driveGet(url, label, false);
+    }
     if (!resp.ok) {
       let details = '';
       try {
@@ -387,14 +406,16 @@ class GoogleDriveService {
       fields: 'id,name,trashed',
       supportsAllDrives: 'true',
     });
-    const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+    const request = accessToken => fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
-        Authorization: `Bearer ${this.accessToken}`,
+        Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ trashed: true }),
     });
+    let resp = await request(await this.getValidAccessToken());
+    if (resp.status === 401 && this.tokenClient) resp = await request(await this.refreshAccessToken());
     if (!resp.ok) throw new Error(`Drive file trash failed: ${resp.status} ${await resp.text()}`);
     return await resp.json();
   }
@@ -677,10 +698,11 @@ class GoogleDriveService {
       'Drive audio download'
     );
     const blob = await resp.blob();
-    if (blob.type && !blob.type.startsWith('audio/')) {
+    if (blob.type && !blob.type.startsWith('audio/') && blob.type !== 'application/octet-stream') {
       throw new Error(`Drive file is not audio. Download returned ${blob.type}.`);
     }
-    return blob;
+    if (blob.type && blob.type.startsWith('audio/')) return blob;
+    return new Blob([await blob.arrayBuffer()], { type: metadata.mimeType || 'audio/mpeg' });
   }
 
   async readJsonFile(fileId, label = 'Drive JSON file') {
@@ -765,14 +787,25 @@ class GoogleDriveService {
         sisicTrack: job.track,
       },
     };
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
-    form.append('file', new Blob([content], { type: JOB_MIME_TYPE }));
-    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
+    const createForm = () => {
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
+      form.append('file', new Blob([content], { type: JOB_MIME_TYPE }));
+      return form;
+    };
+    const accessToken = await this.getValidAccessToken();
+    let resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${this.accessToken}` },
-      body: form,
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: createForm(),
     });
+    if (resp.status === 401 && this.tokenClient) {
+      resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime,appProperties', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${await this.refreshAccessToken()}` },
+        body: createForm(),
+      });
+    }
     if (!resp.ok) {
       throw new Error(`Drive job create failed: ${resp.status} ${await resp.text()}`);
     }
@@ -785,6 +818,85 @@ class GoogleDriveService {
       });
     }
     return normalized;
+  }
+
+  async uploadImportSource(file, folderId, jobId) {
+    const safeName = String(file?.name || 'source-audio').replace(/[\\/]/g, '_');
+    const metadata = {
+      name: `sisic-import-source-${jobId}-${safeName}`,
+      parents: [folderId],
+      mimeType: file?.type || 'audio/mpeg',
+      appProperties: {
+        sisicImportSource: 'true',
+        sisicImportJobId: jobId,
+      },
+    };
+    const createForm = () => {
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], { type: JOB_MIME_TYPE }));
+      form.append('file', file, safeName);
+      return form;
+    };
+
+    let accessToken = await this.getValidAccessToken();
+    let resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,appProperties', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body: createForm(),
+    });
+    if (resp.status === 401) {
+      accessToken = await this.refreshAccessToken();
+      resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,appProperties', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: createForm(),
+      });
+    }
+    if (!resp.ok) throw new Error(`Drive import source upload failed: ${resp.status} ${await resp.text()}`);
+    return await resp.json();
+  }
+
+  async createImportedAudioJob(songInput, file, folderId) {
+    const song = asSongRecord(songInput);
+    const jobId = crypto.randomUUID();
+    const source = await this.uploadImportSource(file, folderId, jobId);
+    const now = new Date().toISOString();
+    const job = {
+      schemaVersion: 1,
+      jobId,
+      songKey: song.songKey,
+      track: song.track,
+      artist: song.artist,
+      album: song.album || '',
+      expectedFilename: canonicalAudioFilename(song),
+      status: 'queued',
+      attempts: 0,
+      lastError: '',
+      createdAt: now,
+      updatedAt: now,
+      uploadedFileId: '',
+      sourceUrl: '',
+      sourceFileId: source.id,
+      sourceFileName: file.name || '',
+      sourceMimeType: file.type || 'audio/mpeg',
+      requestedBy: 'browser-import',
+      allowRedownload: true,
+    };
+
+    try {
+      const created = await this.createJobFile(job, folderId);
+      await this.upsertQueueIndexJob(folderId, created);
+      return created;
+    } catch (error) {
+      if (source.id) {
+        try {
+          await this.trashFile(source.id);
+        } catch (cleanupError) {
+          console.warn('Drive import source cleanup failed:', cleanupError);
+        }
+      }
+      throw error;
+    }
   }
 
   async requestSongDownload(songInput, folderId, sourceUrl = '', options = {}) {

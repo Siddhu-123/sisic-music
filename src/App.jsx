@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
@@ -23,16 +23,16 @@ import {
 import { driveService } from './services/GoogleDriveService';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth';
-import { ImportStatusPanel, PlayerBar, SongCard, LoginScreen, SyncBanner } from './components/Components';
+import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, LoginScreen, SyncBanner } from './components/Components';
 import { QueuePanel } from './components/QueuePanel';
 import { ToastContainer } from './components/Toast';
 import { useToast } from './hooks/useToast';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity';
-import { collectAudioFiles, importAudioFiles } from './services/importService';
+import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService';
 import { processPendingEmbeddingJobs } from './services/embeddingService';
 import './App.css';
 
-const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library' };
+const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DOWNLOADS: 'downloads' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], error: '' };
 const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
@@ -118,6 +118,8 @@ function App() {
   const [playlistPicker, setPlaylistPicker] = useState(null);
   const [isImporting, setIsImporting] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
+  const [hasPendingJobs, setHasPendingJobs] = useState(false);
+  const stagedLocalImportKeysRef = useRef(new Set());
   const fileInputRef = useRef(null);
 
   const playbackRequestRef = useRef(0);
@@ -143,6 +145,9 @@ function App() {
   } = player;
   const activeQueueSong = queue[queueIndex] || null;
   const activeQueueSongKey = activeQueueSong?.songKey || activeQueueSong?.id || '';
+  const queueIndexRef = useRef(queueIndex);
+  const resumeOnRestoreRef = useRef(resumeOnRestore);
+  const resumePositionRef = useRef(resumePosition);
 
   useEffect(() => {
     fetch(`${import.meta.env.BASE_URL}unique_songs.json`)
@@ -166,8 +171,11 @@ function App() {
 
   useEffect(() => {
     queueRef.current = queue;
+    queueIndexRef.current = queueIndex;
     activeQueueSongRef.current = activeQueueSong;
-  }, [activeQueueSong, queue]);
+    resumeOnRestoreRef.current = resumeOnRestore;
+    resumePositionRef.current = resumePosition;
+  }, [activeQueueSong, queue, queueIndex, resumeOnRestore, resumePosition]);
 
   const libraryData = useLiveQuery(getLibrarySnapshot, [], EMPTY_LIBRARY);
   const safeLibraryData = libraryData || EMPTY_LIBRARY;
@@ -186,11 +194,20 @@ function App() {
     }
     setIsImporting(true);
     try {
-      const results = await importAudioFiles(audioFiles);
+      const results = await importAudioFiles(audioFiles, {
+        driveService: isAuthenticated && DRIVE_FOLDER_ID ? driveService : null,
+        driveFolderId: DRIVE_FOLDER_ID,
+      });
       const completed = results.filter(result => result.status === 'complete').length;
       const duplicates = results.filter(result => result.status === 'duplicate').length;
       const failed = results.filter(result => result.status === 'failed').length;
-      addToast(`Imported ${completed}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? '' : 's'}` : ''}${failed ? ` · ${failed} failed` : ''}`);
+      const driveQueued = results.filter(result => result.driveJob?.jobId).length;
+      const driveJobs = results.map(result => result.driveJob).filter(job => job?.jobId);
+      if (driveJobs.length) {
+        await syncDownloadJobsToDb(driveJobs);
+        setHasPendingJobs(true);
+      }
+      addToast(`Imported ${completed}${driveQueued ? ` · ${driveQueued} queued for Mac upload` : ''}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? '' : 's'}` : ''}${failed ? ` · ${failed} failed` : ''}`);
     } catch (error) {
       const message = errorMessage(error);
       setActionError(message);
@@ -199,7 +216,7 @@ function App() {
       setIsImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  }, [addToast]);
+  }, [addToast, isAuthenticated]);
 
   const handleImportInput = useCallback(async event => {
     await runImport([...event.target.files]);
@@ -295,23 +312,29 @@ function App() {
   }, [safeLibraryData.downloadJobs]);
 
   const allSongsByKey = useMemo(() => {
-    return new Map(allSongs.map(song => [song.songKey, mergeJob(song, jobBySongKey)]));
-  }, [allSongs, jobBySongKey]);
+    const byKey = new Map(allSongs.map(song => [song.songKey, mergeJob(song, jobBySongKey)]));
+    for (const indexedSong of driveIndexSongs) {
+      const normalized = asSongRecord(indexedSong);
+      const local = byKey.get(normalized.songKey);
+      byKey.set(normalized.songKey, mergeJob({
+        ...normalized,
+        ...local,
+        driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
+      }, jobBySongKey));
+    }
+    return byKey;
+  }, [allSongs, driveIndexSongs, jobBySongKey]);
 
   const topPlayed = useMemo(() => {
     return [...allSongs]
       .filter(song => (song.playCount || 0) > 0)
       .sort((a, b) => (b.playCount || 0) - (a.playCount || 0))
       .slice(0, 8)
-      .map(song => mergeJob(song, jobBySongKey));
-  }, [allSongs, jobBySongKey]);
-
-  const availableSongs = useMemo(() => {
-    return allSongs.filter(isPlayable).map(song => mergeJob(song, jobBySongKey));
-  }, [allSongs, jobBySongKey]);
+      .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
+  }, [allSongs, allSongsByKey, jobBySongKey]);
 
   const driveSongKeySet = useMemo(() => {
-    return new Set(driveIndexSongs.map(song => song.songKey).filter(Boolean));
+    return new Set(driveIndexSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
   }, [driveIndexSongs]);
 
   const deletedSongKeySet = useMemo(() => {
@@ -337,6 +360,36 @@ function App() {
       })
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
   }, [allSongsByKey, driveIndexSongs, jobBySongKey]);
+
+  const availableSongs = driveReadySongs;
+
+  const catalogueByKey = useMemo(() => new Map(catalogue.map(song => [song.songKey, song])), [catalogue]);
+
+  const downloadQueueSongs = useMemo(() => {
+    return [...jobBySongKey.values()]
+      .filter(job => job.status === 'queued' || job.status === 'downloading')
+      .filter(job => !driveSongKeySet.has(job.songKey))
+      .map(job => mergeJob(allSongsByKey.get(job.songKey) || catalogueByKey.get(job.songKey) || asSongRecord(job), jobBySongKey))
+      .sort((a, b) => String(a.downloadJob?.updatedAt || '').localeCompare(String(b.downloadJob?.updatedAt || '')));
+  }, [allSongsByKey, catalogueByKey, driveSongKeySet, jobBySongKey]);
+
+  const manualImportSongs = useMemo(() => {
+    return [...jobBySongKey.values()]
+      .filter(job => job.status === 'failed' || job.status === 'error' || job.status === 'blocked')
+      .filter(job => !driveSongKeySet.has(job.songKey))
+      .map(job => mergeJob(allSongsByKey.get(job.songKey) || catalogueByKey.get(job.songKey) || asSongRecord(job), jobBySongKey))
+      .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
+  }, [allSongsByKey, catalogueByKey, driveSongKeySet, jobBySongKey]);
+
+  const notQueuedSongs = useMemo(() => {
+    return allSongs
+      .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey))
+      .filter(song => !driveSongKeySet.has(song.songKey))
+      .filter(song => !deletedSongKeySet.has(song.songKey))
+      .filter(song => !isPlayable(song))
+      .filter(song => !song.downloadJob || (song.downloadJob.status === 'done' && !song.downloadJob.uploadedFileId))
+      .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
+  }, [allSongs, allSongsByKey, deletedSongKeySet, driveSongKeySet, jobBySongKey]);
 
   const readyFolderSongs = useMemo(() => {
     return driveReadySongs.filter(song => !song.playlistKeys?.some(key => visiblePlaylistKeySet.has(key)));
@@ -392,14 +445,11 @@ function App() {
   }, [visiblePlaylists, selectedPlaylistKey]);
 
   const librarySongs = useMemo(() => {
-    if (!selectedPlaylistKey) return readyFolderSongs;
+    if (!selectedPlaylistKey) return driveReadySongs;
     return allSongs
       .filter(song => song.playlistKeys?.includes(selectedPlaylistKey))
-      .map(song => mergeJob(song, jobBySongKey));
-  }, [allSongs, selectedPlaylistKey, readyFolderSongs, jobBySongKey]);
-
-  // Track whether we have pending jobs that need polling
-  const [hasPendingJobs, setHasPendingJobs] = useState(false);
+      .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
+  }, [allSongs, allSongsByKey, driveReadySongs, selectedPlaylistKey, jobBySongKey]);
 
   const refreshDownloadJobs = useCallback(async () => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
@@ -413,6 +463,36 @@ function App() {
       console.error('Failed to refresh Drive jobs:', error);
     }
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
+    const candidates = allSongs.filter(song => (
+      song.sourceType === 'local-import'
+      && !song.driveFileId
+      && !song.driveImportJobId
+      && !stagedLocalImportKeysRef.current.has(song.songKey)
+    ));
+    if (!candidates.length) return undefined;
+    let cancelled = false;
+    candidates.forEach(song => stagedLocalImportKeysRef.current.add(song.songKey));
+    (async () => {
+      try {
+        const results = await queueCachedLocalImports(candidates, { driveService, driveFolderId: DRIVE_FOLDER_ID });
+        if (cancelled || !results.length) return;
+        const jobs = results.map(result => result.job).filter(job => job?.jobId);
+        await syncDownloadJobsToDb(jobs);
+        setHasPendingJobs(jobs.some(job => job.status === 'queued' || job.status === 'downloading'));
+        const newlyQueued = results.filter(result => !result.existing).length;
+        if (newlyQueued) addToast(`Queued ${newlyQueued} existing import${newlyQueued === 1 ? '' : 's'} for Mac upload`);
+      } catch (error) {
+        candidates.forEach(song => stagedLocalImportKeysRef.current.delete(song.songKey));
+        console.error('Failed to stage cached local imports:', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [addToast, allSongs, isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
@@ -456,6 +536,23 @@ function App() {
     }
     return result;
   }, []);
+
+  const handleQueueDownload = useCallback(async (song, { allowRedownload = false } = {}) => {
+    try {
+      const result = await queueSongForDownload(song, { allowRedownload });
+      if (result.blocked) {
+        addToast(`"${song.track}" is blocked by deleted history.`);
+      } else if (result.queued) {
+        addToast(`Queued "${song.track}" for the Mac worker`);
+      } else {
+        addToast(`"${song.track}" is already ${result.job?.status || 'queued'}`);
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
+  }, [addToast, queueSongForDownload]);
 
   useEffect(() => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated || missingRequiredSongs.length === 0) return undefined;
@@ -594,13 +691,13 @@ function App() {
         if (cancelled || requestId !== playbackRequestRef.current) return;
         if (resolved) {
           await loadAndPlayRef.current(resolved, driveService.accessToken, {
-            autoplay: resumeOnRestore,
-            startAt: resumePosition,
+            autoplay: resumeOnRestoreRef.current,
+            startAt: resumePositionRef.current,
           });
           return;
         }
         setPlayerErrorRef.current(`"${song.track}" is queued for download.`);
-        if (queueRef.current.some((candidate, index) => index !== queueIndex && isPlayable(candidate))) {
+        if (queueRef.current.some((candidate, index) => index !== queueIndexRef.current && isPlayable(candidate))) {
           window.setTimeout(() => {
             if (!cancelled && requestId === playbackRequestRef.current) {
               playNextRef.current({ avoidCurrent: true, stopOnBlocked: true });
@@ -618,7 +715,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeQueueSongKey, queueIndex, resumeOnRestore, resumePosition]);
+  }, [activeQueueSongKey]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -878,6 +975,7 @@ function App() {
     { id: VIEWS.HOME, icon: Home, label: 'Home' },
     { id: VIEWS.SEARCH, icon: Search, label: 'Search' },
     { id: VIEWS.LIBRARY, icon: Library, label: 'Ready' },
+    { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads' },
   ];
 
   let displaySongs = [];
@@ -972,7 +1070,7 @@ function App() {
           </div>
           <div>
             <span className="drive-summary__label">Ready</span>
-            <strong>{driveIndexSongs.length.toLocaleString()} songs</strong>
+            <strong>{driveReadySongs.length.toLocaleString()} songs</strong>
           </div>
           <div className={missingRequiredSongs.length > 0 ? 'drive-summary__warn' : ''}>
             <span className="drive-summary__label">Playlist coverage</span>
@@ -1058,6 +1156,23 @@ function App() {
           </>
         )}
 
+        {view === VIEWS.DOWNLOADS && (
+          <>
+            <header className="main-view__header">
+              <h1 className="main-view__title">Downloads</h1>
+            </header>
+            <DownloadStatusPanel
+              readyCount={driveReadySongs.length}
+              queuedSongs={downloadQueueSongs}
+              manualSongs={manualImportSongs}
+              notQueuedSongs={notQueuedSongs}
+              onRetry={song => handleQueueDownload(song, { allowRedownload: true })}
+              onQueue={song => handleQueueDownload(song)}
+              onImport={() => fileInputRef.current?.click()}
+            />
+          </>
+        )}
+
         {view === VIEWS.SEARCH && (
           <>
             <header className="main-view__header">
@@ -1125,7 +1240,7 @@ function App() {
                 <div className="empty-state">
                   <Music2 size={48} color="var(--text-muted)" />
                   <h3>No songs</h3>
-                  <p>{selectedPlaylist ? 'This playlist is empty' : 'No Drive-ready loose songs yet'}</p>
+                  <p>{selectedPlaylist ? 'This playlist is empty' : 'No Drive-ready songs yet'}</p>
                 </div>
               ) : (
                 <>

@@ -3,11 +3,12 @@ import {
   createImportJob,
   enqueueEmbeddingJob,
   enqueueSyncOutbox,
+  getCachedSongAudio,
   findSongByFileIdentity,
   updateImportJob,
   upsertSongToDb,
 } from '../db';
-import { asSongRecord } from '../songIdentity';
+import { asSongRecord, canonicalAudioFilename } from '../songIdentity';
 import { dedupeFileList, extensionFor, isSupportedAudioFile, parseAudioFilename, fileSignature } from '../importIdentity';
 
 async function hashFile(file) {
@@ -74,7 +75,7 @@ export async function collectAudioFiles(items = []) {
   return files.filter(isSupportedAudioFile);
 }
 
-export async function importAudioFile(file, { onProgress } = {}) {
+export async function importAudioFile(file, { onProgress, driveService = null, driveFolderId = '' } = {}) {
   if (!isSupportedAudioFile(file)) throw new Error(`Unsupported audio format: ${file?.name || 'unknown file'}`);
   const job = await createImportJob({ fileName: file.name, status: 'waiting', progress: 0 });
   const update = updates => updateImportJob(job.jobId, updates);
@@ -119,9 +120,18 @@ export async function importAudioFile(file, { onProgress } = {}) {
       format: song.format,
       sourceType: 'local-import',
     } });
-    await update({ status: 'complete', progress: 1, message: 'Imported and queued for sync/embedding' });
+    let driveJob = null;
+    if (driveService && driveFolderId) {
+      await update({ status: 'importing', progress: 0.85, message: 'Uploading source to Drive for the Mac worker' });
+      onProgress?.({ ...job, status: 'importing', progress: 0.85, message: 'Uploading source to Drive for the Mac worker' });
+      driveJob = await driveService.createImportedAudioJob(song, file, driveFolderId);
+    }
+    const completionMessage = driveJob
+      ? 'Imported locally and queued for Mac upload'
+      : 'Imported locally and queued for sync/embedding';
+    await update({ status: 'complete', progress: 1, message: completionMessage, driveJobId: driveJob?.jobId || '' });
     onProgress?.({ ...job, status: 'complete', progress: 1 });
-    return { status: 'complete', song: storedSong || song, jobId: job.jobId };
+    return { status: 'complete', song: storedSong || song, jobId: job.jobId, driveJob };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await update({ status: 'failed', error: message, message });
@@ -134,6 +144,31 @@ export async function importAudioFiles(files, options = {}) {
   const results = [];
   for (const file of dedupeFileList(files)) {
     results.push(await importAudioFile(file, options));
+  }
+  return results;
+}
+
+export async function queueCachedLocalImports(songs = [], { driveService, driveFolderId } = {}) {
+  if (!driveService || !driveFolderId || typeof File === 'undefined') return [];
+  const results = [];
+  for (const input of songs) {
+    const song = asSongRecord(input);
+    if (song.sourceType !== 'local-import' || song.driveFileId || song.driveImportJobId) continue;
+
+    const existingJob = await driveService.findDownloadJob(song, driveFolderId);
+    if (existingJob) {
+      await upsertSongToDb({ ...song, driveImportJobId: existingJob.jobId });
+      results.push({ song, job: existingJob, existing: true });
+      continue;
+    }
+
+    const cached = await getCachedSongAudio(song.songKey);
+    if (!cached?.blob) continue;
+    const fileName = song.localFileName || canonicalAudioFilename(song);
+    const file = new File([cached.blob], fileName, { type: cached.blob.type || 'audio/mpeg' });
+    const job = await driveService.createImportedAudioJob(song, file, driveFolderId);
+    await upsertSongToDb({ ...song, driveImportJobId: job.jobId });
+    results.push({ song, job, existing: false });
   }
   return results;
 }
