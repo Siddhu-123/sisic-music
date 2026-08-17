@@ -28,12 +28,26 @@ import {
   X,
 } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus';
+import {
+  TONEARM_LIFTED_ANGLE,
+  TONEARM_START_ANGLE,
+  VINYL_RPM,
+  clamp,
+  tonearmAngleFromProgress,
+  tonearmProgressFromAngle,
+  vinylSecondsFromDegrees,
+  wrappedAngleDelta,
+} from '../vinylPhysics';
 
 function formatTime(seconds) {
   if (!seconds || Number.isNaN(seconds)) return '0:00';
   const minutes = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60).toString().padStart(2, '0');
   return `${minutes}:${secs}`;
+}
+
+function pointerAngle(event, centerX, centerY) {
+  return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
 }
 
 function statusDetails(song) {
@@ -75,9 +89,154 @@ export function ExpandedPlayer({
     toggleShuffle,
     repeatMode,
     toggleRepeat,
+    audioRef,
   } = player;
 
+  const recordPlayerRef = useRef(null);
+  const interactionRef = useRef(null);
+  const previewProgressRef = useRef(null);
+  const [dragMode, setDragMode] = useState(null);
+  const [previewProgress, setPreviewProgress] = useState(null);
+  const [manualRecordAngle, setManualRecordAngle] = useState(0);
+
+  const setScrubPreview = value => {
+    const next = clamp(value, 0, 100);
+    previewProgressRef.current = next;
+    setPreviewProgress(next);
+    return next;
+  };
+
+  const pauseForInteraction = () => {
+    const wasPlaying = Boolean(audioRef.current && !audioRef.current.paused);
+    if (wasPlaying) togglePlay();
+    return wasPlaying;
+  };
+
+  const beginRecordDrag = event => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const rect = recordPlayerRef.current?.getBoundingClientRect();
+    if (!rect || !duration) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const centerX = rect.left + (rect.width / 2);
+    const centerY = rect.top + (rect.height / 2);
+    interactionRef.current = {
+      mode: 'record',
+      pointerId: event.pointerId,
+      wasPlaying: pauseForInteraction(),
+      startProgress: progress,
+      startRecordAngle: manualRecordAngle,
+      accumulatedDegrees: 0,
+      lastPointerAngle: pointerAngle(event, centerX, centerY),
+      centerX,
+      centerY,
+    };
+    setScrubPreview(progress);
+    setDragMode('record');
+  };
+
+  const moveRecord = event => {
+    const interaction = interactionRef.current;
+    if (interaction?.mode !== 'record' || interaction.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const nextPointerAngle = pointerAngle(event, interaction.centerX, interaction.centerY);
+    interaction.accumulatedDegrees += wrappedAngleDelta(interaction.lastPointerAngle, nextPointerAngle);
+    interaction.lastPointerAngle = nextPointerAngle;
+    setManualRecordAngle(interaction.startRecordAngle + interaction.accumulatedDegrees);
+    const secondsMoved = vinylSecondsFromDegrees(interaction.accumulatedDegrees);
+    setScrubPreview(interaction.startProgress + ((secondsMoved / duration) * 100));
+  };
+
+  const tonearmAngleFromPointer = event => {
+    const rect = recordPlayerRef.current?.getBoundingClientRect();
+    if (!rect) return TONEARM_START_ANGLE;
+    const pivotX = rect.left + (rect.width * 0.97);
+    const pivotY = rect.top + (rect.height * 0.07);
+    let angle = pointerAngle(event, pivotX, pivotY);
+    if (angle < 0) angle += 360;
+    return angle - 180;
+  };
+
+  const beginTonearmDrag = event => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    if (!duration) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    interactionRef.current = {
+      mode: 'tonearm',
+      pointerId: event.pointerId,
+      wasPlaying: pauseForInteraction(),
+      pointerAngleOffset: tonearmAngleFromProgress(progress) - tonearmAngleFromPointer(event),
+    };
+    setScrubPreview(progress);
+    setDragMode('tonearm');
+  };
+
+  const moveTonearm = event => {
+    const interaction = interactionRef.current;
+    if (interaction?.mode !== 'tonearm' || interaction.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    setScrubPreview(tonearmProgressFromAngle(tonearmAngleFromPointer(event) + interaction.pointerAngleOffset));
+  };
+
+  const finishInteraction = event => {
+    const interaction = interactionRef.current;
+    if (!interaction || interaction.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const targetProgress = clamp(previewProgressRef.current ?? progress, 0, 100);
+    seek(targetProgress);
+    const shouldResume = targetProgress < 99.8 && (interaction.mode === 'tonearm' || interaction.wasPlaying);
+    interactionRef.current = null;
+    previewProgressRef.current = null;
+    setPreviewProgress(null);
+    setDragMode(null);
+    setManualRecordAngle(angle => ((angle % 360) + 360) % 360);
+    if (shouldResume) {
+      window.requestAnimationFrame(() => {
+        if (audioRef.current?.paused) togglePlay();
+      });
+    }
+  };
+
+  const handleVinylKeyDown = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || !duration) return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : -1;
+    const seconds = Math.max(1, Math.min(5, duration / 100));
+    seek(clamp(progress + ((seconds * direction / duration) * 100), 0, 100));
+    setManualRecordAngle(angle => angle + (direction * 30));
+  };
+
+  const handleTonearmKeyDown = event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key) || !duration) return;
+    event.preventDefault();
+    const target = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? 100
+        : clamp(progress + ((event.key === 'ArrowRight' || event.key === 'ArrowUp') ? 1 : -1), 0, 100);
+    seek(target);
+  };
+
   if (!currentSong) return null;
+
+  const displayedProgress = clamp(previewProgress ?? progress, 0, 100);
+  const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
+  const tonearmAngle = completed
+    ? TONEARM_LIFTED_ANGLE
+    : tonearmAngleFromProgress(displayedProgress);
+  const tonearmLifted = dragMode === 'tonearm' || completed;
+  const interactionLabel = dragMode === 'record'
+    ? `Scratching · ${formatTime((displayedProgress / 100) * duration)}`
+    : dragMode === 'tonearm'
+      ? `Tonearm lifted · drop at ${formatTime((displayedProgress / 100) * duration)}`
+      : completed
+        ? 'Playback complete · tonearm lifted'
+        : `${VINYL_RPM} RPM clockwise · drag the record or tonearm`;
 
   return (
     <div className="expanded-player">
@@ -91,15 +250,55 @@ export function ExpandedPlayer({
       <div className="expanded-player__content">
         <div className="expanded-player__layout">
           <div className="expanded-player__art-container">
-            <div className={`record-player ${isPlaying ? 'record-player--playing' : ''}`}>
+            <div
+              ref={recordPlayerRef}
+              className={`record-player ${isPlaying && !dragMode ? 'record-player--playing' : ''} ${dragMode ? 'record-player--dragging' : ''} ${completed ? 'record-player--complete' : ''}`}
+            >
               <div
-                className={`expanded-player__art ${isPlaying ? 'expanded-player__art--playing' : ''}`}
-                style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
-                aria-label="Song artwork placeholder"
+                className={`record-player__scratch-layer ${dragMode === 'record' ? 'record-player__scratch-layer--dragging' : ''}`}
+                style={{ '--manual-record-angle': `${manualRecordAngle}deg` }}
+                role="slider"
+                tabIndex={0}
+                aria-label="Vinyl record scrubber"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(displayedProgress)}
+                aria-valuetext={formatTime((displayedProgress / 100) * duration)}
+                onPointerDown={beginRecordDrag}
+                onPointerMove={moveRecord}
+                onPointerUp={finishInteraction}
+                onPointerCancel={finishInteraction}
+                onKeyDown={handleVinylKeyDown}
               >
-                <span className="expanded-player__art-icon">♪</span>
+                <div
+                  className="expanded-player__art"
+                  style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
+                  aria-label="Song artwork placeholder"
+                >
+                  <span className="expanded-player__art-icon">♪</span>
+                </div>
               </div>
-              <span className="record-player__tonearm" aria-hidden="true" />
+              <button
+                type="button"
+                className={`record-player__tonearm ${tonearmLifted ? 'record-player__tonearm--lifted' : ''} ${dragMode === 'tonearm' ? 'record-player__tonearm--dragging' : ''}`}
+                style={{ '--tonearm-angle': `${tonearmAngle}deg` }}
+                role="slider"
+                aria-label="Tonearm song position"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(displayedProgress)}
+                aria-valuetext={formatTime((displayedProgress / 100) * duration)}
+                onPointerDown={beginTonearmDrag}
+                onPointerMove={moveTonearm}
+                onPointerUp={finishInteraction}
+                onPointerCancel={finishInteraction}
+                onKeyDown={handleTonearmKeyDown}
+              >
+                <span className="record-player__tonearm-pivot" />
+                <span className="record-player__tonearm-shaft" />
+                <span className="record-player__tonearm-head"><span className="record-player__stylus" /></span>
+              </button>
+              <div className="record-player__readout" aria-live="polite">{interactionLabel}</div>
             </div>
           </div>
 
@@ -122,14 +321,14 @@ export function ExpandedPlayer({
 
             <div className="expanded-player__controls-area">
           <div className="expanded-progress">
-            <span className="time-label">{formatTime((progress / 100) * duration)}</span>
+            <span className="time-label">{formatTime((displayedProgress / 100) * duration)}</span>
             <input
               type="range"
               className="progress-bar"
               min={0}
               max={100}
               step={0.1}
-              value={progress}
+              value={displayedProgress}
               onChange={event => seek(Number(event.target.value))}
               aria-label="Playback position"
             />
@@ -283,6 +482,7 @@ export function PlayerBar({
       </div>
       {isExpanded && (
         <ExpandedPlayer
+          key={currentSong?.songKey || 'expanded-player'}
           player={player}
           onClose={() => setIsExpanded(false)}
           hue={hue}
