@@ -240,6 +240,104 @@ export function projectEmbeddingsTo2D(songs = []) {
   });
 }
 
+function principalAxis(centered, seedMultiplier, previousAxes = []) {
+  const axis = new Float32Array(EMBEDDING_DIMENSIONS);
+  for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) axis[j] = Math.sin((j + 1) * seedMultiplier);
+  for (let iter = 0; iter < 12; iter++) {
+    for (const previous of previousAxes) {
+      let projection = 0;
+      for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) projection += axis[j] * previous[j];
+      for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) axis[j] -= projection * previous[j];
+    }
+    const next = new Float32Array(EMBEDDING_DIMENSIONS);
+    for (const row of centered) {
+      let dot = 0;
+      for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) dot += row[j] * axis[j];
+      for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) next[j] += dot * row[j];
+    }
+    let norm = 0;
+    for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) norm += next[j] * next[j];
+    norm = Math.sqrt(norm) || 1;
+    for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) axis[j] = next[j] / norm;
+  }
+  return axis;
+}
+
+/** Projects vectors to three PCA axes for the lightweight WebGL cluster view. */
+export function projectEmbeddingsTo3D(songs = []) {
+  if (songs.length === 0) return [];
+  const vectors = songs.map(song => song.vector || computeSongEmbedding(song));
+  const mean = new Float32Array(EMBEDDING_DIMENSIONS);
+  vectors.forEach(vector => vector.forEach((value, index) => { mean[index] += value; }));
+  for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) mean[j] /= vectors.length;
+  const centered = vectors.map(vector => Float32Array.from(vector, (value, index) => value - mean[index]));
+  const axes = [];
+  axes.push(principalAxis(centered, 1));
+  axes.push(principalAxis(centered, 2, axes));
+  axes.push(principalAxis(centered, 3, axes));
+
+  return songs.map((song, index) => {
+    const row = centered[index];
+    const coords = axes.map(axis => row.reduce((sum, value, dim) => sum + value * axis[dim], 0));
+    return { ...song, coordX: coords[0], coordY: coords[1], coordZ: coords[2] };
+  });
+}
+
+/**
+ * Deterministic k-means over the local song embeddings. The bounded cluster
+ * count keeps the view responsive even for large libraries.
+ */
+export function kMeansCluster(songs = [], options = {}) {
+  if (songs.length === 0) return [];
+  const vectors = songs.map(song => song.vector || computeSongEmbedding(song));
+  const requestedClusters = Number(options.k) || Math.round(Math.sqrt(songs.length / 2));
+  const k = Math.min(songs.length, Math.max(1, Math.min(Number(options.maxClusters) || 8, requestedClusters)));
+  const dimensions = EMBEDDING_DIMENSIONS;
+  const centroids = Array.from({ length: k }, (_, clusterIndex) => Float32Array.from(vectors[Math.floor((clusterIndex * vectors.length) / k)]));
+  const assignments = new Array(vectors.length).fill(0);
+
+  for (let iteration = 0; iteration < (Number(options.iterations) || 8); iteration++) {
+    for (let index = 0; index < vectors.length; index++) {
+      let bestCluster = 0;
+      let bestDistance = Infinity;
+      for (let clusterIndex = 0; clusterIndex < k; clusterIndex++) {
+        let distance = 0;
+        for (let dimension = 0; dimension < dimensions; dimension++) {
+          const delta = vectors[index][dimension] - centroids[clusterIndex][dimension];
+          distance += delta * delta;
+        }
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestCluster = clusterIndex;
+        }
+      }
+      assignments[index] = bestCluster;
+    }
+
+    const sums = Array.from({ length: k }, () => new Float32Array(dimensions));
+    const counts = new Array(k).fill(0);
+    vectors.forEach((vector, index) => {
+      const cluster = assignments[index];
+      counts[cluster]++;
+      for (let dimension = 0; dimension < dimensions; dimension++) sums[cluster][dimension] += vector[dimension];
+    });
+    for (let clusterIndex = 0; clusterIndex < k; clusterIndex++) {
+      if (!counts[clusterIndex]) continue;
+      for (let dimension = 0; dimension < dimensions; dimension++) centroids[clusterIndex][dimension] = sums[clusterIndex][dimension] / counts[clusterIndex];
+    }
+  }
+
+  const clusterSizes = assignments.reduce((sizes, cluster) => {
+    sizes[cluster] = (sizes[cluster] || 0) + 1;
+    return sizes;
+  }, {});
+  return songs.map((song, index) => ({
+    ...song,
+    clusterId: assignments[index],
+    clusterSize: clusterSizes[assignments[index]],
+  }));
+}
+
 /**
  * Default Sisic embedding provider function for embeddingService.js
  */

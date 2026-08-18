@@ -28,6 +28,8 @@ import {
   X,
   Sliders,
   Sparkles,
+  ExternalLink,
+  Heart,
 } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 import {
@@ -40,23 +42,28 @@ import {
   vinylSecondsFromDegrees,
   wrappedAngleDelta,
 } from '../vinylPhysics.js';
-import { getSongArtwork } from '../services/artworkService.js';
+function resizeArtworkUrl(url = '', size = 300) {
+  if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url;
+  const safeSize = Math.max(60, Math.round(Number(size) || 300));
+  return url.replace(/\/\d+x\d+bb\./i, `/${safeSize}x${safeSize}bb.`);
+}
 
-export function AsyncArtworkImage({ song, className = '', fallbackSize = 24, alt = '' }) {
+export function AsyncArtworkImage({ song, className = '', fallbackSize = 24, alt = '', size = 300, sizes, priority = false }) {
   const [fetchedArtUrl, setFetchedArtUrl] = useState('');
 
   useEffect(() => {
     let active = true;
-    if (!song || song.coverArtUrl) return undefined;
-    getSongArtwork(song).then(res => {
-      if (active && res?.coverArtUrl) {
-        setFetchedArtUrl(res.coverArtUrl);
-      }
-    }).catch(() => {});
+    if (!song) return undefined;
+    import('../services/artworkService.js')
+      .then(({ getSongArtwork }) => getSongArtwork(song))
+      .then(res => {
+        if (active && res?.coverArtUrl) setFetchedArtUrl(res.coverArtUrl);
+      })
+      .catch(() => {});
     return () => { active = false; };
   }, [song]);
 
-  const artUrl = song?.coverArtUrl || fetchedArtUrl;
+  const artUrl = resizeArtworkUrl(fetchedArtUrl || song?.coverArtUrl, size);
   const hue = song?.track ? song.track.charCodeAt(0) % 360 : 200;
 
   if (artUrl) {
@@ -65,7 +72,12 @@ export function AsyncArtworkImage({ song, className = '', fallbackSize = 24, alt
         src={artUrl}
         alt={alt || `${song?.track || 'Song'} cover`}
         className={className}
-        loading="lazy"
+        width={size}
+        height={size}
+        sizes={sizes}
+        loading={priority ? 'eager' : 'lazy'}
+        fetchPriority={priority ? 'high' : 'low'}
+        decoding="async"
       />
     );
   }
@@ -267,7 +279,6 @@ export function ExpandedPlayer({
 
   if (!currentSong) return null;
 
-  const songCover = currentSong.coverArtUrl || currentSong.artwork || currentSong.image || currentSong.cover || '';
   const displayedProgress = clamp(previewProgress ?? progress, 0, 100);
   const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
   const tonearmAngle = completed
@@ -326,25 +337,19 @@ export function ExpandedPlayer({
                 onPointerCancel={finishInteraction}
                 onKeyDown={handleVinylKeyDown}
               >
-                <div
+                  <div
                   className="expanded-player__art"
                   aria-label={`${currentSong.track} by ${currentSong.artist}`}
-                >
+                  >
                   <div className="record-player__center-label">
-                    {songCover ? (
-                      <img
-                        src={songCover}
-                        alt={`${currentSong.track} cover`}
-                        className="record-player__center-img"
-                      />
-                    ) : (
-                      <div
-                        className="record-player__center-fallback"
-                        style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 45%), hsl(${(hue + 60) % 360}, 70%, 25%))` }}
-                      >
-                        <span className="expanded-player__art-icon">♪</span>
-                      </div>
-                    )}
+                    <AsyncArtworkImage
+                      song={currentSong}
+                      alt={`${currentSong.track} cover`}
+                      className="record-player__center-img"
+                      fallbackSize={28}
+                      size={400}
+                      priority
+                    />
                     <span className="record-player__spindle-hole" />
                   </div>
                 </div>
@@ -430,7 +435,7 @@ export function ExpandedPlayer({
               <ListMusic size={24} color="white" />
             </button>
           </div>
-              <div className="expanded-player__actions" aria-label="Song actions">
+              <div className="expanded-player__actions" role="group" aria-label="Song actions">
                 <button className="panel-action-btn" onClick={() => onOpenSongInfo?.(currentSong)}><Info size={16} /> Info</button>
                 <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(currentSong)}><Plus size={16} /> Playlist</button>
                 <button className="panel-action-btn" onClick={() => onPlayNext?.(currentSong)}><SkipForward size={16} /> Play next</button>
@@ -483,7 +488,7 @@ export function PlayerBar({
       <div className="player-song-info" onClick={() => currentSong && setIsExpanded(true)} style={{ cursor: currentSong ? 'pointer' : 'default' }}>
         {currentSong ? (
           <>
-            <AsyncArtworkImage song={currentSong} className="player-thumb" fallbackSize={16} />
+            <AsyncArtworkImage song={currentSong} className="player-thumb" fallbackSize={16} size={96} sizes="64px" priority />
             <div className="player-meta">
               <span className="player-track">{currentSong.track}</span>
               <span className="player-artist">{currentSong.artist}</span>
@@ -586,6 +591,8 @@ export function SongCard({
   onReview,
   onInfo,
   onMoreLikeThis,
+  onToggleLike,
+  isLiked = false,
   isReadyLoose = false,
   isCurrentSong,
   isDownloading,
@@ -598,9 +605,15 @@ export function SongCard({
   const cardRef = useRef(null);
   const menuRef = useRef(null);
   const menuButtonRef = useRef(null);
+  const longPressTimerRef = useRef(null);
+  const longPressTriggeredRef = useRef(false);
   const pointerRef = useRef({ active: false, startX: 0, offset: 0, swiped: false });
 
   const closeMenu = () => setMenuOpen(false);
+  const clearLongPress = () => {
+    if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  };
   const runAction = (event, action) => {
     event.stopPropagation();
     closeMenu();
@@ -608,11 +621,21 @@ export function SongCard({
   };
 
   const handlePointerDown = (event) => {
-    if (!isReadyLoose) return;
-    pointerRef.current = { active: true, startX: event.clientX, offset: 0, swiped: false };
+    if (event.target.closest('button')) return;
+    longPressTriggeredRef.current = false;
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTriggeredRef.current = true;
+      pointerRef.current.active = false;
+      setDragOffset(0);
+      setMenuOpen(true);
+    }, 480);
+    if (isReadyLoose) {
+      pointerRef.current = { active: true, startX: event.clientX, offset: 0, swiped: false };
+    }
   };
 
   const handlePointerMove = (event) => {
+    if (Math.abs(event.clientX - (pointerRef.current.startX || event.clientX)) > 8) clearLongPress();
     if (!pointerRef.current.active) return;
     const offset = Math.max(-110, Math.min(110, event.clientX - pointerRef.current.startX));
     if (Math.abs(offset) > 8) pointerRef.current.swiped = true;
@@ -621,6 +644,13 @@ export function SongCard({
   };
 
   const handlePointerUp = () => {
+    clearLongPress();
+    if (longPressTriggeredRef.current) {
+      longPressTriggeredRef.current = false;
+      pointerRef.current.active = false;
+      setDragOffset(0);
+      return;
+    }
     if (!pointerRef.current.active) return;
     const offset = pointerRef.current.offset || dragOffset;
     pointerRef.current.active = false;
@@ -631,6 +661,10 @@ export function SongCard({
     if (offset <= -72) onDeleteReady?.(song);
     if (offset >= 72) onAddToPlaylist?.(song);
   };
+
+  useEffect(() => {
+    return () => clearLongPress();
+  }, []);
 
   useEffect(() => {
     if (!menuOpen) return undefined;
@@ -680,7 +714,6 @@ export function SongCard({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      onMouseLeave={closeMenu}
     >
       <button
         className="song-card__primary"
@@ -691,7 +724,7 @@ export function SongCard({
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
       >
         <div className="song-card__art-wrapper">
-          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} />
+          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} size={300} sizes="(max-width: 768px) 45vw, 220px" />
           {isCurrentSong && (
             <div className="song-card__playing-bars"><span /><span /><span /></div>
           )}
@@ -703,18 +736,18 @@ export function SongCard({
       </button>
       <div className="song-card__footer">
         <div className="song-card__status-stack">
-          <div className={`song-status ${status.className}`} title={song.downloadJob?.lastError || status.label}>
+          <div className={`song-status ${status.className}`} data-status-label={status.label} title={song.downloadJob?.lastError || status.label}>
             <StatusIcon size={12} />
             <span>{status.label}</span>
           </div>
           {song.syncStatus && song.syncStatus !== 'done' && (
-            <div className="song-status song-status--downloading" title="Metadata sync is pending">
+            <div className="song-status song-status--downloading" data-status-label="Sync queued" title="Metadata sync is pending">
               <Cloud size={12} />
               <span>Sync {song.syncStatus}</span>
             </div>
           )}
           {song.embeddingStatus && song.embeddingStatus !== 'done' && (
-            <div className="song-status song-status--queued" title="Embedding pipeline status">
+            <div className="song-status song-status--queued" data-status-label="Analysis queued" title="Embedding pipeline status">
               <Clock3 size={12} />
               <span>Embedding {song.embeddingStatus}</span>
             </div>
@@ -765,6 +798,12 @@ export function SongCard({
             <button role="menuitem" onClick={event => runAction(event, onAddToQueue)}>
               <ListMusic size={15} />
               <span>Add to queue</span>
+            </button>
+          )}
+          {onToggleLike && (
+            <button role="menuitem" onClick={event => runAction(event, onToggleLike)}>
+              <Heart size={15} fill={isLiked ? 'currentColor' : 'none'} />
+              <span>{isLiked ? 'Unlike' : 'Like'}</span>
             </button>
           )}
           <button role="menuitem" onClick={event => runAction(event, onDownload)} disabled={isDownloading}>
@@ -824,7 +863,7 @@ export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue,
         </div>
 
         <div className="song-info-panel__hero">
-          <div className="song-info-panel__art" aria-label="Song artwork placeholder">♪</div>
+          <div className="song-info-panel__art" role="img" aria-label="Song artwork placeholder">♪</div>
           <div>
             <strong>{status.label}</strong>
             <span>{song.filename || song.driveFileId || 'No Drive file linked yet'}</span>
@@ -928,7 +967,8 @@ export function SongReviewPanel({ song, onClose, onApprove, onRetryStudio, onUse
   );
 }
 
-export function LoginScreen({ onLogin, error, busy = false }) {
+export function LoginScreen({ onLogin, error, busy = false, setupStatus = {} }) {
+  const missing = setupStatus.missing || [];
   return (
     <div className="login-screen">
       <div className="login-glow" />
@@ -942,6 +982,36 @@ export function LoginScreen({ onLogin, error, busy = false }) {
           {busy ? 'Connecting…' : 'Sign in with Google'}
         </button>
         {error && <p className="login-error" role="alert">{error}</p>}
+        <div className={`setup-card ${missing.length ? 'setup-card--needs-config' : 'setup-card--ready'}`}>
+          <div className="setup-card__heading">
+            <div>
+              <span className="setup-card__eyebrow">First-time setup</span>
+              <h2>{missing.length ? 'Connect your own Drive library' : 'Your site is configured'}</h2>
+            </div>
+            <span className="setup-card__status">
+              {missing.length ? 'Needs setup' : 'Ready'}
+            </span>
+          </div>
+          <p className="setup-card__copy">
+            GitHub Pages hosts the interface only. Your music stays private in your Google Drive and is accessed after you authorize this site.
+          </p>
+          <ol className="setup-card__steps">
+            <li>Create a Google Cloud OAuth web client and enable the Google Drive API.</li>
+            <li>Add this GitHub Pages address as an authorized JavaScript origin.</li>
+            <li>Build the site with the client ID, Drive folder ID, and library JSON file ID.</li>
+          </ol>
+          <div className="setup-card__links">
+            <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">
+              Google Cloud credentials <ExternalLink size={13} />
+            </a>
+            <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">
+              Enable Drive API <ExternalLink size={13} />
+            </a>
+          </div>
+          <p className="setup-card__permissions"><strong>Drive permission:</strong> the current browser flow requests read-only access so it can find the existing Spotify export, plus app-managed file access for Sisic indexes and downloads. OAuth tokens stay in memory and are not stored in localStorage.</p>
+          <p className="setup-card__automation"><strong>Automated:</strong> Google sign-in, Drive authorization, library sync, and offline downloads. <strong>One-time manual step:</strong> Google Cloud OAuth and the three build variables.</p>
+          {missing.length > 0 && <p className="setup-card__missing">Missing from this build: {missing.join(', ')}</p>}
+        </div>
         <p className="login-hint">Connect to your Google Drive music library</p>
       </div>
     </div>
@@ -996,7 +1066,7 @@ export function ImportStatusPanel({ jobs = [], embeddingJobs = [] }) {
               <span>{job.fileName || job.songKey || 'Audio file'}</span>
               <small>{IMPORT_STATUS_LABELS[job.status] || job.status}{job.message ? ` · ${job.message}` : ''}</small>
             </div>
-            <div className="import-progress" aria-label={`${Math.round((job.progress || 0) * 100)} percent complete`}>
+            <div className="import-progress" role="progressbar" aria-label={`${Math.round((job.progress || 0) * 100)} percent complete`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round((job.progress || 0) * 100)}>
               <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
             </div>
           </div>
@@ -1007,7 +1077,7 @@ export function ImportStatusPanel({ jobs = [], embeddingJobs = [] }) {
               <span><BrainCircuit size={14} /> Embedding {job.songKey}</span>
               <small>{job.status === 'processing' ? 'Generating embedding' : job.status === 'failed' ? 'Retry required' : 'Queued'}</small>
             </div>
-            <div className="import-progress" aria-label="Embedding status">
+            <div className="import-progress" role="progressbar" aria-label="Embedding status" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round((job.progress || 0) * 100)}>
               <span style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
             </div>
           </div>

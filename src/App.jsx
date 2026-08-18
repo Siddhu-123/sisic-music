@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass } from 'lucide-react';
 import {
@@ -12,6 +12,7 @@ import {
   getLibrarySnapshot,
   getPlaylistSnapshotForDrive,
   markSongPlayable,
+  removeSongFromPlaylist,
   resetLocalDatabase,
   recordPlaybackEvent,
   syncDownloadJobsToDb,
@@ -24,19 +25,19 @@ import {
 import { driveService } from './services/GoogleDriveService.js';
 import { useAudioPlayer } from './hooks/useAudioPlayer.js';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
-import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
-import { QueuePanel } from './components/QueuePanel.jsx';
+import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
 import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService.js';
-import { processPendingEmbeddingJobs } from './services/embeddingService.js';
-import { ConstellationView } from './components/views/ConstellationView.jsx';
-import { EqualizerModal } from './components/EqualizerModal.jsx';
-import { RecommendationsModal } from './components/RecommendationsModal.jsx';
-import { TasteProfileModal } from './components/TasteProfileModal.jsx';
 import './App.css';
+
+const QueuePanel = lazy(() => import('./components/QueuePanel.jsx').then(module => ({ default: module.QueuePanel })));
+const ConstellationView = lazy(() => import('./components/views/ConstellationView.jsx').then(module => ({ default: module.ConstellationView })));
+const EqualizerModal = lazy(() => import('./components/EqualizerModal.jsx').then(module => ({ default: module.EqualizerModal })));
+const RecommendationsModal = lazy(() => import('./components/RecommendationsModal.jsx').then(module => ({ default: module.RecommendationsModal })));
+const TasteProfileModal = lazy(() => import('./components/TasteProfileModal.jsx').then(module => ({ default: module.TasteProfileModal })));
 
 const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
@@ -46,6 +47,15 @@ const LISTENING_HISTORY_KEY = 'listening history';
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
+}
+
+function scheduleIdleWork(callback, timeout = 1200) {
+  if (typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(callback, { timeout });
+    return () => window.cancelIdleCallback?.(id);
+  }
+  const id = window.setTimeout(callback, Math.min(timeout, 250));
+  return () => window.clearTimeout(id);
 }
 
 function isSyncRetryReady(operation) {
@@ -186,7 +196,7 @@ function searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, 
 }
 
 function App() {
-  const { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error: authError, login, syncLibrary } = useAuth();
+  const { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error: authError, login, syncLibrary, setupStatus } = useAuth();
   const player = useAudioPlayer();
   const { toasts, addToast } = useToast();
 
@@ -198,12 +208,14 @@ function App() {
   const [showQueue, setShowQueue] = useState(false);
   const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
   const [catalogue, setCatalogue] = useState([]);
+  const [catalogueLoading, setCatalogueLoading] = useState(false);
   const [driveIndexSongs, setDriveIndexSongs] = useState([]);
   const [driveDeletedSongs, setDriveDeletedSongs] = useState([]);
   const [drivePlaybackEvents, setDrivePlaybackEvents] = useState([]);
   const [driveQuota, setDriveQuota] = useState(null);
   const [showStoragePanel, setShowStoragePanel] = useState(false);
   const [playlistPicker, setPlaylistPicker] = useState(null);
+  const [playlistQuery, setPlaylistQuery] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [songInfo, setSongInfo] = useState(null);
   const [reviewSong, setReviewSong] = useState(null);
@@ -214,6 +226,7 @@ function App() {
   const [syncRetryTick, setSyncRetryTick] = useState(0);
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
   const stagedLocalImportKeysRef = useRef(new Set());
+  const catalogueLoadStartedRef = useRef(false);
   const fileInputRef = useRef(null);
   const storageDialogRef = useDialogFocus(showStoragePanel, () => setShowStoragePanel(false));
   const playlistDialogRef = useDialogFocus(Boolean(playlistPicker), () => setPlaylistPicker(null), { canClose: !playlistPicker?.busy });
@@ -246,9 +259,16 @@ function App() {
   const resumePositionRef = useRef(resumePosition);
 
   useEffect(() => {
-    fetch(`${import.meta.env.BASE_URL}unique_songs.json`)
-      .then(response => response.json())
-      .then(data => {
+    if (![VIEWS.SEARCH, VIEWS.DOWNLOADS].includes(view) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
+    let cancelled = false;
+    catalogueLoadStartedRef.current = true;
+    const loadCatalogue = async () => {
+      setCatalogueLoading(true);
+      try {
+        const response = await fetch(`${import.meta.env.BASE_URL}unique_songs.json`);
+        if (!response.ok) throw new Error(`Catalogue request failed: ${response.status}`);
+        const data = await response.json();
+        if (cancelled) return;
         const bySongKey = new Map();
         data.forEach((raw, index) => {
           const song = asSongRecord({
@@ -261,9 +281,19 @@ function App() {
           if (!bySongKey.has(song.songKey)) bySongKey.set(song.songKey, song);
         });
         setCatalogue([...bySongKey.values()]);
-      })
-      .catch(error => console.error('Failed to load search catalogue:', error));
-  }, []);
+      } catch (error) {
+        if (!cancelled) console.error('Failed to load search catalogue:', error);
+      } finally {
+        if (!cancelled) setCatalogueLoading(false);
+      }
+    };
+    const cancel = scheduleIdleWork(loadCatalogue, view === VIEWS.SEARCH ? 150 : 1200);
+    return () => {
+      cancelled = true;
+      cancel();
+      if (!catalogue.length) catalogueLoadStartedRef.current = false;
+    };
+  }, [catalogue.length, view]);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -330,7 +360,19 @@ function App() {
   }, [runImport]);
 
   useEffect(() => {
-    processPendingEmbeddingJobs({ limit: 2 }).catch(error => console.warn('Embedding queue processing failed:', error));
+    if (!embeddingJobs.length) return undefined;
+    let cancelled = false;
+    const cancel = scheduleIdleWork(() => {
+      if (!cancelled) {
+        import('./services/embeddingService.js')
+          .then(({ processPendingEmbeddingJobs }) => processPendingEmbeddingJobs({ limit: 2 }))
+          .catch(error => console.warn('Embedding queue processing failed:', error));
+      }
+    }, 1800);
+    return () => {
+      cancelled = true;
+      cancel();
+    };
   }, [embeddingJobs]);
 
   useEffect(() => {
@@ -399,6 +441,8 @@ function App() {
   const visiblePlaylistKeySet = useMemo(() => {
     return new Set(visiblePlaylists.map(playlist => playlist.playlistKey));
   }, [visiblePlaylists]);
+
+  const likedPlaylist = useMemo(() => visiblePlaylists.find(playlist => normalizeText(playlist.name) === 'liked songs'), [visiblePlaylists]);
 
   const jobBySongKey = useMemo(() => {
     const map = new Map();
@@ -580,7 +624,7 @@ function App() {
     if (!candidates.length) return undefined;
     let cancelled = false;
     candidates.forEach(song => stagedLocalImportKeysRef.current.add(song.songKey));
-    (async () => {
+    const stageImports = async () => {
       try {
         const results = await queueCachedLocalImports(candidates, { driveService, driveFolderId: DRIVE_FOLDER_ID });
         if (cancelled || !results.length) return;
@@ -593,9 +637,11 @@ function App() {
         candidates.forEach(song => stagedLocalImportKeysRef.current.delete(song.songKey));
         console.error('Failed to stage cached local imports:', error);
       }
-    })();
+    };
+    const cancel = scheduleIdleWork(stageImports, 1800);
     return () => {
       cancelled = true;
+      cancel();
     };
   }, [addToast, allSongs, isAuthenticated]);
 
@@ -619,9 +665,10 @@ function App() {
       }
     };
 
-    loadIndexes();
+    const cancel = scheduleIdleWork(loadIndexes, 1800);
     return () => {
       cancelled = true;
+      cancel();
     };
   }, [isAuthenticated]);
 
@@ -771,9 +818,10 @@ function App() {
       }
     };
 
-    enqueueMissingPlaylistSongs();
+    const cancel = scheduleIdleWork(enqueueMissingPlaylistSongs, 2200);
     return () => {
       cancelled = true;
+      cancel();
     };
   }, [addToast, isAuthenticated, isPlaying, jobBySongKey, missingRequiredSongs, queueSongForDownload]);
 
@@ -1030,6 +1078,11 @@ function App() {
         const blob = await driveService.downloadFileAsBlob(fileId);
         await cacheSongBlob(localSong.songKey, blob, fileId, { explicit: true });
         await enforceAudioCacheLimit(AUDIO_CACHE_LIMIT_BYTES);
+        // Artwork is an explicit-download dependency: store bytes for offline
+        // use, while ordinary browsing can continue using remote artwork URLs.
+        import('./services/artworkService.js')
+          .then(({ cacheSongArtwork }) => cacheSongArtwork(localSong))
+          .catch(error => console.debug('Offline artwork cache skipped:', error));
         if (deletedSongKeySet.has(localSong.songKey)) {
           await driveService.removeDeletedSong(DRIVE_FOLDER_ID, localSong);
           setDriveDeletedSongs(prev => prev.filter(item => item.songKey !== localSong.songKey));
@@ -1067,6 +1120,7 @@ function App() {
   }, []);
 
   const openPlaylistPicker = useCallback((song) => {
+    setPlaylistQuery('');
     setPlaylistPicker({
       song,
       selectedKeys: [],
@@ -1074,6 +1128,11 @@ function App() {
       busy: false,
     });
   }, []);
+
+  const pickerPlaylists = useMemo(() => {
+    const query = normalizeText(playlistQuery);
+    return query ? visiblePlaylists.filter(playlist => normalizeText(playlist.name).includes(query)) : visiblePlaylists;
+  }, [playlistQuery, visiblePlaylists]);
 
   const handlePlaylistPickerConfirm = useCallback(async () => {
     if (!playlistPicker?.song) return;
@@ -1118,6 +1177,20 @@ function App() {
     queueSongForDownload,
     visiblePlaylists,
   ]);
+
+  const handleToggleLike = useCallback(async song => {
+    const localSong = await ensureLocalSong(song, 'Liked Songs');
+    const existingLiked = likedPlaylist && song.playlistKeys?.includes(likedPlaylist.playlistKey);
+    if (existingLiked) {
+      await removeSongFromPlaylist(localSong.songKey, likedPlaylist.playlistKey);
+      await persistPlaylistIndex();
+      addToast(`Removed "${localSong.track}" from liked songs`);
+    } else {
+      await addSongToPlaylist(localSong, 'Liked Songs', 'sisic');
+      await persistPlaylistIndex();
+      addToast(`Liked "${localSong.track}"`);
+    }
+  }, [addToast, ensureLocalSong, likedPlaylist, persistPlaylistIndex]);
 
   const handleDeleteReadySong = useCallback(async (song) => {
     if (!DRIVE_FOLDER_ID) {
@@ -1175,7 +1248,7 @@ function App() {
   }, []);
 
   if (!isAuthenticated && !hasAuthorizedSession) {
-    return <LoginScreen onLogin={login} error={authError} busy={isAuthorizing} />;
+    return <LoginScreen onLogin={login} error={authError} busy={isAuthorizing} setupStatus={setupStatus} />;
   }
 
   const bannerError = authError || actionError || player.error || localDbError;
@@ -1206,6 +1279,8 @@ function App() {
       onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
       onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
       onAddToPlaylist={openPlaylistPicker}
+      onToggleLike={handleToggleLike}
+      isLiked={Boolean(likedPlaylist && song.playlistKeys?.includes(likedPlaylist.playlistKey))}
       onReview={setReviewSong}
       onInfo={setSongInfo}
       onMoreLikeThis={(selected) => setRecommendationTarget(selected)}
@@ -1318,12 +1393,10 @@ function App() {
             <span className="drive-summary__label">Deleted history</span>
             <strong>{driveDeletedSongs.length.toLocaleString()} songs</strong>
           </div>
-          {driveQuota?.limitBytes > 0 && (
-            <div>
-              <span className="drive-summary__label">Account free</span>
-              <strong>{formatBytes(Math.max(0, driveQuota.limitBytes - driveQuota.usageBytes))}</strong>
-            </div>
-          )}
+          <div>
+            <span className="drive-summary__label">Account free</span>
+            <strong>{driveQuota?.limitBytes > 0 ? formatBytes(Math.max(0, driveQuota.limitBytes - driveQuota.usageBytes)) : '—'}</strong>
+          </div>
           <button className="drive-summary__button" onClick={() => setShowStoragePanel(true)}>
             <BarChart3 size={16} />
             <span>Storage</span>
@@ -1436,7 +1509,13 @@ function App() {
               <div className="empty-state">
                 <Search size={48} color="var(--text-muted)" />
                 <h3>Search your library</h3>
-                <p>Find any of your {catalogue.length.toLocaleString()} songs by name or artist</p>
+                <p>{catalogueLoading ? 'Loading your searchable catalogue…' : `Find any of your ${catalogue.length.toLocaleString()} songs by name or artist`}</p>
+              </div>
+            ) : catalogueLoading ? (
+              <div className="empty-state" role="status">
+                <Search size={48} color="var(--text-muted)" />
+                <h3>Loading catalogue</h3>
+                <p>Preparing search results…</p>
               </div>
             ) : searchResults.length === 0 ? (
               <div className="empty-state">
@@ -1502,12 +1581,14 @@ function App() {
         )}
 
         {view === VIEWS.CONSTELLATION && (
-          <ConstellationView
-            songs={allSongs}
-            currentSong={player.currentSong}
-            onPlaySong={(song) => handlePlaySong(song, allSongs)}
-            onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
-          />
+          <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
+            <ConstellationView
+              songs={allSongs}
+              currentSong={player.currentSong}
+              onPlaySong={(song) => handlePlaySong(song, allSongs)}
+              onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+            />
+          </Suspense>
         )}
       </main>
 
@@ -1557,17 +1638,39 @@ function App() {
         <div className="modal-backdrop" role="presentation" onClick={() => !playlistPicker.busy && setPlaylistPicker(null)}>
           <section ref={playlistDialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-label="Choose playlist" tabIndex={-1} onClick={event => event.stopPropagation()}>
             <div className="panel-header">
-              <h2>Playlist</h2>
+              <div>
+                <span className="playlist-picker__eyebrow">Organize your library</span>
+                <h2>Add to playlist</h2>
+              </div>
               <button data-dialog-autofocus className="icon-btn" onClick={() => setPlaylistPicker(null)} aria-label="Close playlist picker" disabled={playlistPicker.busy}>
                 <X size={18} />
               </button>
             </div>
             <div className="playlist-picker__song">
-              <strong>{playlistPicker.song.track}</strong>
-              <span>{playlistPicker.song.artist}</span>
+              <AsyncArtworkImage song={playlistPicker.song} className="playlist-picker__song-art" fallbackSize={18} size={100} sizes="52px" />
+              <div>
+                <strong>{playlistPicker.song.track}</strong>
+                <span>{playlistPicker.song.artist}</span>
+              </div>
+            </div>
+            <div className="playlist-picker__toolbar">
+              <input
+                className="playlist-picker__search"
+                type="search"
+                placeholder="Find a playlist"
+                value={playlistQuery}
+                onChange={event => setPlaylistQuery(event.target.value)}
+                disabled={playlistPicker.busy}
+                aria-label="Find a playlist"
+              />
+              <span>{playlistPicker.selectedKeys.length} selected</span>
+            </div>
+            <div className="playlist-picker__bulk-actions">
+              <button type="button" onClick={() => setPlaylistPicker(prev => prev ? { ...prev, selectedKeys: [...new Set([...prev.selectedKeys, ...pickerPlaylists.map(item => item.playlistKey)])] } : prev)} disabled={playlistPicker.busy || pickerPlaylists.length === 0}>Select visible</button>
+              <button type="button" onClick={() => setPlaylistPicker(prev => prev ? { ...prev, selectedKeys: [] } : prev)} disabled={playlistPicker.busy || playlistPicker.selectedKeys.length === 0}>Clear</button>
             </div>
             <div className="playlist-picker__list">
-              {visiblePlaylists.map(playlist => (
+              {pickerPlaylists.map(playlist => (
                 <label key={playlist.playlistKey} className="playlist-picker__option">
                   <input
                     type="checkbox"
@@ -1585,23 +1688,28 @@ function App() {
                   <span>{playlist.name}</span>
                 </label>
               ))}
+              {pickerPlaylists.length === 0 && <p className="playlist-picker__empty">No matching playlists. Create one below.</p>}
             </div>
             <input
               className="playlist-picker__new"
               type="text"
-              placeholder="New playlist"
+              placeholder="Create a new playlist"
               value={playlistPicker.newPlaylistName}
               onChange={event => setPlaylistPicker(prev => prev ? { ...prev, newPlaylistName: event.target.value } : prev)}
               disabled={playlistPicker.busy}
             />
             <button className="btn-primary playlist-picker__save" onClick={handlePlaylistPickerConfirm} disabled={playlistPicker.busy}>
-              {playlistPicker.busy ? 'Saving...' : 'Save'}
+              {playlistPicker.busy ? 'Saving...' : `Save${playlistPicker.selectedKeys.length ? ` · ${playlistPicker.selectedKeys.length}` : ''}`}
             </button>
           </section>
         </div>
       )}
 
-      {showQueue && <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />}
+      {showQueue && (
+        <Suspense fallback={<div className="queue-loading" role="status">Loading queue…</div>}>
+          <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />
+        </Suspense>
+      )}
       {songInfo && (
         <SongInfoPanel
           song={songInfo}
@@ -1641,30 +1749,42 @@ function App() {
       />
       <ToastContainer toasts={toasts} />
 
-      <EqualizerModal
-        isOpen={isEqOpen}
-        onClose={() => setIsEqOpen(false)}
-        eqPreset={player.eqPreset}
-        eqGains={player.eqGains}
-        onSetPreset={player.setEqPreset}
-        onSetGain={player.setBandGain}
-      />
+      {isEqOpen && (
+        <Suspense fallback={null}>
+          <EqualizerModal
+            isOpen
+            onClose={() => setIsEqOpen(false)}
+            eqPreset={player.eqPreset}
+            eqGains={player.eqGains}
+            onSetPreset={player.setEqPreset}
+            onSetGain={player.setBandGain}
+          />
+        </Suspense>
+      )}
 
-      <RecommendationsModal
-        isOpen={Boolean(recommendationTarget)}
-        onClose={() => setRecommendationTarget(null)}
-        targetSong={recommendationTarget}
-        librarySongs={allSongs}
-        onPlaySong={song => handlePlaySong(song, allSongs)}
-        onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
-      />
+      {recommendationTarget && (
+        <Suspense fallback={null}>
+          <RecommendationsModal
+            isOpen
+            onClose={() => setRecommendationTarget(null)}
+            targetSong={recommendationTarget}
+            librarySongs={allSongs}
+            onPlaySong={song => handlePlaySong(song, allSongs)}
+            onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+          />
+        </Suspense>
+      )}
 
-      <TasteProfileModal
-        isOpen={isTasteProfileOpen}
-        onClose={() => setIsTasteProfileOpen(false)}
-        librarySummary={librarySummary}
-        songs={allSongs}
-      />
+      {isTasteProfileOpen && (
+        <Suspense fallback={null}>
+          <TasteProfileModal
+            isOpen
+            onClose={() => setIsTasteProfileOpen(false)}
+            librarySummary={librarySummary}
+            songs={allSongs}
+          />
+        </Suspense>
+      )}
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
         {navItems.map(item => (

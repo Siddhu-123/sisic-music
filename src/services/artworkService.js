@@ -1,8 +1,25 @@
-import { db } from '../db.js';
+import { db, getStoredSongArtwork, saveSongArtwork } from '../db.js';
 import { getSongKey } from '../songIdentity.js';
 
 const memoryArtCache = new Map();
 const activeFetchPromises = new Map();
+const activeCachePromises = new Map();
+
+export function getArtworkUrlForSize(url = '', size = 300) {
+  if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url;
+  const safeSize = Math.max(60, Math.round(Number(size) || 300));
+  return url.replace(/\/\d+x\d+bb\./i, `/${safeSize}x${safeSize}bb.`);
+}
+
+function storedArtworkUrl(stored) {
+  if (!stored?.imageData) return stored?.coverArtUrl || '';
+  try {
+    const blob = new Blob([stored.imageData], { type: stored.imageMimeType || 'image/jpeg' });
+    return URL.createObjectURL(blob);
+  } catch {
+    return stored.coverArtUrl || '';
+  }
+}
 
 /**
  * Deterministically hashes a string to a 32-bit unsigned integer.
@@ -149,7 +166,22 @@ export async function getSongArtwork(song = {}) {
     return memoryArtCache.get(songKey);
   }
 
-  // 2. Direct property on song object
+  // 2. IndexedDB, including image bytes cached by an explicit offline action.
+  const storedArtwork = await getStoredSongArtwork(songKey).catch(() => null);
+  if (storedArtwork?.coverArtUrl || storedArtwork?.imageData) {
+    const result = {
+      coverArtUrl: storedArtworkUrl(storedArtwork),
+      album: storedArtwork.album || song.album || '',
+      genre: storedArtwork.genre || '',
+      releaseYear: storedArtwork.releaseYear || null,
+      isProcedural: Boolean(storedArtwork.isProcedural),
+      isOfflineCached: Boolean(storedArtwork.imageData),
+    };
+    memoryArtCache.set(songKey, result);
+    return result;
+  }
+
+  // 3. Direct property on song object
   if (song.coverArtUrl && !song.coverArtUrl.startsWith('data:image/svg+xml')) {
     const result = {
       coverArtUrl: song.coverArtUrl,
@@ -160,29 +192,13 @@ export async function getSongArtwork(song = {}) {
     return result;
   }
 
-  // 3. Prevent duplicate in-flight network requests
+  // 4. Prevent duplicate in-flight network requests
   if (activeFetchPromises.has(songKey)) {
     return activeFetchPromises.get(songKey);
   }
 
   const fetchPromise = (async () => {
     try {
-      // Check IndexedDB
-      if (db?.songArt) {
-        const stored = await db.songArt.get(songKey);
-        if (stored?.coverArtUrl) {
-          const result = {
-            coverArtUrl: stored.coverArtUrl,
-            album: stored.album || song.album || '',
-            genre: stored.genre || '',
-            releaseYear: stored.releaseYear || null,
-            isProcedural: Boolean(stored.isProcedural),
-          };
-          memoryArtCache.set(songKey, result);
-          return result;
-        }
-      }
-
       // Check iTunes API
       const iTunesResult = await searchITunesArtwork({
         artist: song.artist,
@@ -219,4 +235,40 @@ export async function getSongArtwork(song = {}) {
 
   activeFetchPromises.set(songKey, fetchPromise);
   return fetchPromise;
+}
+
+/**
+ * Stores artwork bytes only after an explicit offline/download action.
+ * Browsing may still use the remote URL, but offline artwork never depends on it.
+ */
+export async function cacheSongArtwork(song = {}) {
+  const songKey = song.songKey || getSongKey(song);
+  if (!songKey) return null;
+  if (activeCachePromises.has(songKey)) return activeCachePromises.get(songKey);
+
+  const promise = (async () => {
+    const artwork = await getSongArtwork(song);
+    if (!artwork?.coverArtUrl) return artwork;
+
+    if (artwork.isProcedural || artwork.coverArtUrl.startsWith('data:')) {
+      await saveSongArtwork(songKey, artwork);
+      return artwork;
+    }
+
+    const response = await fetch(artwork.coverArtUrl, { cache: 'force-cache' });
+    if (!response.ok) throw new Error(`Artwork download failed: ${response.status}`);
+    const blob = await response.blob();
+    const imageData = await blob.arrayBuffer();
+    await saveSongArtwork(songKey, {
+      ...artwork,
+      imageData,
+      imageMimeType: blob.type || 'image/jpeg',
+    });
+    const cached = { ...artwork, isOfflineCached: true };
+    memoryArtCache.set(songKey, cached);
+    return cached;
+  })().finally(() => activeCachePromises.delete(songKey));
+
+  activeCachePromises.set(songKey, promise);
+  return promise;
 }

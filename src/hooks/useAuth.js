@@ -15,10 +15,49 @@ const REQUIRED_CONFIG = {
   VITE_DRIVE_FOLDER_ID: DRIVE_FOLDER_ID,
 };
 
+let googleIdentityScriptPromise;
+
+function loadGoogleIdentityServices() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (googleIdentityScriptPromise) return googleIdentityScriptPromise;
+  googleIdentityScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-google-identity-services]');
+    const script = existing || document.createElement('script');
+    script.async = true;
+    script.defer = true;
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.dataset.googleIdentityServices = 'true';
+    script.addEventListener('load', resolve, { once: true });
+    script.addEventListener('error', () => reject(new Error('Google sign-in could not load. Check your connection and try again.')), { once: true });
+    if (!existing) document.head.appendChild(script);
+  });
+  return googleIdentityScriptPromise;
+}
+
+function scheduleIdle(callback, timeout = 1400) {
+  if (typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(callback, { timeout });
+    return () => window.cancelIdleCallback(id);
+  }
+  const id = window.setTimeout(callback, Math.min(timeout, 800));
+  return () => window.clearTimeout(id);
+}
+
 function getMissingConfig() {
   return Object.entries(REQUIRED_CONFIG)
     .filter(([, value]) => !value)
     .map(([key]) => key);
+}
+
+export function getAuthSetupStatus() {
+  const missing = getMissingConfig();
+  return {
+    missing,
+    ready: missing.length === 0,
+    hasClientId: Boolean(CLIENT_ID),
+    hasDriveFolder: Boolean(DRIVE_FOLDER_ID),
+    hasLibraryFile: Boolean(SPOTIFY_JSON_FILE_ID),
+  };
 }
 
 function missingConfigMessage(missing = getMissingConfig()) {
@@ -39,13 +78,18 @@ export function useAuth() {
     const missing = getMissingConfig();
     if (missing.length > 0) return undefined;
 
-    const tryInit = () => {
-      if (window.google?.accounts?.oauth2) {
+    if (!driveService.hasAuthorizedSession) return undefined;
+    let cancelled = false;
+    const init = async () => {
+      try {
+        await loadGoogleIdentityServices();
+        if (cancelled) return;
         driveService.initTokenClient(CLIENT_ID);
         driveService.syncTokenToServiceWorker();
         if (driveService.hasAuthorizedSession && !driveService.isAuthenticated) {
           driveService.requestToken()
             .then(() => {
+              if (cancelled) return;
               setIsAuthenticated(true);
               setHasAuthorizedSession(true);
               setError('');
@@ -55,18 +99,15 @@ export function useAuth() {
               // available when Google requires user interaction.
             });
         }
-        return true;
+      } catch (error) {
+        if (!cancelled) setError(error instanceof Error ? error.message : 'Google sign-in could not load.');
       }
-      return false;
     };
-
-    if (!tryInit()) {
-      const interval = setInterval(() => {
-        if (tryInit()) clearInterval(interval);
-      }, 300);
-      return () => clearInterval(interval);
-    }
-    return undefined;
+    const cancel = scheduleIdle(init);
+    return () => {
+      cancelled = true;
+      cancel();
+    };
   }, []);
 
   useEffect(() => {
@@ -172,8 +213,8 @@ export function useAuth() {
         return;
       }
       if (!driveService.tokenClient) {
-        setError('Google sign-in is not ready yet. Wait a moment and try again.');
-        return;
+        await loadGoogleIdentityServices();
+        driveService.initTokenClient(CLIENT_ID);
       }
       await driveService.requestToken();
       setIsAuthenticated(true);
@@ -192,9 +233,11 @@ export function useAuth() {
   useEffect(() => {
     if (isAuthenticated && !hasSyncedOnMount.current && !isSyncing) {
       hasSyncedOnMount.current = true;
-      syncLibrary();
+      const cancel = scheduleIdle(() => syncLibrary(), 1800);
+      return cancel;
     }
+    return undefined;
   }, [isAuthenticated, isSyncing, syncLibrary]);
 
-  return { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error, login, syncLibrary };
+  return { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error, login, syncLibrary, setupStatus: getAuthSetupStatus() };
 }

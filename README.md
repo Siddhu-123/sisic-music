@@ -22,6 +22,8 @@ VITE_SPOTIFY_JSON_FILE_ID="Drive file id for spotify_data.json"
 VITE_DRIVE_FOLDER_ID="Drive folder id for Sisic audio and JSON indexes"
 ```
 
+Enable Drive API and create a Web OAuth client in Google Cloud before building. Add the deployed GitHub Pages origin as an authorized JavaScript origin. The static site automates Google sign-in, Drive authorization, library sync, and explicit offline downloads, but Google Cloud project/OAuth registration and the three build variables remain a one-time manual setup.
+
 ## Drive Metadata Files
 
 - `sisic-songs.json`: compact source of truth for ready Drive audio.

@@ -6,6 +6,8 @@ import {
   findSimilarSongs,
   computeTasteCentroid,
   projectEmbeddingsTo2D,
+  projectEmbeddingsTo3D,
+  kMeansCluster,
   EMBEDDING_DIMENSIONS,
 } from './tasteEmbeddingService.js';
 
@@ -68,5 +70,24 @@ test('projectEmbeddingsTo2D projects N items into 2D coordinates', () => {
   for (const item of projected) {
     assert.ok(typeof item.coordX === 'number');
     assert.ok(typeof item.coordY === 'number');
+  }
+});
+
+test('cluster view projects songs to 3D and assigns bounded k-means groups', () => {
+  const songs = [
+    { songKey: 'a', artist: 'Artist A', track: 'Track 1' },
+    { songKey: 'b', artist: 'Artist B', track: 'Track 2' },
+    { songKey: 'c', artist: 'Artist C', track: 'Track 3' },
+    { songKey: 'd', artist: 'Artist D', track: 'Track 4' },
+  ];
+  const clustered = kMeansCluster(songs, { k: 2, maxClusters: 8 });
+  const projected = projectEmbeddingsTo3D(clustered);
+  assert.strictEqual(projected.length, songs.length);
+  assert.ok(new Set(clustered.map(song => song.clusterId)).size <= 2);
+  for (const item of projected) {
+    assert.ok(Number.isFinite(item.coordX));
+    assert.ok(Number.isFinite(item.coordY));
+    assert.ok(Number.isFinite(item.coordZ));
+    assert.ok(item.clusterSize >= 1);
   }
 });

@@ -1,240 +1,282 @@
-import React, { useRef, useEffect, useState, useMemo } from 'react';
-import { Sparkles, Play } from 'lucide-react';
-import { projectEmbeddingsTo2D } from '../../services/tasteEmbeddingService.js';
-import { hashString } from '../../services/artworkService.js';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Play, Rotate3d, Sparkles } from 'lucide-react';
+import { kMeansCluster, projectEmbeddingsTo3D } from '../../services/tasteEmbeddingService.js';
+
+const MAX_CLUSTER_SONGS = 1200;
+const CLUSTER_COLORS = ['#78a7ff', '#c48cff', '#55d6be', '#ffb86b', '#ff7f9f', '#e7df78', '#74d99f', '#a7a7ff'];
+
+function normalisePoints(songs) {
+  if (!songs.length) return [];
+  const max = songs.reduce((value, song) => Math.max(value, Math.abs(song.coordX || 0), Math.abs(song.coordY || 0), Math.abs(song.coordZ || 0)), 0) || 1;
+  return songs.map(song => ({ ...song, x: (song.coordX || 0) / max, y: (song.coordY || 0) / max, z: (song.coordZ || 0) / max }));
+}
+
+function screenPosition(point, width, height, zoom, rotation) {
+  const cosY = Math.cos(rotation.y);
+  const sinY = Math.sin(rotation.y);
+  const rotatedX = point.x * cosY - point.z * sinY;
+  const rotatedZ = point.x * sinY + point.z * cosY;
+  const cosX = Math.cos(rotation.x);
+  const sinX = Math.sin(rotation.x);
+  const rotatedY = point.y * cosX - rotatedZ * sinX;
+  const finalZ = point.y * sinX + rotatedZ * cosX;
+  const perspective = 2.7 / (2.7 + finalZ);
+  return { x: (width / 2) + rotatedX * width * 0.36 * zoom * perspective, y: (height / 2) - rotatedY * height * 0.36 * zoom * perspective, depth: finalZ };
+}
+
+function shader(gl, type, source) {
+  const handle = gl.createShader(type);
+  gl.shaderSource(handle, source);
+  gl.compileShader(handle);
+  if (!gl.getShaderParameter(handle, gl.COMPILE_STATUS)) {
+    const message = gl.getShaderInfoLog(handle);
+    gl.deleteShader(handle);
+    throw new Error(message || 'WebGL shader failed to compile.');
+  }
+  return handle;
+}
+
+function createPointProgram(gl) {
+  const vertex = shader(gl, gl.VERTEX_SHADER, `
+    attribute vec3 a_position;
+    attribute vec3 a_color;
+    attribute float a_size;
+    uniform float u_rotation_x;
+    uniform float u_rotation_y;
+    uniform float u_zoom;
+    uniform float u_aspect;
+    varying vec3 v_color;
+    void main() {
+      float cosY = cos(u_rotation_y);
+      float sinY = sin(u_rotation_y);
+      vec3 p = vec3(a_position.x * cosY - a_position.z * sinY, a_position.y, a_position.x * sinY + a_position.z * cosY);
+      float cosX = cos(u_rotation_x);
+      float sinX = sin(u_rotation_x);
+      p = vec3(p.x, p.y * cosX - p.z * sinX, p.y * sinX + p.z * cosX);
+      float perspective = 2.7 / (2.7 + p.z);
+      gl_Position = vec4(p.x * perspective * u_zoom * 0.72, p.y * perspective * u_zoom * 0.72, p.z * 0.2, 1.0);
+      gl_PointSize = a_size * (0.8 + perspective * 0.8);
+      v_color = a_color;
+    }
+  `);
+  const fragment = shader(gl, gl.FRAGMENT_SHADER, `
+    precision mediump float;
+    varying vec3 v_color;
+    void main() {
+      float edge = distance(gl_PointCoord, vec2(0.5));
+      if (edge > 0.5) discard;
+      float glow = 1.0 - smoothstep(0.18, 0.5, edge);
+      gl_FragColor = vec4(v_color, glow);
+    }
+  `);
+  const program = gl.createProgram();
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error('WebGL point program failed to link.');
+  return program;
+}
 
 export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddToQueue }) {
   const canvasRef = useRef(null);
-  const containerRef = useRef(null);
+  const wrapperRef = useRef(null);
+  const rotationRef = useRef({ x: 0.36, y: 0.55 });
+  const dragRef = useRef(null);
+  const movedRef = useRef(false);
   const [hoveredSong, setHoveredSong] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
-  const [filterMode, setFilterMode] = useState('all'); // all | downloaded | cached
+  const [filterMode, setFilterMode] = useState('all');
+  const [webglReady, setWebglReady] = useState(true);
 
   const filteredSongs = useMemo(() => {
-    if (filterMode === 'downloaded') return songs.filter(s => s.isDownloaded);
-    if (filterMode === 'cached') return songs.filter(s => s.isCached || s.hasBlob);
-    return songs;
-  }, [songs, filterMode]);
+    const filtered = filterMode === 'cached'
+      ? songs.filter(song => song.isCached || song.hasBlob)
+      : filterMode === 'downloaded'
+        ? songs.filter(song => song.isDownloaded)
+        : songs;
+    if (filtered.length <= MAX_CLUSTER_SONGS) return filtered;
+    const limited = filtered.slice(0, MAX_CLUSTER_SONGS);
+    if (currentSong && !limited.some(song => song.songKey === currentSong.songKey)) limited[limited.length - 1] = currentSong;
+    return limited;
+  }, [currentSong, filterMode, songs]);
 
-  const projectedStars = useMemo(() => {
-    if (filteredSongs.length === 0) return [];
-    return projectEmbeddingsTo2D(filteredSongs);
-  }, [filteredSongs]);
+  const points = useMemo(() => normalisePoints(projectEmbeddingsTo3D(kMeansCluster(filteredSongs, { maxClusters: 8 }))), [filteredSongs]);
+  const clusterSummary = useMemo(() => {
+    const summary = new Map();
+    points.forEach(point => summary.set(point.clusterId, (summary.get(point.clusterId) || 0) + 1));
+    return [...summary.entries()].sort((a, b) => a[0] - b[0]);
+  }, [points]);
 
-  // Determine coordinate bounding box
-  const bounds = useMemo(() => {
-    if (projectedStars.length === 0) return { minX: -1, maxX: 1, minY: -1, maxY: 1 };
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const star of projectedStars) {
-      if (star.coordX < minX) minX = star.coordX;
-      if (star.coordX > maxX) maxX = star.coordX;
-      if (star.coordY < minY) minY = star.coordY;
-      if (star.coordY > maxY) maxY = star.coordY;
-    }
-    const padX = (maxX - minX) * 0.1 || 0.5;
-    const padY = (maxY - minY) * 0.1 || 0.5;
-    return {
-      minX: minX - padX,
-      maxX: maxX + padX,
-      minY: minY - padY,
-      maxY: maxY + padY,
-    };
-  }, [projectedStars]);
-
-  // Draw galaxy onto HTML5 canvas
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const width = canvas.width;
-    const height = canvas.height;
-    ctx.clearRect(0, 0, width, height);
-
-    // Deep galaxy gradient background
-    const bgGrad = ctx.createRadialGradient(width / 2, height / 2, 50, width / 2, height / 2, width * 0.7);
-    bgGrad.addColorStop(0, '#1a1a2e');
-    bgGrad.addColorStop(0.6, '#12121f');
-    bgGrad.addColorStop(1, '#0b0b14');
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, width, height);
-
-    // Map star coords to canvas pixels
-    const mapToCanvas = (cx, cy) => {
-      const xNorm = (cx - bounds.minX) / (bounds.maxX - bounds.minX || 1);
-      const yNorm = (cy - bounds.minY) / (bounds.maxY - bounds.minY || 1);
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const px = centerX + (xNorm * (width - 80) + 40 - centerX) * zoom;
-      const py = centerY + (yNorm * (height - 80) + 40 - centerY) * zoom;
-      return { x: px, y: py };
-    };
-
-    // Draw constellation connection lines for close neighbors
-    ctx.lineWidth = 0.8;
-    for (let i = 0; i < projectedStars.length; i++) {
-      const s1 = projectedStars[i];
-      const p1 = mapToCanvas(s1.coordX, s1.coordY);
-
-      for (let j = i + 1; j < projectedStars.length; j++) {
-        const s2 = projectedStars[j];
-        const dx = s1.coordX - s2.coordX;
-        const dy = s1.coordY - s2.coordY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        if (dist < 0.25) {
-          const p2 = mapToCanvas(s2.coordX, s2.coordY);
-          const alpha = (1 - dist / 0.25) * 0.25;
-          ctx.strokeStyle = `rgba(130, 160, 255, ${alpha})`;
-          ctx.beginPath();
-          ctx.moveTo(p1.x, p1.y);
-          ctx.lineTo(p2.x, p2.y);
-          ctx.stroke();
-        }
-      }
+    if (!canvas || !points.length) return undefined;
+    let gl;
+    try {
+      gl = canvas.getContext('webgl', { alpha: true, antialias: false, powerPreference: 'high-performance' });
+      if (!gl) throw new Error('WebGL is unavailable.');
+      const program = createPointProgram(gl);
+      const positionBuffer = gl.createBuffer();
+      const colorBuffer = gl.createBuffer();
+      const sizeBuffer = gl.createBuffer();
+      const positionLocation = gl.getAttribLocation(program, 'a_position');
+      const colorLocation = gl.getAttribLocation(program, 'a_color');
+      const sizeLocation = gl.getAttribLocation(program, 'a_size');
+      const uniforms = {
+        rotationX: gl.getUniformLocation(program, 'u_rotation_x'),
+        rotationY: gl.getUniformLocation(program, 'u_rotation_y'),
+        zoom: gl.getUniformLocation(program, 'u_zoom'),
+        aspect: gl.getUniformLocation(program, 'u_aspect'),
+      };
+      const positions = new Float32Array(points.flatMap(point => [point.x, point.y, point.z]));
+      const sizes = new Float32Array(points.map(point => point.songKey === currentSong?.songKey ? 16 : 7 + Math.min(7, point.clusterSize / 40)));
+      const colors = new Float32Array(points.flatMap(point => {
+        if (point.songKey === currentSong?.songKey) return [1, 1, 1];
+        const color = CLUSTER_COLORS[point.clusterId % CLUSTER_COLORS.length];
+        return [parseInt(color.slice(1, 3), 16) / 255, parseInt(color.slice(3, 5), 16) / 255, parseInt(color.slice(5, 7), 16) / 255];
+      }));
+      const bindAttribute = (buffer, location, data, size) => {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+      };
+      bindAttribute(positionBuffer, positionLocation, positions, 3);
+      bindAttribute(colorBuffer, colorLocation, colors, 3);
+      bindAttribute(sizeBuffer, sizeLocation, sizes, 1);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.clearColor(0.025, 0.03, 0.065, 1);
+      let frame;
+      const render = () => {
+        const width = canvas.width;
+        const height = canvas.height;
+        gl.viewport(0, 0, width, height);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        gl.useProgram(program);
+        gl.uniform1f(uniforms.rotationX, rotationRef.current.x);
+        gl.uniform1f(uniforms.rotationY, rotationRef.current.y);
+        gl.uniform1f(uniforms.zoom, zoom);
+        gl.uniform1f(uniforms.aspect, width / Math.max(1, height));
+        gl.drawArrays(gl.POINTS, 0, points.length);
+        if (!dragRef.current) rotationRef.current.y += 0.0014;
+        frame = window.requestAnimationFrame(render);
+      };
+      render();
+      return () => {
+        window.cancelAnimationFrame(frame);
+        gl.deleteBuffer(positionBuffer);
+        gl.deleteBuffer(colorBuffer);
+        gl.deleteBuffer(sizeBuffer);
+        gl.deleteProgram(program);
+      };
+    } catch (error) {
+      console.warn('3D constellation unavailable:', error);
+      window.setTimeout(() => setWebglReady(false), 0);
+      return undefined;
     }
+  }, [currentSong?.songKey, points, zoom]);
 
-    // Draw each star
-    projectedStars.forEach((star) => {
-      const { x, y } = mapToCanvas(star.coordX, star.coordY);
-      const isCurrent = currentSong && (currentSong.songKey === star.songKey);
-      const isHovered = hoveredSong && (hoveredSong.songKey === star.songKey);
-      const hash = hashString(star.songKey);
-      const hue = hash % 360;
-
-      // Glow effect
-      const radius = isCurrent ? 8 : (isHovered ? 6 : 3.5);
-      const glowGrad = ctx.createRadialGradient(x, y, 0, x, y, radius * 3);
-      glowGrad.addColorStop(0, `hsla(${hue}, 90%, 75%, ${isCurrent || isHovered ? 0.9 : 0.6})`);
-      glowGrad.addColorStop(0.5, `hsla(${hue}, 80%, 60%, ${isCurrent || isHovered ? 0.4 : 0.15})`);
-      glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
-
-      ctx.fillStyle = glowGrad;
-      ctx.beginPath();
-      ctx.arc(x, y, radius * 3, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Star core
-      ctx.fillStyle = isCurrent ? '#ffffff' : `hsl(${hue}, 85%, 70%)`;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-    });
-  }, [projectedStars, bounds, zoom, currentSong, hoveredSong]);
-
-  // Handle canvas resize
   useEffect(() => {
     const updateSize = () => {
-      if (containerRef.current && canvasRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        canvasRef.current.width = Math.max(320, rect.width);
-        canvasRef.current.height = Math.max(380, rect.height || 500);
-      }
+      const canvas = canvasRef.current;
+      const wrapper = wrapperRef.current;
+      if (!canvas || !wrapper) return;
+      const rect = wrapper.getBoundingClientRect();
+      const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.max(320, Math.floor(rect.width * pixelRatio));
+      canvas.height = Math.max(380, Math.floor((rect.height || 520) * pixelRatio));
     };
     updateSize();
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  const handleCanvasMouseMove = (e) => {
+  const findHovered = event => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-
-    const width = canvas.width;
-    const height = canvas.height;
-
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
     let closest = null;
-    let minDistance = 24; // hover hit radius
-
-    projectedStars.forEach((star) => {
-      const xNorm = (star.coordX - bounds.minX) / (bounds.maxX - bounds.minX || 1);
-      const yNorm = (star.coordY - bounds.minY) / (bounds.maxY - bounds.minY || 1);
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const px = centerX + (xNorm * (width - 80) + 40 - centerX) * zoom;
-      const py = centerY + (yNorm * (height - 80) + 40 - centerY) * zoom;
-
-      const dist = Math.hypot(mouseX - px, mouseY - py);
-      if (dist < minDistance) {
-        minDistance = dist;
-        closest = star;
+    let distance = 28;
+    points.forEach(point => {
+      const screen = screenPosition(point, rect.width, rect.height, zoom, rotationRef.current);
+      const nextDistance = Math.hypot(screen.x - x, screen.y - y);
+      if (nextDistance < distance) {
+        closest = point;
+        distance = nextDistance;
       }
     });
-
+    if (closest) setTooltipPos({ x, y });
     setHoveredSong(closest);
-    if (closest) {
-      setTooltipPos({ x: mouseX, y: mouseY });
-    }
+    return closest;
   };
 
-  const handleCanvasClick = (event) => {
-    if (!hoveredSong) return;
-    if (event.shiftKey && onAddToQueue) {
-      onAddToQueue(hoveredSong);
-    } else if (onPlaySong) {
-      onPlaySong(hoveredSong);
+  const handlePointerDown = event => {
+    movedRef.current = false;
+    dragRef.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const handlePointerMove = event => {
+    if (dragRef.current) {
+      const dx = event.clientX - dragRef.current.x;
+      const dy = event.clientY - dragRef.current.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) movedRef.current = true;
+      rotationRef.current.y += dx * 0.008;
+      rotationRef.current.x = Math.max(-1.2, Math.min(1.2, rotationRef.current.x + dy * 0.008));
+      dragRef.current = { x: event.clientX, y: event.clientY };
+    } else {
+      findHovered(event);
     }
   };
+  const handlePointerUp = event => {
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+  const handleClick = event => {
+    if (movedRef.current || !hoveredSong) return;
+    if (event.shiftKey) onAddToQueue?.(hoveredSong);
+    else onPlaySong?.(hoveredSong);
+  };
+
+  const currentPoint = points.find(point => point.songKey === currentSong?.songKey);
 
   return (
-    <div className="constellation-view" ref={containerRef}>
+    <div className="constellation-view">
       <div className="constellation-header">
         <div className="constellation-title-group">
           <Sparkles className="constellation-icon" size={22} />
           <div>
-            <h2 className="constellation-title">Taste Constellation</h2>
-            <p className="constellation-subtitle">
-              Interactive 2D galaxy of your music library clustered by acoustic & semantic similarity.
-            </p>
+            <h2 className="constellation-title">Music clusters</h2>
+            <p className="constellation-subtitle">K-means groups your local library by music profile. Drag to orbit; click a point to play.</p>
           </div>
         </div>
-
         <div className="constellation-controls">
           <div className="constellation-filters">
-            <button
-              className={`filter-chip ${filterMode === 'all' ? 'filter-chip--active' : ''}`}
-              onClick={() => setFilterMode('all')}
-            >
-              All ({songs.length})
-            </button>
-            <button
-              className={`filter-chip ${filterMode === 'cached' ? 'filter-chip--active' : ''}`}
-              onClick={() => setFilterMode('cached')}
-            >
-              Cached ({songs.filter(s => s.isCached || s.hasBlob).length})
-            </button>
+            <button className={`filter-chip ${filterMode === 'all' ? 'filter-chip--active' : ''}`} onClick={() => setFilterMode('all')}>All ({songs.length})</button>
+            <button className={`filter-chip ${filterMode === 'cached' ? 'filter-chip--active' : ''}`} onClick={() => setFilterMode('cached')}>Cached ({songs.filter(song => song.isCached || song.hasBlob).length})</button>
           </div>
-
           <div className="constellation-zoom-controls">
-            <button className="neumorphic-button neumorphic-button--icon" onClick={() => setZoom(z => Math.max(0.6, z - 0.2))}>-</button>
+            <button className="neumorphic-button neumorphic-button--icon" onClick={() => setZoom(value => Math.max(.6, value - .2))} aria-label="Zoom out">-</button>
             <span className="zoom-level">{Math.round(zoom * 100)}%</span>
-            <button className="neumorphic-button neumorphic-button--icon" onClick={() => setZoom(z => Math.min(2.5, z + 0.2))}>+</button>
+            <button className="neumorphic-button neumorphic-button--icon" onClick={() => setZoom(value => Math.min(2.5, value + .2))} aria-label="Zoom in">+</button>
           </div>
         </div>
       </div>
-
-      <div className="constellation-canvas-wrapper" onClick={handleCanvasClick} onMouseMove={handleCanvasMouseMove} onMouseLeave={() => setHoveredSong(null)}>
-        <canvas ref={canvasRef} className="constellation-canvas" />
-
+      {currentPoint && <div className="constellation-now-playing"><Rotate3d size={15} /><span>Now playing: <strong>{currentPoint.track}</strong> · cluster {currentPoint.clusterId + 1} of {clusterSummary.length}</span></div>}
+      <div className="constellation-cluster-legend" role="region" aria-label="Music clusters">
+        {clusterSummary.map(([clusterId, count]) => <span key={clusterId}><i style={{ background: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length] }} />Cluster {clusterId + 1} · {count}</span>)}
+        {filteredSongs.length < songs.length && <small>Showing the first {filteredSongs.length.toLocaleString()} songs for a smooth map.</small>}
+      </div>
+      <div className="constellation-canvas-wrapper" ref={wrapperRef} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => { dragRef.current = null; setHoveredSong(null); }} onClick={handleClick}>
+        <canvas ref={canvasRef} className="constellation-canvas" aria-label="3D music cluster map" />
+        {!webglReady && <div className="constellation-fallback">3D rendering is unavailable in this browser. Your library is still available in Ready and Search.</div>}
         {hoveredSong && (
-          <div
-            className="constellation-tooltip"
-            style={{
-              left: `${tooltipPos.x + 14}px`,
-              top: `${tooltipPos.y + 14}px`,
-            }}
-          >
+          <div className="constellation-tooltip" style={{ left: `${tooltipPos.x + 14}px`, top: `${tooltipPos.y + 14}px` }}>
             <div className="tooltip-title">{hoveredSong.track || 'Unknown Track'}</div>
             <div className="tooltip-artist">{hoveredSong.artist || 'Unknown Artist'}</div>
-            <div className="tooltip-action-hint">
-              <Play size={12} style={{ marginRight: '4px' }} />
-              Click star to play
-            </div>
+            <div className="tooltip-action-hint"><Play size={12} style={{ marginRight: 4 }} />{onAddToQueue ? 'Click to play · Shift-click to queue' : 'Click to play'}</div>
           </div>
         )}
       </div>

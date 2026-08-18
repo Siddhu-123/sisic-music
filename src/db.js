@@ -745,6 +745,8 @@ export async function saveSongArtwork(songKey, artworkData = {}) {
   await db.songArt.put({
     songKey,
     coverArtUrl: artworkData.coverArtUrl || '',
+    imageData: artworkData.imageData || null,
+    imageMimeType: artworkData.imageMimeType || '',
     album: artworkData.album || '',
     genre: artworkData.genre || '',
     releaseYear: artworkData.releaseYear || null,
@@ -788,4 +790,3 @@ export async function getAllSongEmbeddings() {
   if (!db?.songEmbeddings) return [];
   return await db.songEmbeddings.toArray();
 }
-

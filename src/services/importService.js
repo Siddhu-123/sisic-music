@@ -10,7 +10,13 @@ import {
 } from '../db';
 import { asSongRecord, canonicalAudioFilename } from '../songIdentity';
 import { dedupeFileList, extensionFor, isSupportedAudioFile, parseAudioFilename, fileSignature } from '../importIdentity';
-import { getEmbeddingProvider } from './embeddingService';
+
+let embeddingServicePromise;
+
+function loadEmbeddingService() {
+  embeddingServicePromise ||= import('./embeddingService');
+  return embeddingServicePromise;
+}
 
 async function hashFile(file) {
   if (globalThis.crypto?.subtle) {
@@ -93,6 +99,8 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
     await update({ status: 'reading-metadata', progress: 0.35, fileIdentity, message: 'Reading audio metadata' });
     onProgress?.({ ...job, status: 'reading-metadata', progress: 0.35 });
     const metadata = await readAudioMetadata(file);
+    const { getEmbeddingProvider } = await loadEmbeddingService();
+    const hasEmbeddingProvider = typeof getEmbeddingProvider() === 'function';
     const song = asSongRecord({
       ...metadata,
       album: '',
@@ -103,13 +111,13 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
       sourceType: 'local-import',
       importStatus: 'importing',
       syncStatus: 'queued',
-      embeddingStatus: typeof getEmbeddingProvider() === 'function' ? 'queued' : '',
+      embeddingStatus: hasEmbeddingProvider ? 'queued' : '',
     });
     await update({ status: 'importing', progress: 0.6, songKey: song.songKey, message: 'Saving offline copy' });
     await upsertSongToDb(song);
     await cacheSongBlob(song.songKey, file, null, { explicit: true });
     const storedSong = await upsertSongToDb({ ...song, isDownloaded: true, isCached: true, importStatus: 'complete' });
-    if (typeof getEmbeddingProvider() === 'function') {
+    if (hasEmbeddingProvider) {
       await enqueueEmbeddingJob(storedSong || song);
     }
     await enqueueSyncOutbox({ entityType: 'song', entityKey: song.songKey, songKey: song.songKey, payload: {
