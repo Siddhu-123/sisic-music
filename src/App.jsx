@@ -464,10 +464,23 @@ function App() {
     return byKey;
   }, [allSongs, driveIndexSongs, jobBySongKey]);
 
+  const duplicateSongKeySet = useMemo(() => (
+    new Set(driveDuplicateSongs.map(song => song.songKey).filter(Boolean))
+  ), [driveDuplicateSongs]);
+
+  const driveSongKeySet = useMemo(() => {
+    return new Set(driveIndexSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
+  }, [driveIndexSongs]);
+
+  const deletedSongKeySet = useMemo(() => {
+    return new Set(driveDeletedSongs.map(song => song.songKey).filter(Boolean));
+  }, [driveDeletedSongs]);
+
   const workerTasks = useMemo(() => {
     const priority = { downloading: 0, queued: 1, error: 2, failed: 3, blocked: 4 };
-    return [...(safeLibraryData.downloadJobs || [])]
+    return [...jobBySongKey.values()]
       .filter(job => !(job.status === 'done' && job.uploadedFileId))
+      .filter(job => !driveSongKeySet.has(job.songKey) || job.replacementForFileId)
       .map(job => ({
         ...mergeJob(allSongsByKey.get(job.songKey) || asSongRecord(job), jobBySongKey),
         workerJob: job,
@@ -477,11 +490,7 @@ function App() {
         if (statusDifference !== 0) return statusDifference;
         return String(b.workerJob.updatedAt || '').localeCompare(String(a.workerJob.updatedAt || ''));
       });
-  }, [allSongsByKey, jobBySongKey, safeLibraryData.downloadJobs]);
-
-  const duplicateSongKeySet = useMemo(() => (
-    new Set(driveDuplicateSongs.map(song => song.songKey).filter(Boolean))
-  ), [driveDuplicateSongs]);
+  }, [allSongsByKey, driveSongKeySet, jobBySongKey]);
 
   const topPlayed = useMemo(() => {
     return [...allSongs]
@@ -491,14 +500,6 @@ function App() {
       .slice(0, 8)
       .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
   }, [allSongs, allSongsByKey, duplicateSongKeySet, jobBySongKey]);
-
-  const driveSongKeySet = useMemo(() => {
-    return new Set(driveIndexSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
-  }, [driveIndexSongs]);
-
-  const deletedSongKeySet = useMemo(() => {
-    return new Set(driveDeletedSongs.map(song => song.songKey).filter(Boolean));
-  }, [driveDeletedSongs]);
 
   const driveReadySongs = useMemo(() => {
     return driveIndexSongs
@@ -1618,7 +1619,7 @@ function App() {
             </header>
             <MacWorkerTasksPanel
               tasks={workerTasks}
-              canonicalRecordCount={safeLibraryData.downloadJobs.length}
+              canonicalRecordCount={jobBySongKey.size}
               onRetry={song => handleQueueDownload(song, { allowRedownload: true })}
               onRefresh={refreshDownloadJobs}
             />

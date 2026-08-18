@@ -36,6 +36,29 @@ const JOB_FILE_FIELDS = 'files(id,name,modifiedTime,appProperties)';
 const AUDIO_FILE_FIELDS = 'files(id,name,mimeType,size,modifiedTime,appProperties)';
 const FILE_METADATA_FIELDS = 'id,name,mimeType,size,appProperties';
 
+function safeSessionGet(key) {
+  try {
+    return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionSet(key, value) {
+  try {
+    if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(key, value);
+  } catch (error) {
+    console.warn(`Session storage set error for key ${key}:`, error);
+  }
+}
+
+function safeSessionRemove(key) {
+  try {
+    if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(key);
+  // eslint-disable-next-line no-empty
+  } catch {}
+}
+
 function safeStorageGet(key) {
   try {
     return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
@@ -235,17 +258,32 @@ function normalizeDuplicateEntry(songInput = {}, extra = {}) {
 class GoogleDriveService {
   constructor() {
     this.tokenClient = null;
-    // Access tokens are intentionally memory-only. Remove values written by
-    // older builds so an upgrade does not leave a usable token in storage.
-    const hadLegacyToken = Boolean(safeStorageGet(TOKEN_STORAGE_KEY));
-    this.accessToken = null;
-    this.tokenExpiry = null;
-    this.tokenVersion = '';
-    this.hasAuthorizedSession = safeStorageGet(AUTH_HISTORY_STORAGE_KEY) === 'true' || hadLegacyToken;
+    // Clean up any legacy localStorage tokens from older builds.
     safeStorageRemove(TOKEN_STORAGE_KEY);
     safeStorageRemove(EXPIRY_STORAGE_KEY);
     safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
     safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
+
+    // Active session tokens are stored in sessionStorage so page refreshes
+    // seamlessly preserve the authenticated session without asking the user
+    // to sign in on every reload.
+    const storedToken = safeSessionGet(TOKEN_STORAGE_KEY);
+    const storedExpiry = Number(safeSessionGet(EXPIRY_STORAGE_KEY)) || 0;
+    if (storedToken && Date.now() < storedExpiry) {
+      this.accessToken = storedToken;
+      this.tokenExpiry = storedExpiry;
+      this.tokenVersion = safeSessionGet(TOKEN_VERSION_STORAGE_KEY) || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+      this.hasAuthorizedSession = true;
+      this.authRequired = false;
+    } else {
+      this.accessToken = null;
+      this.tokenExpiry = null;
+      this.tokenVersion = '';
+      this.hasAuthorizedSession = safeStorageGet(AUTH_HISTORY_STORAGE_KEY) === 'true';
+      safeSessionRemove(TOKEN_STORAGE_KEY);
+      safeSessionRemove(EXPIRY_STORAGE_KEY);
+      safeSessionRemove(TOKEN_VERSION_STORAGE_KEY);
+    }
     this.jobCache = new Map();
     this.indexFileCache = new Map();
     this.songIndexCache = null;
@@ -264,17 +302,13 @@ class GoogleDriveService {
     if (token && expiry) {
       this.hasAuthorizedSession = true;
       safeStorageSet(AUTH_HISTORY_STORAGE_KEY, 'true');
-      // Never persist the bearer token. The non-secret auth history flag only
-      // lets the next session request a silent token first.
-      safeStorageRemove(TOKEN_STORAGE_KEY);
-      safeStorageRemove(EXPIRY_STORAGE_KEY);
-      safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
-      safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
+      safeSessionSet(TOKEN_STORAGE_KEY, token);
+      safeSessionSet(EXPIRY_STORAGE_KEY, String(expiry));
+      safeSessionSet(TOKEN_VERSION_STORAGE_KEY, this.tokenVersion);
     } else {
-      safeStorageRemove(TOKEN_STORAGE_KEY);
-      safeStorageRemove(EXPIRY_STORAGE_KEY);
-      safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
-      safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
+      safeSessionRemove(TOKEN_STORAGE_KEY);
+      safeSessionRemove(EXPIRY_STORAGE_KEY);
+      safeSessionRemove(TOKEN_VERSION_STORAGE_KEY);
     }
     if (token) {
       this.syncTokenToServiceWorker();

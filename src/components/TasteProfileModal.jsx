@@ -6,22 +6,42 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
   if (!isOpen) return null;
 
   const metrics = librarySummary?.metrics || {};
-  const topArtists = metrics.topArtistsByStarts?.slice(0, 8) || [];
   const tasteSignals = (librarySummary?.playbackEvents || [])
     .filter(event => ['playback-start', 'playback-resume'].includes(event.eventType));
   const tasteVector = computeTasteCentroid(songs, tasteSignals);
   const tasteSignalCount = tasteSignals.filter(event => event.songKey).length;
+
+  const topArtists = React.useMemo(() => {
+    if (metrics.topArtistsByStarts && metrics.topArtistsByStarts.length > 0) {
+      return metrics.topArtistsByStarts.slice(0, 8);
+    }
+    const artistMap = new Map();
+    for (const song of songs) {
+      const artist = song.artist || 'Unknown Artist';
+      if (!artist || artist === 'Unknown Artist') continue;
+      const count = (song.playCount || 0) > 0 ? song.playCount : 1;
+      artistMap.set(artist, (artistMap.get(artist) || 0) + count);
+    }
+    return [...artistMap.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([artist, plays]) => ({ artist, plays }));
+  }, [metrics.topArtistsByStarts, songs]);
+
+  const listeningMinutes = metrics.estimatedListeningMinutes || Math.round(
+    songs.reduce((sum, s) => sum + ((s.playCount || 0) * (s.duration || 180)), 0) / 60
+  );
 
   const handleExportProfile = () => {
     const profile = {
       schemaVersion: 1,
       appName: 'Sisic Music',
       exportedAt: new Date().toISOString(),
-      tasteVector: tasteVector || [],
+      tasteVector: tasteVector ? Array.from(tasteVector) : [],
       libraryMetrics: {
         totalSongs: metrics.totalSongs || songs.length,
-        totalArtists: metrics.totalArtists || 0,
-        estimatedListeningMinutes: metrics.estimatedListeningMinutes || 0,
+        totalArtists: metrics.totalArtists || topArtists.length,
+        estimatedListeningMinutes: listeningMinutes,
         topArtists,
       },
     };
@@ -61,7 +81,7 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
           </div>
           <div className="taste-metric-card">
             <Radio className="metric-card-icon" size={18} />
-            <div className="metric-card-val">{metrics.estimatedListeningMinutes || 0}m</div>
+            <div className="metric-card-val">{listeningMinutes}m</div>
             <div className="metric-card-label">Listening Time</div>
           </div>
           <div className="taste-metric-card">

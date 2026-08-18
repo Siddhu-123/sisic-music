@@ -271,11 +271,13 @@ export function Turntable({
   const tonearmAngleFromPointer = event => {
     const rect = deckRef.current?.getBoundingClientRect();
     if (!rect) return TONEARM_START_ANGLE;
-    const pivotX = rect.left + (rect.width * 0.93);
+    const pivotX = rect.left + (rect.width * 0.94);
     const pivotY = rect.top + (rect.height * 0.16);
-    let angle = pointerAngle(event, pivotX, pivotY);
-    if (angle < 0) angle += 360;
-    return angle - 180;
+    const rawAngle = pointerAngle(event, pivotX, pivotY);
+    let angle = 180 - rawAngle;
+    if (angle > 180) angle -= 360;
+    if (angle < -180) angle += 360;
+    return angle;
   };
 
   const beginTonearmPointer = event => {
@@ -385,9 +387,7 @@ export function Turntable({
       >
         <div className="turntable__deck-label"><span>SISIC / DIRECT DRIVE</span><strong>VINYL MK.II</strong></div>
         <div className="turntable__platter-bed">
-          <div className="turntable__platter-rim" aria-hidden="true">
-            {Array.from({ length: 28 }, (_, index) => <i key={index} style={{ '--strobe-angle': `${(index / 28) * 360}deg` }} />)}
-          </div>
+          <div className="turntable__platter-rim" aria-hidden="true" />
           <div
             ref={vinylRef}
             className={`turntable__vinyl ${isPlaying && !dragMode && !isBraking ? 'turntable__vinyl--spinning' : ''} ${isBraking ? 'turntable__vinyl--braking' : ''}`}

@@ -157,22 +157,22 @@ export function ExpandedPlayer({
 
   return (
     <div className="expanded-player">
-      <div className="expanded-player__bg" style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 15%), hsl(${(hue + 60) % 360}, 70%, 5%))` }} />
+      <div className="expanded-player__bg" style={{ background: `linear-gradient(135deg, hsl(${hue}, 20%, 94%), hsl(${(hue + 40) % 360}, 15%, 88%))` }} />
       <div className="expanded-player__header">
         <div style={{ display: 'flex', gap: '8px' }}>
           {onOpenEqualizer && (
             <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onOpenEqualizer(); }} aria-label="Equalizer" title="Equalizer">
-              <Sliders size={22} color="white" />
+              <Sliders size={20} />
             </button>
           )}
           {onMoreLikeThis && (
             <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onMoreLikeThis(currentSong); }} aria-label="More Like This" title="More Like This">
-              <Sparkles size={22} color="white" />
+              <Sparkles size={20} />
             </button>
           )}
         </div>
         <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onClose(); }} aria-label="Minimize player">
-          <ChevronDown size={28} color="white" />
+          <ChevronDown size={24} />
         </button>
       </div>
 
@@ -251,22 +251,22 @@ export function ExpandedPlayer({
               onClick={toggleShuffle}
               aria-label={`Shuffle: ${shuffleMode}`}
             >
-              <Shuffle size={24} color={shuffleMode !== 'off' ? 'var(--green)' : 'white'} />
+              <Shuffle size={20} />
             </button>
             <button className={`icon-btn ${repeatMode !== 'off' ? 'icon-btn--active' : ''}`} onClick={toggleRepeat} aria-label={`Repeat: ${repeatMode}`}>
-              <Repeat size={22} color={repeatMode !== 'off' ? 'var(--green)' : 'white'} />
+              <Repeat size={20} />
             </button>
             <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
-              <SkipBack size={36} color="white" />
+              <SkipBack size={26} />
             </button>
             <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play'}>
-              {isPlaying ? <Pause size={32} fill="black" /> : <Play size={32} fill="black" />}
+              {isPlaying ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" />}
             </button>
             <button className="icon-btn" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">
-              <SkipForward size={36} color="white" />
+              <SkipForward size={26} />
             </button>
             <button className="icon-btn" onClick={onToggleQueue} aria-label="Queue" title="Queue">
-              <ListMusic size={24} color="white" />
+              <ListMusic size={20} />
             </button>
           </div>
               <div className="expanded-player__actions" role="group" aria-label="Song actions">
@@ -571,17 +571,6 @@ export function SongCard({
     onDeleteReady && { label: 'Delete', icon: Trash2, action: onDeleteReady, danger: true },
   ].filter(Boolean);
 
-  const actionRadius = actionItems.length > 9 ? 136 : actionItems.length > 6 ? 120 : 104;
-  const actionStyle = index => {
-    const angle = actionItems.length <= 1 ? -90 : -170 + ((index / (actionItems.length - 1)) * 160);
-    const radians = angle * (Math.PI / 180);
-    return {
-      '--arc-x': `${Math.cos(radians) * actionRadius}px`,
-      '--arc-y': `${Math.sin(radians) * actionRadius}px`,
-      '--arc-delay': `${index * 24}ms`,
-    };
-  };
-
   return (
     <>
       <article
@@ -650,22 +639,57 @@ export function SongCard({
           }
         </button>
       </div>
-      {menuOpen && (
-        <div ref={menuRef} id={menuId} className="song-card__actions song-card__actions--arc" role="menu" aria-label={`Actions for ${song.track}`} onClick={event => event.stopPropagation()} onKeyDown={handleMenuKeyDown}>
-          {actionItems.map((item, index) => {
-            const Icon = item.icon;
-            return (
-              <button key={item.label} role="menuitem" className={item.danger ? 'song-card__actions-danger' : ''} style={actionStyle(index)} onClick={event => runAction(event, item.action)} disabled={item.disabled}>
-                <Icon size={16} fill={item.fill || 'none'} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
       </article>
       {menuOpen && createPortal(
-        <div className="song-card__focus-scrim" aria-hidden="true" onPointerDown={closeMenu} />,
+        <div className="song-action-sheet-overlay" role="presentation" onClick={closeMenu}>
+          <div
+            ref={menuRef}
+            id={menuId}
+            className="song-action-sheet"
+            role="menu"
+            aria-label={`Actions for ${song.track}`}
+            onClick={event => event.stopPropagation()}
+            onKeyDown={handleMenuKeyDown}
+          >
+            <div className="song-action-sheet__header">
+              <div className="song-action-sheet__art">
+                <AsyncArtworkImage song={song} size={96} fallbackSize={20} />
+              </div>
+              <div className="song-action-sheet__meta">
+                <strong>{song.track}</strong>
+                <span>{song.artist}</span>
+                {song.album && <small>{song.album}</small>}
+              </div>
+              <button
+                type="button"
+                className="song-action-sheet__close"
+                onClick={closeMenu}
+                aria-label="Close actions menu"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="song-action-sheet__grid">
+              {actionItems.map(item => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.label}
+                    type="button"
+                    role="menuitem"
+                    className={`song-action-sheet__btn ${item.danger ? 'song-action-sheet__btn--danger' : ''}`}
+                    onClick={event => runAction(event, item.action)}
+                    disabled={item.disabled}
+                  >
+                    <Icon size={18} fill={item.fill || 'none'} />
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>,
         document.body,
       )}
     </>
