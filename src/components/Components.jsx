@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Play,
   Pause,
@@ -570,7 +571,7 @@ export function SongCard({
     onDeleteReady && { label: 'Delete', icon: Trash2, action: onDeleteReady, danger: true },
   ].filter(Boolean);
 
-  const actionRadius = actionItems.length > 9 ? 190 : actionItems.length > 6 ? 150 : 112;
+  const actionRadius = actionItems.length > 9 ? 136 : actionItems.length > 6 ? 120 : 104;
   const actionStyle = index => {
     const angle = actionItems.length <= 1 ? -90 : -170 + ((index / (actionItems.length - 1)) * 160);
     const radians = angle * (Math.PI / 180);
@@ -582,16 +583,17 @@ export function SongCard({
   };
 
   return (
-    <article
-      ref={cardRef}
-      className={`song-card ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''} ${menuOpen ? 'song-card--actions-open' : ''}`}
-      style={isReadyLoose && dragOffset ? { transform: `translateX(${dragOffset}px)` } : undefined}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerUp}
-      onContextMenu={handleCardContextMenu}
-    >
+    <>
+      <article
+        ref={cardRef}
+        className={`song-card ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''} ${menuOpen ? 'song-card--actions-open' : ''}`}
+        style={isReadyLoose && dragOffset ? { transform: `translateX(${dragOffset}px)` } : undefined}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onContextMenu={handleCardContextMenu}
+      >
       <button
         className="song-card__primary"
         onClick={() => {
@@ -661,7 +663,12 @@ export function SongCard({
           })}
         </div>
       )}
-    </article>
+      </article>
+      {menuOpen && createPortal(
+        <div className="song-card__focus-scrim" aria-hidden="true" onPointerDown={closeMenu} />,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -969,7 +976,7 @@ function workerTaskStatus(job = {}) {
   return { label: job.status || 'Pending', tone: 'queued' };
 }
 
-export function MacWorkerTasksPanel({ tasks = [], onRetry, onRefresh }) {
+export function MacWorkerTasksPanel({ tasks = [], canonicalRecordCount = 0, onRetry, onRefresh }) {
   const queuedCount = tasks.filter(task => task.workerJob?.status === 'queued').length;
   const activeCount = tasks.filter(task => task.workerJob?.status === 'downloading').length;
   const attentionCount = tasks.length - queuedCount - activeCount;
@@ -981,7 +988,7 @@ export function MacWorkerTasksPanel({ tasks = [], onRetry, onRefresh }) {
           <Laptop size={20} />
           <div>
             <h2>Mac worker tasks</h2>
-            <p>Every queue item that is not fully uploaded to Drive yet.</p>
+            <p>Canonical Drive queue · {canonicalRecordCount.toLocaleString()} record{canonicalRecordCount === 1 ? '' : 's'}</p>
           </div>
         </div>
         <button className="download-status-row__action" onClick={onRefresh} type="button">

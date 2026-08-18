@@ -655,9 +655,16 @@ export async function getPlaylistSnapshotForDrive({ excludePlaylistKeys = [] } =
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function syncDownloadJobsToDb(jobs = []) {
-  if (!jobs.length) return;
+export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false } = {}) {
+  if (!replaceSnapshot && !jobs.length) return;
   await db.transaction('rw', db.downloadJobs, db.songs, async () => {
+    if (replaceSnapshot) {
+      const remoteJobIds = new Set(jobs.map(job => job?.jobId).filter(Boolean));
+      const staleJobIds = (await db.downloadJobs.toArray())
+        .map(job => job.jobId)
+        .filter(jobId => jobId && !remoteJobIds.has(jobId));
+      if (staleJobIds.length) await db.downloadJobs.bulkDelete(staleJobIds);
+    }
     for (const job of jobs) {
       if (!job?.jobId || !job?.songKey) continue;
       await db.downloadJobs.put({

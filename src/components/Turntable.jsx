@@ -303,8 +303,8 @@ export function Turntable({
     event.preventDefault();
     const nextAngle = clamp(
       tonearmAngleFromPointer(event) + interaction.pointerAngleOffset,
-      TONEARM_START_ANGLE,
-      TONEARM_END_ANGLE,
+      Math.min(TONEARM_START_ANGLE, TONEARM_END_ANGLE),
+      Math.max(TONEARM_START_ANGLE, TONEARM_END_ANGLE),
     );
     setTonearmDragAngle(nextAngle);
     updatePreviewProgress(tonearmProgressFromAngle(nextAngle));

@@ -7,14 +7,17 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
 
   const metrics = librarySummary?.metrics || {};
   const topArtists = metrics.topArtistsByStarts?.slice(0, 8) || [];
+  const tasteSignals = (librarySummary?.playbackEvents || [])
+    .filter(event => ['playback-start', 'playback-resume'].includes(event.eventType));
+  const tasteVector = computeTasteCentroid(songs, tasteSignals);
+  const tasteSignalCount = tasteSignals.filter(event => event.songKey).length;
 
   const handleExportProfile = () => {
-    const centroid = computeTasteCentroid(songs, librarySummary?.playbackEvents || []);
     const profile = {
       schemaVersion: 1,
       appName: 'Sisic Music',
       exportedAt: new Date().toISOString(),
-      tasteVector: centroid || [],
+      tasteVector: tasteVector || [],
       libraryMetrics: {
         totalSongs: metrics.totalSongs || songs.length,
         totalArtists: metrics.totalArtists || 0,
@@ -83,6 +86,12 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
               ))
             )}
           </div>
+        </div>
+
+        <div className="taste-profile-status" role="status">
+          <span className="taste-profile-status__dot" />
+          <span>{tasteVector?.length ? `Profile ready · ${tasteVector.length}-dimension vector` : 'Profile waiting for library data'}</span>
+          <small>{tasteSignalCount.toLocaleString()} listening signal{tasteSignalCount === 1 ? '' : 's'}</small>
         </div>
 
         <div className="taste-export-section">

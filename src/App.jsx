@@ -579,12 +579,23 @@ function App() {
       .slice(0, 8);
   }, [driveReadySongs]);
 
-  const librarySummary = useMemo(() => ({
-    totalSongs: allSongs.length,
-    readySongs: driveReadySongs.length,
-    downloadedSongs: allSongs.filter(s => s.isDownloaded).length,
-    playlistCount: visiblePlaylists.length,
-  }), [allSongs, driveReadySongs.length, visiblePlaylists.length]);
+  const librarySummary = useMemo(() => {
+    const analytics = buildAnalyticsExport({
+      songs: allSongs,
+      playlists: visiblePlaylists,
+      playbackEvents,
+      drivePlaybackEvents,
+      syncOutbox,
+    });
+    return {
+      totalSongs: allSongs.length,
+      readySongs: driveReadySongs.length,
+      downloadedSongs: allSongs.filter(s => s.isDownloaded).length,
+      playlistCount: visiblePlaylists.length,
+      metrics: analytics.metrics,
+      playbackEvents: analytics.playbackEvents,
+    };
+  }, [allSongs, drivePlaybackEvents, driveReadySongs.length, playbackEvents, syncOutbox, visiblePlaylists]);
 
   const selectedPlaylist = useMemo(() => {
     return visiblePlaylists.find(playlist => playlist.playlistKey === selectedPlaylistKey) || null;
@@ -644,7 +655,7 @@ function App() {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
     try {
       const jobs = await driveService.listDownloadJobs(DRIVE_FOLDER_ID);
-      await syncDownloadJobsToDb(jobs);
+      await syncDownloadJobsToDb(jobs, { replaceSnapshot: true });
       // Only keep polling if there are active (queued/downloading) jobs
       const pending = jobs.some(j => j.status === 'queued' || j.status === 'downloading');
       setHasPendingJobs(pending);
@@ -698,7 +709,7 @@ function App() {
         setDriveDuplicateSongs(result.duplicates || []);
         setDrivePlaybackEvents(result.playbackEvents || []);
         setDriveQuota(result.quota || null);
-        await syncDownloadJobsToDb(result.jobs || []);
+        await syncDownloadJobsToDb(result.jobs || [], { replaceSnapshot: true });
         await syncPlaylistIndexToDb(result.playlists || []);
         setHasPendingJobs((result.jobs || []).some(job => job.status === 'queued' || job.status === 'downloading'));
       } catch (error) {
@@ -1516,10 +1527,6 @@ function App() {
             <BarChart3 size={16} />
             <span>Storage</span>
           </button>
-          <button className="drive-summary__button" onClick={handleExportData} title="Export songs, playlists, metrics, and playback history">
-            <FileDown size={16} />
-            <span>Export</span>
-          </button>
         </section>
 
         {view === VIEWS.HOME && (
@@ -1611,6 +1618,7 @@ function App() {
             </header>
             <MacWorkerTasksPanel
               tasks={workerTasks}
+              canonicalRecordCount={safeLibraryData.downloadJobs.length}
               onRetry={song => handleQueueDownload(song, { allowRedownload: true })}
               onRefresh={refreshDownloadJobs}
             />

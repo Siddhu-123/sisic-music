@@ -1,8 +1,10 @@
 export const VINYL_RPM = 45;
 export const VINYL_SECONDS_PER_TURN = 60 / VINYL_RPM;
-export const TONEARM_START_ANGLE = -14;
-export const TONEARM_END_ANGLE = 17;
-export const TONEARM_LIFTED_ANGLE = 6;
+// The record starts at the outer groove and travels inward as playback advances.
+// These angles keep the stylus over the platter instead of swinging above the deck.
+export const TONEARM_START_ANGLE = 4;
+export const TONEARM_END_ANGLE = -12;
+export const TONEARM_LIFTED_ANGLE = 10;
 
 export function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -20,8 +22,8 @@ export function vinylSecondsFromDegrees(degrees) {
 }
 
 export function tonearmProgressFromAngle(angle) {
-  const armAngle = clamp(angle, TONEARM_START_ANGLE, TONEARM_END_ANGLE);
-  return ((armAngle - TONEARM_START_ANGLE) / (TONEARM_END_ANGLE - TONEARM_START_ANGLE)) * 100;
+  const armAngle = clamp(angle, TONEARM_END_ANGLE, TONEARM_START_ANGLE);
+  return ((TONEARM_START_ANGLE - armAngle) / (TONEARM_START_ANGLE - TONEARM_END_ANGLE)) * 100;
 }
 
 export function tonearmAngleFromProgress(progress) {

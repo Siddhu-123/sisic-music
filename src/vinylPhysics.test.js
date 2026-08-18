@@ -24,7 +24,7 @@ test('record dragging keeps clockwise movement forward across the angle boundary
   assert.equal(wrappedAngleDelta(10, 350), -20);
 });
 
-test('tonearm progress covers the center-to-edge groove arc', () => {
+test('tonearm progress tracks from the outer groove toward the label', () => {
   assert.equal(tonearmProgressFromAngle(TONEARM_START_ANGLE), 0);
   assert.equal(tonearmProgressFromAngle(TONEARM_END_ANGLE), 100);
   assert.equal(tonearmAngleFromProgress(0), TONEARM_START_ANGLE);
