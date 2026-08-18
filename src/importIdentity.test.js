@@ -25,3 +25,10 @@ test('import identity parses common artist-track filenames and deduplicates drop
   assert.equal(fileSignature(files[0]), 'song.mp3:10:1');
   assert.equal(dedupeFileList(files).length, 2);
 });
+
+test('import identity hides staged Drive source prefixes from imported song metadata', () => {
+  assert.deepEqual(parseAudioFilename('sisic-import-source-16ee23ac-9f38-4087-a5ae-995f775639a4-RISE.mp3'), {
+    artist: 'Unknown Artist',
+    track: 'RISE',
+  });
+});

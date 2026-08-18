@@ -6,6 +6,7 @@ import {
   getSongKey,
   jobFilePrefix,
 } from '../songIdentity.js';
+import { cleanImportedFilename } from '../importIdentity.js';
 import { tokenExpiryFromResponse } from './driveAuth.js';
 
 // drive.file limits writes to files created/opened by Sisic. The read-only
@@ -26,6 +27,7 @@ const SONG_INDEX_FILENAME = 'sisic-songs.json';
 const QUEUE_INDEX_FILENAME = 'sisic-queue.json';
 const CANONICAL_QUEUE_STORAGE_MODE = 'canonical';
 const DELETED_INDEX_FILENAME = 'sisic-deleted.json';
+const DUPLICATE_INDEX_FILENAME = 'sisic-duplicates.json';
 const PLAYLIST_INDEX_FILENAME = 'sisic-playlists.json';
 const PLAYBACK_LOG_FILENAME = 'sisic-playback-log.json';
 const CLIENT_INSTANCE_STORAGE_KEY = 'sisic_client_instance_id';
@@ -107,7 +109,7 @@ function firstAudioFile(files = []) {
 }
 
 function inferSongPartsFromFilename(name = '') {
-  const withoutExt = String(name || '').replace(/\.[^.]+$/, '');
+  const withoutExt = cleanImportedFilename(name);
   const [artist = '', ...trackParts] = withoutExt.split(' - ');
   return {
     artist: artist.trim() || 'Unknown Artist',
@@ -120,8 +122,12 @@ function isUnknownLabel(value = '', unknownValue = 'Unknown') {
   return !normalized || normalized === unknownValue.toLowerCase();
 }
 
+function isStagedImportLabel(value = '') {
+  return /^sisic-import-source-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i.test(String(value || '').trim());
+}
+
 function meaningfulValue(value, unknownValue) {
-  return isUnknownLabel(value, unknownValue) ? '' : String(value || '').trim();
+  return isUnknownLabel(value, unknownValue) || isStagedImportLabel(value) ? '' : String(value || '').trim();
 }
 
 function isUnknownSongKey(songKey = '') {
@@ -133,11 +139,11 @@ function normalizeSongIndexEntry(file = {}, item = null) {
   const filename = file.name || file.filename || '';
   const inferred = inferSongPartsFromFilename(filename);
   const normalizedItem = item ? asSongRecord(item) : null;
-  const artist = normalizedItem?.artist
+  const artist = (normalizedItem?.artist && !isStagedImportLabel(normalizedItem.artist) ? normalizedItem.artist : '')
     || meaningfulValue(appProperties.sisicArtist, 'Unknown Artist')
     || meaningfulValue(file.artist, 'Unknown Artist')
     || inferred.artist;
-  const track = normalizedItem?.track
+  const track = (normalizedItem?.track && !isStagedImportLabel(normalizedItem.track) ? normalizedItem.track : '')
     || meaningfulValue(appProperties.sisicTrack, 'Unknown Track')
     || meaningfulValue(file.track, 'Unknown Track')
     || inferred.track;
@@ -150,7 +156,12 @@ function normalizeSongIndexEntry(file = {}, item = null) {
     artist,
     track,
     album: normalizedItem?.album || appProperties.sisicAlbum || file.album || '',
-    filename: filename || canonicalAudioFilename({ artist, track }),
+    description: normalizedItem?.description || appProperties.sisicDescription || file.description || '',
+    lyrics: normalizedItem?.lyrics || file.lyrics || '',
+    genre: normalizedItem?.genre || file.genre || '',
+    releaseDate: normalizedItem?.releaseDate || file.releaseDate || '',
+    coverArtUrl: normalizedItem?.coverArtUrl || file.coverArtUrl || '',
+    filename: isStagedImportLabel(filename) ? canonicalAudioFilename({ artist, track }) : (filename || canonicalAudioFilename({ artist, track })),
     driveFileId: file.id || file.driveFileId || '',
     mimeType: file.mimeType || 'audio/mpeg',
     size: Number(file.size || 0),
@@ -204,6 +215,20 @@ function normalizeDeletedEntry(songInput = {}, extra = {}) {
     deletedAt: extra.deletedAt || new Date().toISOString(),
     reason: extra.reason || 'ready-offload',
     previousDriveFileId: extra.previousDriveFileId || song.driveFileId || '',
+  };
+}
+
+function normalizeDuplicateEntry(songInput = {}, extra = {}) {
+  const song = asSongRecord(songInput);
+  return {
+    songKey: song.songKey,
+    artist: song.artist,
+    track: song.track,
+    album: song.album || '',
+    driveFileId: extra.driveFileId || song.driveFileId || '',
+    duplicateAt: extra.duplicateAt || new Date().toISOString(),
+    duplicateOfSongKey: extra.duplicateOfSongKey || '',
+    reason: extra.reason || 'user-marked-duplicate',
   };
 }
 
@@ -572,6 +597,29 @@ class GoogleDriveService {
     return await resp.json();
   }
 
+  async updateAudioFileMetadata(fileId, { name = '', appProperties = {} } = {}) {
+    if (!fileId) return null;
+    const existing = await this.getAudioFileMetadata(fileId);
+    if (!existing) return null;
+    const params = new URLSearchParams({
+      fields: FILE_METADATA_FIELDS,
+      supportsAllDrives: 'true',
+    });
+    const body = {
+      appProperties: { ...(existing.appProperties || {}), ...appProperties },
+    };
+    if (name) body.name = name;
+    const resp = await this.authorizedFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }, 'Drive audio metadata update');
+    if (!resp.ok) throw new Error(`Drive audio metadata update failed: ${resp.status} ${await resp.text()}`);
+    return await resp.json();
+  }
+
   async listAudioFiles(folderId) {
     const escapedFolder = escapeDriveQuery(folderId);
     const q = `'${escapedFolder}' in parents and trashed=false`;
@@ -581,8 +629,18 @@ class GoogleDriveService {
 
   async syncSongIndex(folderId) {
     const audioFiles = await this.listAudioFiles(folderId);
-    const songs = audioFiles.map(normalizeSongIndexEntry).sort((a, b) => a.songKey.localeCompare(b.songKey));
     const previous = await this.readJsonIndex(folderId, SONG_INDEX_FILENAME, indexBody('songs', []));
+    const previousSongs = Array.isArray(previous.songs) ? previous.songs : [];
+    const previousByKey = new Map(previousSongs.filter(item => item.songKey).map(item => [item.songKey, item]));
+    const previousByFileId = new Map(previousSongs.filter(item => item.driveFileId).map(item => [item.driveFileId, item]));
+    const metadataFields = ['description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource', 'metadataUpdatedAt'];
+    const songs = audioFiles.map(file => {
+      const entry = normalizeSongIndexEntry(file);
+      const previousEntry = previousByKey.get(entry.songKey) || previousByFileId.get(entry.driveFileId);
+      return previousEntry
+        ? { ...entry, ...Object.fromEntries(metadataFields.filter(field => Object.prototype.hasOwnProperty.call(previousEntry, field)).map(field => [field, previousEntry[field]])) }
+        : entry;
+    }).sort((a, b) => a.songKey.localeCompare(b.songKey));
     const body = indexBody('songs', songs, previous);
     await this.writeJsonIndex(folderId, SONG_INDEX_FILENAME, body);
     this.songIndexCache = body;
@@ -753,6 +811,96 @@ class GoogleDriveService {
     return body.deleted;
   }
 
+  async ensureDuplicateIndex(folderId) {
+    return await this.readJsonIndex(folderId, DUPLICATE_INDEX_FILENAME, indexBody('duplicates', []));
+  }
+
+  async readDuplicateIndex(folderId) {
+    const body = await this.ensureDuplicateIndex(folderId);
+    return {
+      ...body,
+      duplicates: Array.isArray(body.duplicates) ? body.duplicates : [],
+    };
+  }
+
+  async addDuplicateSong(folderId, songInput, extra = {}) {
+    const entry = normalizeDuplicateEntry(songInput, extra);
+    const body = await this.mutateJsonIndex(folderId, DUPLICATE_INDEX_FILENAME, 'duplicates', [], duplicates => {
+      const byKey = new Map(duplicates.filter(item => item.songKey).map(item => [item.songKey, item]));
+      byKey.set(entry.songKey, entry);
+      return [...byKey.values()].sort((a, b) => String(b.duplicateAt || '').localeCompare(String(a.duplicateAt || '')));
+    });
+    return body.duplicates.find(item => item.songKey === entry.songKey) || entry;
+  }
+
+  async removeDuplicateSong(folderId, songInput) {
+    const song = asSongRecord(songInput);
+    const body = await this.mutateJsonIndex(folderId, DUPLICATE_INDEX_FILENAME, 'duplicates', [], duplicates => (
+      duplicates.filter(item => item.songKey !== song.songKey)
+    ));
+    return body.duplicates;
+  }
+
+  async updateSongMetadata(folderId, songInput, updates = {}) {
+    const song = asSongRecord(songInput);
+    const allowedFields = ['artist', 'track', 'album', 'description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource'];
+    const patch = Object.fromEntries(
+      allowedFields
+        .filter(field => Object.prototype.hasOwnProperty.call(updates, field))
+        .map(field => [field, String(updates[field] || '').trim()]),
+    );
+    const nextSong = asSongRecord({ ...song, ...patch, songKey: song.songKey });
+    const updatedAt = new Date().toISOString();
+
+    if (song.driveFileId) {
+      await this.updateAudioFileMetadata(song.driveFileId, {
+        name: canonicalAudioFilename(nextSong),
+        appProperties: {
+          sisicSongKey: song.songKey,
+          sisicArtist: nextSong.artist,
+          sisicTrack: nextSong.track,
+          sisicAlbum: nextSong.album || '',
+        },
+      });
+    }
+
+    const songBody = await this.mutateJsonIndex(folderId, SONG_INDEX_FILENAME, 'songs', [], songs => {
+      const byKey = new Map(songs.filter(item => item.songKey).map(item => [item.songKey, item]));
+      const existing = byKey.get(song.songKey) || {};
+      byKey.set(song.songKey, {
+        ...existing,
+        ...nextSong,
+        songKey: song.songKey,
+        filename: canonicalAudioFilename(nextSong),
+        driveFileId: song.driveFileId || existing.driveFileId || '',
+        updatedAt,
+        metadataUpdatedAt: updatedAt,
+      });
+      return [...byKey.values()].sort((a, b) => String(a.songKey).localeCompare(String(b.songKey)));
+    });
+
+    const importJobId = song.driveImportJobId || song.downloadJob?.jobId || '';
+    if (importJobId) {
+      await this.mutateJsonIndex(folderId, QUEUE_INDEX_FILENAME, 'jobs', [], jobs => jobs.map(job => (
+        job.jobId === importJobId || job.songKey === song.songKey
+          ? { ...job, ...patch, songKey: song.songKey, expectedFilename: canonicalAudioFilename(nextSong), metadataUpdatedAt: updatedAt, updatedAt }
+          : job
+      )));
+    }
+
+    try {
+      const duplicateIndex = await this.readDuplicateIndex(folderId);
+      if (duplicateIndex.duplicates.some(item => item.songKey === song.songKey)) {
+        await this.mutateJsonIndex(folderId, DUPLICATE_INDEX_FILENAME, 'duplicates', [], duplicates => duplicates.map(item => (
+          item.songKey === song.songKey ? { ...item, ...nextSong, songKey: song.songKey, driveFileId: song.driveFileId || item.driveFileId || '', updatedAt } : item
+        )));
+      }
+    } catch (error) {
+      console.warn('Duplicate metadata refresh skipped:', error);
+    }
+    return songBody.songs.find(item => item.songKey === song.songKey) || { ...nextSong, updatedAt };
+  }
+
   async deleteReadySong(folderId, songInput) {
     const song = asSongRecord(songInput);
     const previousDriveFileId = song.driveFileId;
@@ -815,10 +963,11 @@ class GoogleDriveService {
   }
 
   async loadDriveIndexes(folderId) {
-    const [songs, queue, deleted, playlists, quota, playback] = await Promise.all([
+    const [songs, queue, deleted, duplicates, playlists, quota, playback] = await Promise.all([
       this.readSongIndex(folderId),
       this.readQueueIndex(folderId),
       this.readDeletedIndex(folderId),
+      this.readDuplicateIndex(folderId),
       this.readPlaylistIndex(folderId),
       this.fetchStorageQuota(),
       this.readPlaybackLog(folderId),
@@ -827,6 +976,7 @@ class GoogleDriveService {
       songs: songs.songs || [],
       jobs: queue.jobs || [],
       deleted: deleted.deleted || [],
+      duplicates: duplicates.duplicates || [],
       playlists: playlists.playlists || [],
       playbackEvents: playback.events || [],
       quota,
@@ -1062,6 +1212,10 @@ class GoogleDriveService {
       track: song.track,
       artist: song.artist,
       album: song.album || '',
+      description: song.description || '',
+      lyrics: song.lyrics || '',
+      genre: song.genre || '',
+      releaseDate: song.releaseDate || '',
       expectedFilename: canonicalAudioFilename(song),
       status: 'queued',
       attempts: 0,
@@ -1141,6 +1295,10 @@ class GoogleDriveService {
       track: song.track,
       artist: song.artist,
       album: song.album || '',
+      description: song.description || '',
+      lyrics: song.lyrics || '',
+      genre: song.genre || '',
+      releaseDate: song.releaseDate || '',
       expectedFilename: canonicalAudioFilename(song),
       status: 'queued',
       attempts: 0,

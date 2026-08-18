@@ -423,6 +423,20 @@ export async function updateSongPipelineStatus(songKey, updates = {}) {
   return await db.songs.get(song.id);
 }
 
+export async function updateSongMetadataInDb(songKey, updates = {}) {
+  const song = await db.songs.where('songKey').equals(songKey).first();
+  if (!song) return null;
+  const allowedFields = ['artist', 'track', 'album', 'description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource', 'syncStatus'];
+  const patch = Object.fromEntries(
+    allowedFields
+      .filter(field => Object.prototype.hasOwnProperty.call(updates, field))
+      .map(field => [field, String(updates[field] || '').trim()]),
+  );
+  patch.metadataUpdatedAt = new Date().toISOString();
+  await db.songs.update(song.id, patch);
+  return await db.songs.get(song.id);
+}
+
 export async function addSongToPlaylist(songInput, playlistName, source = 'sisic') {
   const song = normalizeSongInput(songInput);
   const cleanName = String(playlistName || '').trim();

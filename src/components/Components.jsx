@@ -30,18 +30,11 @@ import {
   Sparkles,
   ExternalLink,
   Heart,
+  Copy,
+  FolderOpen,
 } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
-import {
-  TONEARM_LIFTED_ANGLE,
-  TONEARM_START_ANGLE,
-  VINYL_RPM,
-  clamp,
-  tonearmAngleFromProgress,
-  tonearmProgressFromAngle,
-  vinylSecondsFromDegrees,
-  wrappedAngleDelta,
-} from '../vinylPhysics.js';
+import { Turntable } from './Turntable.jsx';
 function resizeArtworkUrl(url = '', size = 300) {
   if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url;
   const safeSize = Math.max(60, Math.round(Number(size) || 300));
@@ -99,10 +92,6 @@ function formatTime(seconds) {
   return `${minutes}:${secs}`;
 }
 
-function pointerAngle(event, centerX, centerY) {
-  return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
-}
-
 function statusDetails(song) {
   const status = song.status || song.downloadJob?.status;
   if (song.isDownloaded) return { label: 'Offline', icon: CheckCircle2, className: 'song-status--ready' };
@@ -144,154 +133,23 @@ export function ExpandedPlayer({
     toggleShuffle,
     repeatMode,
     toggleRepeat,
-    audioRef,
+    rpm,
+    setRpm,
+    pitchModifier,
+    pitchRange,
+    setPitchModifier,
+    setPitchRange,
+    beginScratch,
+    setScratchAngularVelocity,
+    endScratch,
+    setNeedleLifted,
+    queue,
+    queueIndex,
+    playQueueItem,
+    stop,
   } = player;
 
-  const recordPlayerRef = useRef(null);
-  const interactionRef = useRef(null);
-  const previewProgressRef = useRef(null);
-  const [dragMode, setDragMode] = useState(null);
-  const [previewProgress, setPreviewProgress] = useState(null);
-  const [manualRecordAngle, setManualRecordAngle] = useState(0);
-
-  const setScrubPreview = value => {
-    const next = clamp(value, 0, 100);
-    previewProgressRef.current = next;
-    setPreviewProgress(next);
-    return next;
-  };
-
-  const pauseForInteraction = () => {
-    const wasPlaying = Boolean(audioRef.current && !audioRef.current.paused);
-    if (wasPlaying) togglePlay();
-    return wasPlaying;
-  };
-
-  const beginRecordDrag = event => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    const rect = recordPlayerRef.current?.getBoundingClientRect();
-    if (!rect || !duration) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    const centerX = rect.left + (rect.width / 2);
-    const centerY = rect.top + (rect.height / 2);
-    interactionRef.current = {
-      mode: 'record',
-      pointerId: event.pointerId,
-      wasPlaying: pauseForInteraction(),
-      startProgress: progress,
-      startRecordAngle: manualRecordAngle,
-      accumulatedDegrees: 0,
-      lastPointerAngle: pointerAngle(event, centerX, centerY),
-      centerX,
-      centerY,
-    };
-    setScrubPreview(progress);
-    setDragMode('record');
-  };
-
-  const moveRecord = event => {
-    const interaction = interactionRef.current;
-    if (interaction?.mode !== 'record' || interaction.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    const nextPointerAngle = pointerAngle(event, interaction.centerX, interaction.centerY);
-    interaction.accumulatedDegrees += wrappedAngleDelta(interaction.lastPointerAngle, nextPointerAngle);
-    interaction.lastPointerAngle = nextPointerAngle;
-    setManualRecordAngle(interaction.startRecordAngle + interaction.accumulatedDegrees);
-    const secondsMoved = vinylSecondsFromDegrees(interaction.accumulatedDegrees);
-    setScrubPreview(interaction.startProgress + ((secondsMoved / duration) * 100));
-  };
-
-  const tonearmAngleFromPointer = event => {
-    const rect = recordPlayerRef.current?.getBoundingClientRect();
-    if (!rect) return TONEARM_START_ANGLE;
-    const pivotX = rect.left + (rect.width * 0.97);
-    const pivotY = rect.top + (rect.height * 0.07);
-    let angle = pointerAngle(event, pivotX, pivotY);
-    if (angle < 0) angle += 360;
-    return angle - 180;
-  };
-
-  const beginTonearmDrag = event => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    if (!duration) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    interactionRef.current = {
-      mode: 'tonearm',
-      pointerId: event.pointerId,
-      wasPlaying: pauseForInteraction(),
-      pointerAngleOffset: tonearmAngleFromProgress(progress) - tonearmAngleFromPointer(event),
-    };
-    setScrubPreview(progress);
-    setDragMode('tonearm');
-  };
-
-  const moveTonearm = event => {
-    const interaction = interactionRef.current;
-    if (interaction?.mode !== 'tonearm' || interaction.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    setScrubPreview(tonearmProgressFromAngle(tonearmAngleFromPointer(event) + interaction.pointerAngleOffset));
-  };
-
-  const finishInteraction = event => {
-    const interaction = interactionRef.current;
-    if (!interaction || interaction.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    const targetProgress = clamp(previewProgressRef.current ?? progress, 0, 100);
-    seek(targetProgress);
-    const shouldResume = targetProgress < 99.8 && (interaction.mode === 'tonearm' || interaction.wasPlaying);
-    interactionRef.current = null;
-    previewProgressRef.current = null;
-    setPreviewProgress(null);
-    setDragMode(null);
-    setManualRecordAngle(angle => ((angle % 360) + 360) % 360);
-    if (shouldResume) {
-      window.requestAnimationFrame(() => {
-        if (audioRef.current?.paused) togglePlay();
-      });
-    }
-  };
-
-  const handleVinylKeyDown = event => {
-    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || !duration) return;
-    event.preventDefault();
-    const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : -1;
-    const seconds = Math.max(1, Math.min(5, duration / 100));
-    seek(clamp(progress + ((seconds * direction / duration) * 100), 0, 100));
-    setManualRecordAngle(angle => angle + (direction * 30));
-  };
-
-  const handleTonearmKeyDown = event => {
-    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key) || !duration) return;
-    event.preventDefault();
-    const target = event.key === 'Home'
-      ? 0
-      : event.key === 'End'
-        ? 100
-        : clamp(progress + ((event.key === 'ArrowRight' || event.key === 'ArrowUp') ? 1 : -1), 0, 100);
-    seek(target);
-  };
-
   if (!currentSong) return null;
-
-  const displayedProgress = clamp(previewProgress ?? progress, 0, 100);
-  const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
-  const tonearmAngle = completed
-    ? TONEARM_LIFTED_ANGLE
-    : tonearmAngleFromProgress(displayedProgress);
-  const tonearmLifted = dragMode === 'tonearm' || completed;
-  const interactionLabel = dragMode === 'record'
-    ? `Scratching · ${formatTime((displayedProgress / 100) * duration)}`
-    : dragMode === 'tonearm'
-      ? `Tonearm lifted · drop at ${formatTime((displayedProgress / 100) * duration)}`
-      : completed
-        ? 'Playback complete · tonearm lifted'
-        : `${VINYL_RPM} RPM clockwise · drag the record or tonearm`;
 
   return (
     <div className="expanded-player">
@@ -317,65 +175,32 @@ export function ExpandedPlayer({
       <div className="expanded-player__content">
         <div className="expanded-player__layout">
           <div className="expanded-player__art-container">
-            <div
-              ref={recordPlayerRef}
-              className={`record-player ${isPlaying && !dragMode ? 'record-player--playing' : ''} ${dragMode ? 'record-player--dragging' : ''} ${completed ? 'record-player--complete' : ''}`}
-            >
-              <div
-                className={`record-player__scratch-layer ${dragMode === 'record' ? 'record-player__scratch-layer--dragging' : ''}`}
-                style={{ '--manual-record-angle': `${manualRecordAngle}deg` }}
-                role="slider"
-                tabIndex={0}
-                aria-label="Vinyl record scrubber"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(displayedProgress)}
-                aria-valuetext={formatTime((displayedProgress / 100) * duration)}
-                onPointerDown={beginRecordDrag}
-                onPointerMove={moveRecord}
-                onPointerUp={finishInteraction}
-                onPointerCancel={finishInteraction}
-                onKeyDown={handleVinylKeyDown}
-              >
-                  <div
-                  className="expanded-player__art"
-                  aria-label={`${currentSong.track} by ${currentSong.artist}`}
-                  >
-                  <div className="record-player__center-label">
-                    <AsyncArtworkImage
-                      song={currentSong}
-                      alt={`${currentSong.track} cover`}
-                      className="record-player__center-img"
-                      fallbackSize={28}
-                      size={400}
-                      priority
-                    />
-                    <span className="record-player__spindle-hole" />
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                className={`record-player__tonearm ${tonearmLifted ? 'record-player__tonearm--lifted' : ''} ${dragMode === 'tonearm' ? 'record-player__tonearm--dragging' : ''}`}
-                style={{ '--tonearm-angle': `${tonearmAngle}deg` }}
-                role="slider"
-                aria-label="Tonearm song position"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(displayedProgress)}
-                aria-valuetext={formatTime((displayedProgress / 100) * duration)}
-                onPointerDown={beginTonearmDrag}
-                onPointerMove={moveTonearm}
-                onPointerUp={finishInteraction}
-                onPointerCancel={finishInteraction}
-                onKeyDown={handleTonearmKeyDown}
-              >
-                <span className="record-player__tonearm-pivot" />
-                <span className="record-player__tonearm-shaft" />
-                <span className="record-player__tonearm-head"><span className="record-player__stylus" /></span>
-              </button>
-              <div className="record-player__readout" aria-live="polite">{interactionLabel}</div>
-            </div>
+            <Turntable
+              currentSong={currentSong}
+              artwork={<AsyncArtworkImage song={currentSong} alt={`${currentSong.track} cover`} className="turntable__art" fallbackSize={28} size={400} priority />}
+              isPlaying={isPlaying}
+              progress={progress}
+              duration={duration}
+              rpm={rpm}
+              pitchModifier={pitchModifier}
+              pitchRange={pitchRange}
+              queue={queue}
+              queueIndex={queueIndex}
+              onTogglePlay={togglePlay}
+              onSeek={seek}
+              onScratchStart={beginScratch}
+              onScratchVelocity={setScratchAngularVelocity}
+              onScratchEnd={endScratch}
+              onNeedleLift={setNeedleLifted}
+              onEject={stop}
+              onLoadSong={song => {
+                const nextIndex = queue.findIndex(item => (item.songKey || item.id) === (song.songKey || song.id));
+                if (nextIndex >= 0) playQueueItem(nextIndex);
+              }}
+              onPitchChange={setPitchModifier}
+              onPitchRangeChange={setPitchRange}
+              onRpmChange={setRpm}
+            />
           </div>
 
           <div className="expanded-player__details-column">
@@ -396,15 +221,15 @@ export function ExpandedPlayer({
             </div>
 
             <div className="expanded-player__controls-area">
-          <div className="expanded-progress">
-            <span className="time-label">{formatTime((displayedProgress / 100) * duration)}</span>
+            <div className="expanded-progress">
+            <span className="time-label">{formatTime((progress / 100) * duration)}</span>
             <input
               type="range"
               className="progress-bar"
               min={0}
               max={100}
               step={0.1}
-              value={displayedProgress}
+              value={progress}
               onChange={event => seek(Number(event.target.value))}
               aria-label="Playback position"
             />
@@ -588,6 +413,8 @@ export function SongCard({
   onPlayNext,
   onAddToPlaylist,
   onDeleteReady,
+  onMarkDuplicate,
+  onRestoreDuplicate,
   onReview,
   onInfo,
   onMoreLikeThis,
@@ -834,6 +661,18 @@ export function SongCard({
               <span>More like this</span>
             </button>
           )}
+          {onMarkDuplicate && (
+            <button role="menuitem" className="song-card__actions-danger" onClick={event => runAction(event, onMarkDuplicate)}>
+              <Copy size={15} />
+              <span>Mark as duplicate</span>
+            </button>
+          )}
+          {onRestoreDuplicate && (
+            <button role="menuitem" onClick={event => runAction(event, onRestoreDuplicate)}>
+              <FolderOpen size={15} />
+              <span>Restore to Ready</span>
+            </button>
+          )}
           {onDeleteReady && (
             <button role="menuitem" className="song-card__actions-danger" onClick={event => runAction(event, onDeleteReady)}>
               <Trash2 size={15} />
@@ -846,9 +685,31 @@ export function SongCard({
   );
 }
 
-export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue, onAddToPlaylist, onReview, onDelete, onDownload, isDownloading = false }) {
+export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue, onAddToPlaylist, onReview, onDelete, onMarkDuplicate, onRestoreDuplicate, onSave, onDownload, isDownloading = false }) {
   const dialogRef = useDialogFocus(true, onClose);
   const status = statusDetails(song);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState(() => ({
+      artist: song.artist || '',
+      track: song.track || '',
+      album: song.album || '',
+      genre: song.genre || '',
+      releaseDate: song.releaseDate || '',
+      description: song.description || '',
+      lyrics: song.lyrics || '',
+    }));
+
+  const setField = (field, value) => setForm(previous => ({ ...previous, [field]: value }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onSave?.(song, form);
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
@@ -859,7 +720,10 @@ export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue,
             <h2 id="song-info-title">{song.track}</h2>
             <p>{song.artist}{song.album ? ` · ${song.album}` : ''}</p>
           </div>
-          <button data-dialog-autofocus className="icon-btn" onClick={onClose} aria-label="Close song info"><X size={20} /></button>
+          <div className="song-info-panel__header-actions">
+            {onSave && <button className="panel-action-btn" onClick={() => setEditing(value => !value)}>{editing ? 'Cancel edit' : 'Edit details'}</button>}
+            <button data-dialog-autofocus className="icon-btn" onClick={onClose} aria-label="Close song info"><X size={20} /></button>
+          </div>
         </div>
 
         <div className="song-info-panel__hero">
@@ -878,13 +742,32 @@ export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue,
           <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(song)}><Plus size={16} /> Playlist</button>
           <button className="panel-action-btn" onClick={() => onDownload?.(song)} disabled={isDownloading}><Download size={16} /> Offline</button>
           <button className="panel-action-btn" onClick={() => onReview?.(song)}><RefreshCw size={16} /> Suggest source</button>
+          {onMarkDuplicate && <button className="panel-action-btn panel-action-btn--danger" onClick={() => onMarkDuplicate(song)}><Copy size={16} /> Mark duplicate</button>}
+          {onRestoreDuplicate && <button className="panel-action-btn" onClick={() => onRestoreDuplicate(song)}><FolderOpen size={16} /> Restore to Ready</button>}
           {onDelete && <button className="panel-action-btn panel-action-btn--danger" onClick={() => onDelete(song)}><Trash2 size={16} /> Delete</button>}
         </div>
 
-        <div className="song-info-panel__sections">
-          <section><h3>Description</h3><p>{song.description || 'No description is available yet.'}</p></section>
-          <section><h3>Lyrics</h3><p>{song.lyrics || 'Lyrics are not available yet. They can be added by the metadata pipeline later.'}</p></section>
-        </div>
+        {editing ? (
+          <div className="song-info-panel__edit-form">
+            <div className="song-info-panel__edit-grid">
+              <label>Artist<input value={form.artist} onChange={event => setField('artist', event.target.value)} /></label>
+              <label>Title<input value={form.track} onChange={event => setField('track', event.target.value)} /></label>
+              <label>Album<input value={form.album} onChange={event => setField('album', event.target.value)} /></label>
+              <label>Genre<input value={form.genre} onChange={event => setField('genre', event.target.value)} /></label>
+              <label>Release date<input value={form.releaseDate} onChange={event => setField('releaseDate', event.target.value)} placeholder="YYYY-MM-DD" /></label>
+            </div>
+            <label>Description<textarea rows="3" value={form.description} onChange={event => setField('description', event.target.value)} /></label>
+            <label>Lyrics<textarea rows="7" value={form.lyrics} onChange={event => setField('lyrics', event.target.value)} /></label>
+            <button className="btn-primary song-info-panel__save" onClick={save} disabled={saving || !form.artist?.trim() || !form.track?.trim()}>
+              {saving ? 'Saving…' : 'Save details to Drive'}
+            </button>
+          </div>
+        ) : (
+          <div className="song-info-panel__sections">
+            <section><h3>Description</h3><p>{song.description || 'No description is available yet.'}</p></section>
+            <section><h3>Lyrics</h3><p>{song.lyrics || 'Lyrics are not available yet. They can be added by the metadata pipeline later.'}</p></section>
+          </div>
+        )}
 
         <dl className="song-info-panel__metadata">
           <div><dt>Artist</dt><dd>{song.artist || 'Unknown artist'}</dd></div>
@@ -1094,6 +977,68 @@ function downloadStatusText(song) {
   if (job?.status === 'blocked') return 'Blocked; manual import required';
   if (job?.status === 'failed' || job?.status === 'error') return `Mac failed${job.lastError ? ` · ${job.lastError}` : ''}`;
   return 'Not queued for the Mac worker';
+}
+
+function workerTaskStatus(job = {}) {
+  if (job.status === 'queued') return { label: 'Queued', tone: 'queued' };
+  if (job.status === 'downloading') return { label: 'Downloading', tone: 'active' };
+  if (job.status === 'blocked') return { label: 'Blocked', tone: 'attention' };
+  if (job.status === 'failed') return { label: 'Failed', tone: 'attention' };
+  if (job.status === 'error') return { label: 'Retry required', tone: 'attention' };
+  if (job.status === 'done' && !job.uploadedFileId) return { label: 'Upload incomplete', tone: 'attention' };
+  return { label: job.status || 'Pending', tone: 'queued' };
+}
+
+export function MacWorkerTasksPanel({ tasks = [], onRetry, onRefresh }) {
+  const queuedCount = tasks.filter(task => task.workerJob?.status === 'queued').length;
+  const activeCount = tasks.filter(task => task.workerJob?.status === 'downloading').length;
+  const attentionCount = tasks.length - queuedCount - activeCount;
+
+  return (
+    <section className="mac-worker-tasks" aria-label="Mac worker tasks">
+      <div className="mac-worker-tasks__header">
+        <div>
+          <Laptop size={20} />
+          <div>
+            <h2>Mac worker tasks</h2>
+            <p>Every queue item that is not fully uploaded to Drive yet.</p>
+          </div>
+        </div>
+        <button className="download-status-row__action" onClick={onRefresh} type="button">
+          <RefreshCw size={14} /> Refresh
+        </button>
+      </div>
+
+      <div className="mac-worker-tasks__metrics">
+        <div><span>Remaining</span><strong>{tasks.length.toLocaleString()}</strong></div>
+        <div><span>Queued</span><strong>{queuedCount.toLocaleString()}</strong></div>
+        <div><span>Active</span><strong>{activeCount.toLocaleString()}</strong></div>
+        <div><span>Needs attention</span><strong>{attentionCount.toLocaleString()}</strong></div>
+      </div>
+
+      <div className="mac-worker-tasks__list">
+        {tasks.length === 0 ? (
+          <div className="download-status-empty">No remaining Mac worker tasks. The queue is caught up.</div>
+        ) : tasks.map(task => {
+          const job = task.workerJob || {};
+          const status = workerTaskStatus(job);
+          const retryable = ['failed', 'error', 'blocked'].includes(job.status) || (job.status === 'done' && !job.uploadedFileId);
+          return (
+            <div className="mac-worker-task" key={job.jobId || task.songKey}>
+              <div className="mac-worker-task__status" data-tone={status.tone}>{status.label}</div>
+              <div className="mac-worker-task__copy">
+                <strong>{task.track || job.track || 'Untitled'}</strong>
+                <span>{task.artist || job.artist || 'Unknown artist'}</span>
+                <small>{job.sourceFileId ? `Imported source${job.sourceFileName ? ` · ${job.sourceFileName}` : ''}` : 'yt-dlp source'}{job.expectedFilename ? ` · ${job.expectedFilename}` : ''}</small>
+                {job.lastError && <small className="mac-worker-task__error">{job.lastError}</small>}
+              </div>
+              {retryable && <button className="download-status-row__action" onClick={() => onRetry?.(task)} type="button">Retry</button>}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 export function DownloadStatusPanel({

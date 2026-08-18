@@ -132,17 +132,19 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
       sourceType: 'local-import',
     } });
     let driveJob = null;
+    let finalSong = storedSong || song;
     if (driveService && driveFolderId) {
       await update({ status: 'importing', progress: 0.85, message: 'Uploading source to Drive for the Mac worker' });
       onProgress?.({ ...job, status: 'importing', progress: 0.85, message: 'Uploading source to Drive for the Mac worker' });
       driveJob = await driveService.createImportedAudioJob(song, file, driveFolderId);
+      finalSong = await upsertSongToDb({ ...finalSong, driveImportJobId: driveJob.jobId, syncStatus: 'queued' });
     }
     const completionMessage = driveJob
       ? 'Imported locally · Queued for Mac upload'
       : 'Imported locally only · Sign in to queue Mac upload';
     await update({ status: 'complete', progress: 1, message: completionMessage, driveJobId: driveJob?.jobId || '' });
     onProgress?.({ ...job, status: 'complete', progress: 1 });
-    return { status: 'complete', song: storedSong || song, jobId: job.jobId, driveJob };
+    return { status: 'complete', song: finalSong, jobId: job.jobId, driveJob };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await update({ status: 'failed', error: message, message });

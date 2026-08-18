@@ -49,6 +49,7 @@ export function normalizeText(value = '') {
 }
 
 export function getSongKey(songOrArtist, maybeTrack) {
+  if (typeof songOrArtist === 'object' && songOrArtist?.songKey) return String(songOrArtist.songKey);
   const artist = typeof songOrArtist === 'object'
     ? songOrArtist?.artist
     : songOrArtist;

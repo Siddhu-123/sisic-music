@@ -17,6 +17,10 @@ test('normalizes equivalent artist and track names to one song key', () => {
   );
 });
 
+test('preserves the stable song key when editable metadata changes', () => {
+  assert.equal(getSongKey({ songKey: 'original::identity', artist: 'New Artist', track: 'New Title' }), 'original::identity');
+});
+
 test('normalizes playlist names to stable keys', () => {
   assert.equal(getPlaylistKey('My Shazam Tracks'), 'my shazam tracks');
 });

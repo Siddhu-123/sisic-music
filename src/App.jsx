@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
@@ -19,13 +19,14 @@ import {
   touchSongPlayed,
   syncPlaylistIndexToDb,
   updateSongPipelineStatus,
+  updateSongMetadataInDb,
   updateSyncOutbox,
   upsertSongToDb,
 } from './db.js';
 import { driveService } from './services/GoogleDriveService.js';
 import { useAudioPlayer } from './hooks/useAudioPlayer.js';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
-import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
+import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, MacWorkerTasksPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
 import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
@@ -39,7 +40,7 @@ const EqualizerModal = lazy(() => import('./components/EqualizerModal.jsx').then
 const RecommendationsModal = lazy(() => import('./components/RecommendationsModal.jsx').then(module => ({ default: module.RecommendationsModal })));
 const TasteProfileModal = lazy(() => import('./components/TasteProfileModal.jsx').then(module => ({ default: module.TasteProfileModal })));
 
-const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
+const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DUPLICATES: 'duplicates', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
 const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
@@ -211,6 +212,7 @@ function App() {
   const [catalogueLoading, setCatalogueLoading] = useState(false);
   const [driveIndexSongs, setDriveIndexSongs] = useState([]);
   const [driveDeletedSongs, setDriveDeletedSongs] = useState([]);
+  const [driveDuplicateSongs, setDriveDuplicateSongs] = useState([]);
   const [drivePlaybackEvents, setDrivePlaybackEvents] = useState([]);
   const [driveQuota, setDriveQuota] = useState(null);
   const [showStoragePanel, setShowStoragePanel] = useState(false);
@@ -401,6 +403,12 @@ function App() {
         try {
           if (operation.entityType === 'playback-event') {
             await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, operation.payload);
+          } else if (operation.entityType === 'song-metadata') {
+            await driveService.updateSongMetadata(
+              DRIVE_FOLDER_ID,
+              operation.payload.song || { songKey: operation.entityKey },
+              operation.payload.updates || {},
+            );
           } else {
             await driveService.mutateJsonIndex(DRIVE_FOLDER_ID, 'sisic-imports.json', 'imports', [], imports => {
               const byKey = new Map(imports.filter(item => item.entityKey).map(item => [item.entityKey, item]));
@@ -413,7 +421,7 @@ function App() {
             });
           }
           await updateSyncOutbox(operation.opId, { status: 'done', error: '' });
-          if (operation.entityType === 'song') {
+          if (['song', 'song-metadata'].includes(operation.entityType)) {
             await updateSongPipelineStatus(operation.entityKey, { syncStatus: 'done' });
           }
         } catch (error) {
@@ -424,7 +432,7 @@ function App() {
             error: errorMessage(error),
             nextAttemptAt: new Date(Date.now() + syncRetryDelayMs(attempts)).toISOString(),
           });
-          if (operation.entityType === 'song') {
+          if (['song', 'song-metadata'].includes(operation.entityType)) {
             await updateSongPipelineStatus(operation.entityKey, { syncStatus: 'queued' });
           }
         }
@@ -467,13 +475,33 @@ function App() {
     return byKey;
   }, [allSongs, driveIndexSongs, jobBySongKey]);
 
+  const workerTasks = useMemo(() => {
+    const priority = { downloading: 0, queued: 1, error: 2, failed: 3, blocked: 4 };
+    return [...(safeLibraryData.downloadJobs || [])]
+      .filter(job => !(job.status === 'done' && job.uploadedFileId))
+      .map(job => ({
+        ...mergeJob(allSongsByKey.get(job.songKey) || asSongRecord(job), jobBySongKey),
+        workerJob: job,
+      }))
+      .sort((a, b) => {
+        const statusDifference = (priority[a.workerJob.status] ?? 5) - (priority[b.workerJob.status] ?? 5);
+        if (statusDifference !== 0) return statusDifference;
+        return String(b.workerJob.updatedAt || '').localeCompare(String(a.workerJob.updatedAt || ''));
+      });
+  }, [allSongsByKey, jobBySongKey, safeLibraryData.downloadJobs]);
+
+  const duplicateSongKeySet = useMemo(() => (
+    new Set(driveDuplicateSongs.map(song => song.songKey).filter(Boolean))
+  ), [driveDuplicateSongs]);
+
   const topPlayed = useMemo(() => {
     return [...allSongs]
+      .filter(song => !duplicateSongKeySet.has(song.songKey))
       .filter(song => (song.playCount || 0) > 0)
       .sort((a, b) => (b.playCount || 0) - (a.playCount || 0))
       .slice(0, 8)
       .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
-  }, [allSongs, allSongsByKey, jobBySongKey]);
+  }, [allSongs, allSongsByKey, duplicateSongKeySet, jobBySongKey]);
 
   const driveSongKeySet = useMemo(() => {
     return new Set(driveIndexSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
@@ -486,6 +514,7 @@ function App() {
   const driveReadySongs = useMemo(() => {
     return driveIndexSongs
       .filter(song => song.songKey && song.driveFileId)
+      .filter(song => !duplicateSongKeySet.has(song.songKey))
       .map(indexedSong => {
         const normalized = asSongRecord({
           ...indexedSong,
@@ -501,7 +530,7 @@ function App() {
         }, jobBySongKey);
       })
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
-  }, [allSongsByKey, driveIndexSongs, jobBySongKey]);
+  }, [allSongsByKey, driveIndexSongs, duplicateSongKeySet, jobBySongKey]);
 
   const availableSongs = driveReadySongs;
 
@@ -528,10 +557,11 @@ function App() {
       .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey))
       .filter(song => !driveSongKeySet.has(song.songKey))
       .filter(song => !deletedSongKeySet.has(song.songKey))
+      .filter(song => !duplicateSongKeySet.has(song.songKey))
       .filter(song => !isPlayable(song))
       .filter(song => !song.downloadJob || (song.downloadJob.status === 'done' && !song.downloadJob.uploadedFileId))
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
-  }, [allSongs, allSongsByKey, deletedSongKeySet, driveSongKeySet, jobBySongKey]);
+  }, [allSongs, allSongsByKey, deletedSongKeySet, driveSongKeySet, duplicateSongKeySet, jobBySongKey]);
 
   const readyFolderSongs = useMemo(() => {
     return driveReadySongs.filter(song => !song.playlistKeys?.some(key => visiblePlaylistKeySet.has(key)));
@@ -586,8 +616,9 @@ function App() {
   }, [catalogue]);
 
   const searchResults = useMemo(() => {
-    return searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, jobBySongKey);
-  }, [allSongsByKey, catalogueSearchIndex, jobBySongKey, searchQuery]);
+    return searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, jobBySongKey)
+      .filter(song => !duplicateSongKeySet.has(song.songKey));
+  }, [allSongsByKey, catalogueSearchIndex, duplicateSongKeySet, jobBySongKey, searchQuery]);
 
   const selectedPlaylist = useMemo(() => {
     return visiblePlaylists.find(playlist => playlist.playlistKey === selectedPlaylistKey) || null;
@@ -597,8 +628,16 @@ function App() {
     if (!selectedPlaylistKey) return driveReadySongs;
     return allSongs
       .filter(song => song.playlistKeys?.includes(selectedPlaylistKey))
+      .filter(song => !duplicateSongKeySet.has(song.songKey))
       .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
-  }, [allSongs, allSongsByKey, driveReadySongs, selectedPlaylistKey, jobBySongKey]);
+  }, [allSongs, allSongsByKey, driveReadySongs, duplicateSongKeySet, selectedPlaylistKey, jobBySongKey]);
+
+  const duplicateSongs = useMemo(() => {
+    return driveDuplicateSongs
+      .map(entry => mergeJob(allSongsByKey.get(entry.songKey) || asSongRecord(entry), jobBySongKey))
+      .map(song => ({ ...song, isDuplicate: true }))
+      .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
+  }, [allSongsByKey, driveDuplicateSongs, jobBySongKey]);
 
   const refreshDownloadJobs = useCallback(async () => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return;
@@ -655,6 +694,7 @@ function App() {
         if (cancelled) return;
         setDriveIndexSongs(result.songs || []);
         setDriveDeletedSongs(result.deleted || []);
+        setDriveDuplicateSongs(result.duplicates || []);
         setDrivePlaybackEvents(result.playbackEvents || []);
         setDriveQuota(result.quota || null);
         await syncDownloadJobsToDb(result.jobs || []);
@@ -1202,6 +1242,10 @@ function App() {
 
     try {
       const deletedEntry = await driveService.deleteReadySong(DRIVE_FOLDER_ID, song);
+      if (duplicateSongKeySet.has(song.songKey)) {
+        await driveService.removeDuplicateSong(DRIVE_FOLDER_ID, song);
+        setDriveDuplicateSongs(prev => prev.filter(item => item.songKey !== song.songKey));
+      }
       await clearSongPlayable(song.songKey);
       setDriveIndexSongs(prev => prev.filter(item => item.songKey !== song.songKey && item.driveFileId !== song.driveFileId));
       setDriveDeletedSongs(prev => {
@@ -1216,7 +1260,83 @@ function App() {
       setActionError(message);
       addToast(message);
     }
+  }, [addToast, duplicateSongKeySet, player]);
+
+  const handleMarkDuplicate = useCallback(async song => {
+    if (!DRIVE_FOLDER_ID) {
+      setActionError('Missing required config: VITE_DRIVE_FOLDER_ID.');
+      return;
+    }
+    const confirmed = window.confirm(`Move "${song.track}" to Duplicates? The Drive audio will be kept, but it will leave the Ready library.`);
+    if (!confirmed) return;
+    try {
+      const entry = await driveService.addDuplicateSong(DRIVE_FOLDER_ID, song);
+      setDriveDuplicateSongs(prev => [entry, ...prev.filter(item => item.songKey !== entry.songKey)]);
+      if (player.currentSongKey === song.songKey) player.stop();
+      setSongInfo(null);
+      addToast(`Moved "${song.track}" to Duplicates`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
   }, [addToast, player]);
+
+  const handleRestoreDuplicate = useCallback(async song => {
+    if (!DRIVE_FOLDER_ID) {
+      setActionError('Missing required config: VITE_DRIVE_FOLDER_ID.');
+      return;
+    }
+    try {
+      await driveService.removeDuplicateSong(DRIVE_FOLDER_ID, song);
+      setDriveDuplicateSongs(prev => prev.filter(item => item.songKey !== song.songKey));
+      addToast(`Restored "${song.track}" to Ready`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
+  }, [addToast]);
+
+  const handleSaveSongMetadata = useCallback(async (song, updates) => {
+    const nextUpdates = Object.fromEntries(
+      ['artist', 'track', 'album', 'description', 'lyrics', 'genre', 'releaseDate']
+        .filter(field => Object.prototype.hasOwnProperty.call(updates || {}, field))
+        .map(field => [field, String(updates[field] || '').trim()]),
+    );
+    if (!nextUpdates.artist || !nextUpdates.track) {
+      addToast('Artist and title are required.');
+      return;
+    }
+
+    const localSong = await updateSongMetadataInDb(song.songKey, nextUpdates);
+    let remoteSong = null;
+    let queuedForDrive = false;
+    if (DRIVE_FOLDER_ID) {
+      try {
+        remoteSong = await driveService.updateSongMetadata(DRIVE_FOLDER_ID, song, nextUpdates);
+      } catch (error) {
+        console.warn('Drive metadata update queued for retry:', error);
+        queuedForDrive = true;
+        await enqueueSyncOutbox({
+          entityType: 'song-metadata',
+          entityKey: song.songKey,
+          payload: { song: { ...song, ...nextUpdates, songKey: song.songKey }, updates: nextUpdates },
+        });
+        await updateSongMetadataInDb(song.songKey, { syncStatus: 'queued' });
+      }
+    }
+
+    const updated = { ...song, ...(localSong || {}), ...(remoteSong || {}), ...nextUpdates, songKey: song.songKey, syncStatus: queuedForDrive ? 'queued' : 'done' };
+    setDriveIndexSongs(prev => prev.map(item => item.songKey === song.songKey ? { ...item, ...updated } : item));
+    setDriveDuplicateSongs(prev => prev.map(item => item.songKey === song.songKey ? { ...item, ...updated } : item));
+    setSongInfo(updated);
+    addToast(queuedForDrive
+      ? `Saved "${updated.track}" locally · Drive update queued`
+      : DRIVE_FOLDER_ID
+        ? `Updated "${updated.track}" in Drive`
+        : `Saved "${updated.track}" locally · Drive is not configured`);
+  }, [addToast]);
 
   const handleReconcileDriveIndex = useCallback(async () => {
     if (!DRIVE_FOLDER_ID) return;
@@ -1253,12 +1373,13 @@ function App() {
 
   const bannerError = authError || actionError || player.error || localDbError;
   const bannerStatus = bannerError || syncStatus;
-  const effectivePageLimit = view === VIEWS.LIBRARY ? pageLimit : PAGE_SIZE;
+  const effectivePageLimit = [VIEWS.LIBRARY, VIEWS.DUPLICATES].includes(view) ? pageLimit : PAGE_SIZE;
 
   const navItems = [
     { id: VIEWS.HOME, icon: Home, label: 'Home' },
     { id: VIEWS.SEARCH, icon: Search, label: 'Search' },
     { id: VIEWS.LIBRARY, icon: Library, label: 'Ready' },
+    { id: VIEWS.DUPLICATES, icon: Copy, label: `Duplicates${duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}` },
     { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads' },
     { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy' },
   ];
@@ -1268,12 +1389,14 @@ function App() {
     displaySongs = searchResults;
   } else if (view === VIEWS.LIBRARY) {
     displaySongs = librarySongs.slice(0, effectivePageLimit);
+  } else if (view === VIEWS.DUPLICATES) {
+    displaySongs = duplicateSongs.slice(0, effectivePageLimit);
   }
 
   const renderSongCard = (song, list) => (
     <SongCard
       key={song.songKey}
-      song={{ ...song, isDeleted: deletedSongKeySet.has(song.songKey), status: playableStatus({ ...song, isDeleted: deletedSongKeySet.has(song.songKey) }) }}
+      song={{ ...song, isDeleted: deletedSongKeySet.has(song.songKey), isDuplicate: duplicateSongKeySet.has(song.songKey), status: playableStatus({ ...song, isDeleted: deletedSongKeySet.has(song.songKey) }) }}
       onPlay={(selected) => handlePlaySong(selected, list)}
       onDownload={handleDownload}
       onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
@@ -1285,6 +1408,8 @@ function App() {
       onInfo={setSongInfo}
       onMoreLikeThis={(selected) => setRecommendationTarget(selected)}
       onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
+      onMarkDuplicate={!selectedPlaylistKey && view !== VIEWS.DUPLICATES ? handleMarkDuplicate : undefined}
+      onRestoreDuplicate={view === VIEWS.DUPLICATES ? handleRestoreDuplicate : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
       isCurrentSong={player.currentSongKey === song.songKey}
       isDownloading={downloadingKeys.has(song.songKey)}
@@ -1476,6 +1601,11 @@ function App() {
             <header className="main-view__header">
               <h1 className="main-view__title">Downloads</h1>
             </header>
+            <MacWorkerTasksPanel
+              tasks={workerTasks}
+              onRetry={song => handleQueueDownload(song, { allowRedownload: true })}
+              onRefresh={refreshDownloadJobs}
+            />
             <DownloadStatusPanel
               readyCount={driveReadySongs.length}
               queuedSongs={downloadQueueSongs}
@@ -1580,12 +1710,62 @@ function App() {
           </>
         )}
 
+        {view === VIEWS.DUPLICATES && (
+          <>
+            <header className="main-view__header">
+              <div>
+                <h1 className="main-view__title">Duplicates</h1>
+                <p className="main-view__subtitle">Songs kept out of Ready because you marked them as duplicate.</p>
+              </div>
+              <div className="search-box">
+                <Search size={18} className="search-box__icon" />
+                <input
+                  type="search"
+                  placeholder="Filter"
+                  value={searchQuery}
+                  onChange={event => setSearchQuery(event.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+            </header>
+            {(() => {
+              const filtered = searchQuery.length >= 2
+                ? duplicateSongs.filter(song => {
+                    const q = searchQuery.toLowerCase();
+                    return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
+                  })
+                : duplicateSongs;
+              const shown = filtered.slice(0, pageLimit);
+              const hasMore = pageLimit < filtered.length;
+              return shown.length === 0 ? (
+                <div className="empty-state">
+                  <Copy size={48} color="var(--text-muted)" />
+                  <h3>No duplicates</h3>
+                  <p>Use Song actions → Mark as duplicate to move a song here.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="library-count">{filtered.length} songs</div>
+                  <div className="songs-grid">
+                    {shown.map(song => renderSongCard(song, filtered))}
+                  </div>
+                  {hasMore && (
+                    <button className="load-more-btn" onClick={() => setPageLimit(limit => limit + PAGE_SIZE)}>
+                      Show more ({filtered.length - pageLimit} remaining)
+                    </button>
+                  )}
+                </>
+              );
+            })()}
+          </>
+        )}
+
         {view === VIEWS.CONSTELLATION && (
           <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
             <ConstellationView
-              songs={allSongs}
+              songs={allSongs.filter(song => !duplicateSongKeySet.has(song.songKey))}
               currentSong={player.currentSong}
-              onPlaySong={(song) => handlePlaySong(song, allSongs)}
+              onPlaySong={(song) => handlePlaySong(song, allSongs.filter(item => !duplicateSongKeySet.has(item.songKey)))}
               onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
             />
           </Suspense>
@@ -1608,6 +1788,7 @@ function App() {
               <div><span>Ready loose</span><strong>{readyFolderSongs.length.toLocaleString()}</strong></div>
               <div><span>Missing playlists</span><strong>{missingRequiredSongs.length.toLocaleString()}</strong></div>
               <div><span>Deleted blocked</span><strong>{deletedRequiredSongs.length.toLocaleString()}</strong></div>
+              <div><span>Duplicates</span><strong>{duplicateSongs.length.toLocaleString()}</strong></div>
             </div>
             <div className="panel-actions">
               <button className="panel-action-btn" onClick={handleReconcileDriveIndex}>
@@ -1712,6 +1893,7 @@ function App() {
       )}
       {songInfo && (
         <SongInfoPanel
+          key={songInfo.songKey}
           song={songInfo}
           onClose={() => setSongInfo(null)}
           onPlay={song => handlePlaySong(song, [song])}
@@ -1720,6 +1902,9 @@ function App() {
           onAddToPlaylist={openPlaylistPicker}
           onReview={song => { setSongInfo(null); setReviewSong(song); }}
           onDelete={handleDeleteReadySong}
+          onMarkDuplicate={duplicateSongKeySet.has(songInfo.songKey) ? undefined : handleMarkDuplicate}
+          onRestoreDuplicate={duplicateSongKeySet.has(songInfo.songKey) ? handleRestoreDuplicate : undefined}
+          onSave={handleSaveSongMetadata}
           onDownload={handleDownload}
           isDownloading={downloadingKeys.has(songInfo.songKey)}
         />

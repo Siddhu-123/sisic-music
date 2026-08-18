@@ -8,8 +8,14 @@ export function isSupportedAudioFile(file) {
   return Boolean(file && SUPPORTED_AUDIO_EXTENSIONS.has(extensionFor(file.name)));
 }
 
-export function parseAudioFilename(fileName = '') {
+export function cleanImportedFilename(fileName = '') {
   const stem = String(fileName).replace(/\.[^/.]+$/, '').trim();
+  const sourceMatch = stem.match(/^sisic-import-source-(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[^-]+)-(.+)$/i);
+  return (sourceMatch ? sourceMatch[1] : stem).trim();
+}
+
+export function parseAudioFilename(fileName = '') {
+  const stem = cleanImportedFilename(fileName);
   const separator = stem.indexOf(' - ');
   if (separator > 0) {
     return {
