@@ -1,5 +1,6 @@
 const DEFAULT_CHUNK_BYTES = 256 * 1024;
 const MAX_RANGE_BYTES = 8 * 1024 * 1024;
+const APP_SHELL_CACHE = 'sisic-app-shell-v2';
 
 let driveAccessToken = '';
 let driveTokenVersion = '';
@@ -34,13 +35,48 @@ async function notifyDriveAuthFailure(message) {
   }));
 }
 
-self.addEventListener('install', () => {
-  self.skipWaiting();
+self.addEventListener('install', event => {
+  event.waitUntil((async () => {
+    self.skipWaiting();
+    await precacheAppShell();
+  })());
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil((async () => {
+    const cacheNames = await caches.keys();
+    await Promise.all(cacheNames
+      .filter(name => name.startsWith('sisic-app-shell-') && name !== APP_SHELL_CACHE)
+      .map(name => caches.delete(name)));
+    await self.clients.claim();
+  })());
 });
+
+async function precacheAppShell() {
+  const cache = await caches.open(APP_SHELL_CACHE);
+  const indexUrl = new URL('index.html', self.registration.scope);
+  try {
+    const response = await fetch(indexUrl, { cache: 'no-cache' });
+    if (!response.ok) return;
+    await cache.put(indexUrl, response.clone());
+    const html = await response.text();
+    const assetUrls = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
+      .map(match => match[1])
+      .filter(value => !value.startsWith('http') && !value.startsWith('//'))
+      .map(value => new URL(value, indexUrl).toString())
+      .filter(value => value.startsWith(self.location.origin));
+    await Promise.all(assetUrls.map(async assetUrl => {
+      try {
+        const asset = await fetch(assetUrl, { cache: 'no-cache' });
+        if (asset.ok) await cache.put(assetUrl, asset);
+      } catch {
+        // A single optional asset should not prevent offline launch.
+      }
+    }));
+  } catch {
+    // Runtime caching below can populate the shell on the next online visit.
+  }
+}
 
 function isTrustedMessage(event) {
   if (event.origin && event.origin !== self.location.origin) return false;
@@ -85,9 +121,39 @@ function streamFileId(url) {
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
   const fileId = streamFileId(url);
-  if (!fileId) return;
-  event.respondWith(streamDriveFile(fileId, event.request));
+  if (fileId) {
+    event.respondWith(streamDriveFile(fileId, event.request));
+    return;
+  }
+  if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
+  event.respondWith(handleAppRequest(event.request));
 });
+
+async function handleAppRequest(request) {
+  const cache = await caches.open(APP_SHELL_CACHE);
+  const isDocument = request.mode === 'navigate' || request.destination === 'document';
+  if (isDocument) {
+    try {
+      const response = await fetch(request);
+      if (response.ok) await cache.put(request, response.clone());
+      return response;
+    } catch {
+      return (await cache.match(request)) || (await cache.match(new URL('index.html', self.registration.scope))) || new Response('Sisic Music is not available offline yet.', { status: 503 });
+    }
+  }
+
+  const cached = await cache.match(request);
+  if (cached) return cached;
+  try {
+    const response = await fetch(request);
+    if (response.ok && ['script', 'style', 'image', 'font', 'manifest'].includes(request.destination)) {
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    return cached || new Response('', { status: 504 });
+  }
+}
 
 async function streamDriveFile(fileId, request) {
   if (!driveAccessToken && !(await requestDriveToken())) {
