@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   TONEARM_LIFTED_ANGLE,
+  TONEARM_END_ANGLE,
   TONEARM_START_ANGLE,
   clamp,
   tonearmAngleFromProgress,
@@ -30,6 +31,7 @@ export function Turntable({
   currentSong,
   artwork,
   isPlaying,
+  isBraking = false,
   progress,
   duration,
   rpm,
@@ -45,6 +47,7 @@ export function Turntable({
   onNeedleLift,
   onEject,
   onLoadSong,
+  onProgressPreview,
   onPitchChange,
   onPitchRangeChange,
   onRpmChange,
@@ -54,18 +57,56 @@ export function Turntable({
   const interactionRef = useRef(null);
   const longPressRef = useRef(null);
   const inertiaFrameRef = useRef(null);
+  const releasedTonearmResetRef = useRef(null);
+  const previewProgressRef = useRef(null);
+  const recordSwapIndexRef = useRef(null);
   const [dragMode, setDragMode] = useState(null);
   const [previewProgress, setPreviewProgress] = useState(null);
   const [manualRecordAngle, setManualRecordAngle] = useState(0);
+  const [tonearmDragAngle, setTonearmDragAngle] = useState(null);
+  const [releasedTonearmProgress, setReleasedTonearmProgress] = useState(null);
   const [needleLifted, setNeedleLifted] = useState(false);
   const [ejectReady, setEjectReady] = useState(false);
+  const [recordSwapIndex, setRecordSwapIndex] = useState(null);
   const [recordOffset, setRecordOffset] = useState({ x: 0, y: 0 });
 
   const displayedProgress = clamp(previewProgress ?? progress, 0, 100);
   const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
   const tonearmLifted = needleLifted || dragMode === 'tonearm' || dragMode === 'lifted' || completed;
-  const tonearmAngle = tonearmLifted ? TONEARM_LIFTED_ANGLE : tonearmAngleFromProgress(displayedProgress);
+  const tonearmAngle = dragMode === 'tonearm'
+    ? (tonearmDragAngle ?? tonearmAngleFromProgress(displayedProgress))
+    : tonearmLifted
+      ? TONEARM_LIFTED_ANGLE
+      : tonearmAngleFromProgress(releasedTonearmProgress ?? displayedProgress);
   const pitchPercent = ((pitchModifier - 1) * 100).toFixed(1);
+
+  const updatePreviewProgress = nextProgress => {
+    const boundedProgress = nextProgress == null ? null : clamp(nextProgress, 0, 100);
+    previewProgressRef.current = boundedProgress;
+    setPreviewProgress(boundedProgress);
+    onProgressPreview?.(boundedProgress);
+  };
+
+  const clearRecordDragPreview = () => {
+    recordSwapIndexRef.current = null;
+    setRecordSwapIndex(null);
+    setRecordOffset({ x: 0, y: 0 });
+  };
+
+  const clearReleasedTonearm = () => {
+    if (releasedTonearmResetRef.current) window.clearTimeout(releasedTonearmResetRef.current);
+    releasedTonearmResetRef.current = null;
+    setReleasedTonearmProgress(null);
+  };
+
+  const holdReleasedTonearm = target => {
+    if (releasedTonearmResetRef.current) window.clearTimeout(releasedTonearmResetRef.current);
+    setReleasedTonearmProgress(target);
+    releasedTonearmResetRef.current = window.setTimeout(() => {
+      setReleasedTonearmProgress(current => current === target ? null : current);
+      releasedTonearmResetRef.current = null;
+    }, 700);
+  };
 
   const clearLongPress = () => {
     if (longPressRef.current) window.clearTimeout(longPressRef.current);
@@ -128,7 +169,10 @@ export function Turntable({
       startedScratch: false,
       longPressed: false,
     };
-    setPreviewProgress(progress);
+    updatePreviewProgress(progress);
+    clearReleasedTonearm();
+    recordSwapIndexRef.current = null;
+    setRecordSwapIndex(null);
     clearLongPress();
     longPressRef.current = window.setTimeout(() => {
       const interaction = interactionRef.current;
@@ -146,13 +190,20 @@ export function Turntable({
     event.preventDefault();
     if (interaction.longPressed) {
       setRecordOffset({ x: event.clientX - interaction.startX, y: event.clientY - interaction.startY });
+      const horizontalDistance = event.clientX - interaction.startX;
+      const candidateIndex = Math.abs(horizontalDistance) >= 120
+        ? queueIndex + (horizontalDistance < 0 ? -1 : 1)
+        : null;
+      const replacementSong = Number.isInteger(candidateIndex) ? queue[candidateIndex] : null;
+      recordSwapIndexRef.current = replacementSong ? candidateIndex : null;
+      setRecordSwapIndex(recordSwapIndexRef.current);
       const rect = deckRef.current?.getBoundingClientRect();
       const inside = rect
         && event.clientX >= rect.left
         && event.clientX <= rect.right
         && event.clientY >= rect.top
         && event.clientY <= rect.bottom;
-      setEjectReady(!inside);
+      setEjectReady(!inside || Boolean(replacementSong));
       return;
     }
 
@@ -176,7 +227,7 @@ export function Turntable({
     interaction.lastVelocity = angularVelocity;
     setManualRecordAngle(interaction.startRecordAngle + interaction.accumulatedDegrees);
     const secondsMoved = (interaction.accumulatedDegrees / 360) * (60 / rpm);
-    setPreviewProgress(clamp(interaction.startProgress + ((secondsMoved / duration) * 100), 0, 100));
+    updatePreviewProgress(interaction.startProgress + ((secondsMoved / duration) * 100));
     onScratchVelocity?.(angularVelocity);
   };
 
@@ -189,20 +240,23 @@ export function Turntable({
 
     if (interaction.longPressed) {
       const shouldEject = ejectReady;
+      const replacementIndex = recordSwapIndexRef.current;
+      const replacementSong = Number.isInteger(replacementIndex) ? queue[replacementIndex] : null;
       interactionRef.current = null;
       setEjectReady(false);
-      setPreviewProgress(null);
-      setRecordOffset({ x: 0, y: 0 });
+      updatePreviewProgress(null);
+      clearRecordDragPreview();
       setDragMode(null);
       setLifted(false);
-      if (shouldEject) onEject?.();
+      if (replacementSong) onLoadSong?.(replacementSong);
+      else if (shouldEject) onEject?.();
       return;
     }
 
-    const target = clamp(previewProgress ?? progress, 0, 100);
+    const target = clamp(previewProgressRef.current ?? progress, 0, 100);
     interactionRef.current = null;
-    setPreviewProgress(null);
-    setRecordOffset({ x: 0, y: 0 });
+    updatePreviewProgress(null);
+    clearRecordDragPreview();
     setManualRecordAngle(angle => ((angle % 360) + 360) % 360);
     if (interaction.startedScratch) {
       onSeek?.(target);
@@ -236,8 +290,10 @@ export function Turntable({
       wasPlaying: isPlaying,
       pointerAngleOffset: tonearmAngleFromProgress(progress) - tonearmAngleFromPointer(event),
     };
+    setTonearmDragAngle(tonearmAngleFromProgress(progress));
+    clearReleasedTonearm();
     setLifted(true);
-    setPreviewProgress(progress);
+    updatePreviewProgress(progress);
     setDragMode('tonearm');
   };
 
@@ -245,7 +301,13 @@ export function Turntable({
     const interaction = interactionRef.current;
     if (!interaction || interaction.pointerId !== event.pointerId || interaction.mode !== 'tonearm') return;
     event.preventDefault();
-    setPreviewProgress(tonearmProgressFromAngle(tonearmAngleFromPointer(event) + interaction.pointerAngleOffset));
+    const nextAngle = clamp(
+      tonearmAngleFromPointer(event) + interaction.pointerAngleOffset,
+      TONEARM_START_ANGLE,
+      TONEARM_END_ANGLE,
+    );
+    setTonearmDragAngle(nextAngle);
+    updatePreviewProgress(tonearmProgressFromAngle(nextAngle));
   };
 
   const finishTonearmPointer = event => {
@@ -253,10 +315,12 @@ export function Turntable({
     if (!interaction || interaction.pointerId !== event.pointerId || interaction.mode !== 'tonearm') return;
     event.preventDefault();
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    const target = clamp(previewProgress ?? progress, 0, 100);
+    const target = clamp(previewProgressRef.current ?? progress, 0, 100);
     interactionRef.current = null;
-    setPreviewProgress(null);
-    setRecordOffset({ x: 0, y: 0 });
+    updatePreviewProgress(null);
+    clearRecordDragPreview();
+    holdReleasedTonearm(target);
+    setTonearmDragAngle(null);
     setDragMode(null);
     setLifted(false);
     onSeek?.(target);
@@ -292,17 +356,21 @@ export function Turntable({
   useEffect(() => () => {
     clearLongPress();
     cancelInertia();
+    if (releasedTonearmResetRef.current) window.clearTimeout(releasedTonearmResetRef.current);
   }, []);
 
   if (!currentSong) return null;
 
   const crateSongs = queue.filter((song, index) => index !== queueIndex).slice(0, 5);
+  const swapSong = recordSwapIndex == null ? null : queue[recordSwapIndex];
   const status = dragMode === 'record'
     ? `Scratching · ${formatTime((displayedProgress / 100) * duration)}`
     : dragMode === 'inertia'
       ? ' platter settling · motor lock engaged'
       : dragMode === 'lifted'
-        ? (ejectReady ? 'Release outside the deck to eject' : 'Record lifted · drag away to eject')
+        ? (swapSong
+          ? `Release to load ${swapSong.track}`
+          : (ejectReady ? 'Release outside the deck to eject' : 'Record lifted · drag left or right to change'))
         : completed
           ? 'Playback complete · tonearm lifted'
           : `${rpm} RPM · ${pitchPercent}% pitch · vinyl noise online`;
@@ -322,7 +390,7 @@ export function Turntable({
           </div>
           <div
             ref={vinylRef}
-            className={`turntable__vinyl ${isPlaying && !dragMode ? 'turntable__vinyl--spinning' : ''}`}
+            className={`turntable__vinyl ${isPlaying && !dragMode && !isBraking ? 'turntable__vinyl--spinning' : ''} ${isBraking ? 'turntable__vinyl--braking' : ''}`}
             style={{
               '--manual-record-angle': `${manualRecordAngle}deg`,
               '--eject-x': `${recordOffset.x}px`,
@@ -392,7 +460,7 @@ export function Turntable({
       </div>
 
       <aside className="turntable__crate" aria-label="Vinyl crate">
-        <div className="turntable__crate-heading"><span>CRATE</span><small>drag a jacket to load</small></div>
+        <div className="turntable__crate-heading"><span>CRATE</span><small>click a record to load · drag the disc to switch</small></div>
         <div className="turntable__crate-list">
           {crateSongs.map(song => {
             const key = song.songKey || song.id;
@@ -401,11 +469,6 @@ export function Turntable({
                 type="button"
                 className="turntable__jacket"
                 key={key}
-                draggable
-                onDragStart={event => {
-                  event.dataTransfer.setData('application/x-sisic-song', key);
-                  event.dataTransfer.setData('text/plain', key);
-                }}
                 onClick={() => onLoadSong?.(song)}
               >
                 <span className="turntable__jacket-art">{song.track?.charAt(0) || '♪'}</span>

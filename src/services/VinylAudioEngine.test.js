@@ -4,6 +4,7 @@ import {
   exponentialInertiaVelocity,
   playbackRateFromAngularVelocity,
   reverseSamples,
+  vinylBrakeRateAtTime,
 } from './VinylAudioEngine.js';
 
 test('varispeed uses signed angular velocity relative to platter speed', () => {
@@ -25,4 +26,10 @@ test('release inertia exponentially settles at motor speed', () => {
   assert.ok(Math.abs(exponentialInertiaVelocity(initial, target, 0) - initial) < 1e-9);
   assert.ok(Math.abs(exponentialInertiaVelocity(initial, target, 190) - target) < Math.abs(initial - target));
   assert.ok(Math.abs(exponentialInertiaVelocity(initial, target, 2000) - target) < 0.001);
+});
+
+test('physical brake exponentially brings the record to rest', () => {
+  assert.equal(vinylBrakeRateAtTime(1, 0), 1);
+  assert.ok(vinylBrakeRateAtTime(1, 160) < 0.4);
+  assert.ok(vinylBrakeRateAtTime(1, 640) < 0.02);
 });

@@ -20,6 +20,10 @@ export function exponentialInertiaVelocity(initialVelocity, targetVelocity, elap
   return targetVelocity + ((initialVelocity - targetVelocity) * Math.exp(-elapsed / timeConstant));
 }
 
+export function vinylBrakeRateAtTime(initialRate, elapsedMs, timeConstantMs = 150) {
+  return Math.max(0, exponentialInertiaVelocity(Math.max(0, Number(initialRate) || 0), 0, elapsedMs, timeConstantMs));
+}
+
 function copyReversedChannel(sourceChannel, targetChannel) {
   for (let index = 0; index < sourceChannel.length; index++) {
     targetChannel[index] = sourceChannel[sourceChannel.length - index - 1];
@@ -58,6 +62,8 @@ export class VinylAudioEngine {
     this.pitchModifier = 1;
     this.volume = 1;
     this.isPlaying = false;
+    this.isStopping = false;
+    this.brakeFrame = null;
     this.isScratching = false;
     this.wasPlayingBeforeScratch = false;
     this.needleLifted = false;
@@ -91,7 +97,7 @@ export class VinylAudioEngine {
   }
 
   get paused() {
-    return !this.isPlaying;
+    return !this.isPlaying || this.isStopping;
   }
 
   get currentTime() {
@@ -161,6 +167,7 @@ export class VinylAudioEngine {
     const decoded = await context.decodeAudioData(data.slice(0));
     this._stopSource();
     this._stopTicker();
+    this._cancelBrake();
     this.buffer = decoded;
     this.reversedBuffer = this._createReversedBuffer(decoded);
     this.duration = decoded.duration;
@@ -291,6 +298,23 @@ export class VinylAudioEngine {
     this.sourceNode = null;
   }
 
+  _cancelBrake() {
+    if (this.brakeFrame != null && typeof window !== 'undefined') window.cancelAnimationFrame(this.brakeFrame);
+    this.brakeFrame = null;
+    this.isStopping = false;
+  }
+
+  _finishPause() {
+    this._updatePosition();
+    this._cancelBrake();
+    this.isPlaying = false;
+    this._stopSource();
+    this._stopTicker();
+    this._stopNoise();
+    this._emit('pause');
+    this._emit('timeupdate');
+  }
+
   _scheduleSource() {
     if (!this.isPlaying || !this.buffer || !this.audioContext || Math.abs(this.currentRate) < 0.002) {
       this._stopSource();
@@ -310,6 +334,7 @@ export class VinylAudioEngine {
       if (generation !== this.sourceGeneration || !this.isPlaying) return;
       this._updatePosition();
       this.position = this.currentRate < 0 ? 0 : this.duration;
+      this._cancelBrake();
       this.isPlaying = false;
       this._stopTicker();
       this._stopNoise();
@@ -358,6 +383,7 @@ export class VinylAudioEngine {
   }
 
   beginScratch({ resume = this.isPlaying } = {}) {
+    if (this.isStopping) this._cancelBrake();
     this._updatePosition();
     this.isScratching = true;
     this.wasPlayingBeforeScratch = Boolean(resume);
@@ -391,6 +417,15 @@ export class VinylAudioEngine {
     if (!context) throw new Error('This browser does not support the Web Audio API.');
     if (this.position >= this.duration - 0.01) this.position = 0;
     if (this.audioContext.state === 'suspended') await this.audioContext.resume();
+    if (this.isStopping) {
+      this._cancelBrake();
+      if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
+      this._startTicker();
+      this._startNoise();
+      this._emit('spindowncancel');
+      this._emit('play');
+      return;
+    }
     this.isPlaying = true;
     if (!this.isScratching) this.currentRate = this.targetMotorRate;
     this._scheduleSource();
@@ -399,19 +434,41 @@ export class VinylAudioEngine {
     this._emit('play');
   }
 
-  pause() {
+  pause({ immediate = false } = {}) {
     if (!this.isPlaying) return;
-    this._updatePosition();
-    this.isPlaying = false;
-    this._stopSource();
-    this._stopTicker();
-    this._stopNoise();
-    this._emit('pause');
-    this._emit('timeupdate');
+    if (this.isStopping) {
+      if (immediate) this._finishPause();
+      return;
+    }
+    if (immediate || !this.sourceNode || !this.audioContext || this.isScratching) {
+      this._finishPause();
+      return;
+    }
+
+    const startRate = Math.max(0.05, Math.abs(this.currentRate || this.targetMotorRate));
+    const startAt = performance.now();
+    const brakeDurationMs = 640;
+    this.isStopping = true;
+    this._emit('spindownstart', { duration: brakeDurationMs });
+
+    const tick = now => {
+      if (!this.isStopping) return;
+      const elapsed = now - startAt;
+      const rate = vinylBrakeRateAtTime(startRate, elapsed);
+      if (elapsed >= brakeDurationMs || rate <= 0.018) {
+        this.currentRate = Math.max(0.018, rate);
+        this._finishPause();
+        return;
+      }
+      this._setPlaybackRate(Math.max(0.018, rate));
+      this.brakeFrame = window.requestAnimationFrame(tick);
+    };
+    this.brakeFrame = window.requestAnimationFrame(tick);
   }
 
   clear() {
-    this.pause();
+    this.pause({ immediate: true });
+    this._cancelBrake();
     this._stopSource();
     this.buffer = null;
     this.reversedBuffer = null;
@@ -430,6 +487,7 @@ export class VinylAudioEngine {
       this._updatePosition();
       if ((this.currentRate > 0 && this.position >= this.duration) || (this.currentRate < 0 && this.position <= 0)) {
         this._stopSource();
+        this._cancelBrake();
         this.isPlaying = false;
         this._stopTicker();
         this._stopNoise();

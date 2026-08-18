@@ -32,6 +32,9 @@ class RootErrorBoundary extends Component {
         <main className="root-error" role="alert">
           <h1>Sisic Music could not start</h1>
           <p>{this.state.error.message || 'A browser error stopped the app from loading.'}</p>
+          <button type="button" className="root-error__reload" onClick={() => window.location.reload()}>
+            Reload Sisic Music
+          </button>
         </main>
       );
     }

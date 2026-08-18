@@ -100,6 +100,7 @@ export function useAudioPlayer() {
   const [queue, setQueue] = useState(() => restoredInitialState?.queue || []);
   const [queueIndex, setQueueIndex] = useState(() => restoredInitialState?.queueIndex || 0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isSpinningDown, setIsSpinningDown] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
@@ -187,7 +188,7 @@ export function useAudioPlayer() {
     const isLatestRequest = () => requestId === loadRequestRef.current;
     const audio = audioRef.current;
     setError('');
-    audio.pause();
+    audio.pause({ immediate: true });
 
     let audioBlob = null;
     if (hasUsableCachedAudio(song)) {
@@ -407,8 +408,17 @@ export function useAudioPlayer() {
     const audio = audioRef.current;
     const onPlay = () => {
       setIsPlaying(true);
+      setIsSpinningDown(false);
     };
-    const onPause = () => setIsPlaying(false);
+    const onPause = () => {
+      setIsPlaying(false);
+      setIsSpinningDown(false);
+    };
+    const onSpindownStart = () => {
+      setIsSpinningDown(true);
+      setIsPlaying(false);
+    };
+    const onSpindownCancel = () => setIsSpinningDown(false);
     const onEnded = () => {
       const durationSeconds = Number(audio.duration || 0);
       const positionSeconds = Number(audio.currentTime || 0);
@@ -489,6 +499,8 @@ export function useAudioPlayer() {
 
     audio.addEventListener('play', onPlay);
     audio.addEventListener('pause', onPause);
+    audio.addEventListener('spindownstart', onSpindownStart);
+    audio.addEventListener('spindowncancel', onSpindownCancel);
     audio.addEventListener('ended', onEnded);
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('durationchange', onDurationChange);
@@ -496,6 +508,8 @@ export function useAudioPlayer() {
     return () => {
       audio.removeEventListener('play', onPlay);
       audio.removeEventListener('pause', onPause);
+      audio.removeEventListener('spindownstart', onSpindownStart);
+      audio.removeEventListener('spindowncancel', onSpindownCancel);
       audio.removeEventListener('ended', onEnded);
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('durationchange', onDurationChange);
@@ -852,6 +866,7 @@ export function useAudioPlayer() {
     currentSong,
     currentSongKey: currentSong?.songKey || null,
     isPlaying,
+    isSpinningDown,
     progress,
     duration,
     volume,

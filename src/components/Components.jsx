@@ -123,6 +123,7 @@ export function ExpandedPlayer({
   const {
     currentSong,
     isPlaying,
+    isSpinningDown,
     progress,
     duration,
     shuffleMode,
@@ -148,6 +149,9 @@ export function ExpandedPlayer({
     playQueueItem,
     stop,
   } = player;
+
+  const [progressPreview, setProgressPreview] = useState(null);
+  const displayedProgress = progressPreview ?? progress;
 
   if (!currentSong) return null;
 
@@ -179,7 +183,8 @@ export function ExpandedPlayer({
               currentSong={currentSong}
               artwork={<AsyncArtworkImage song={currentSong} alt={`${currentSong.track} cover`} className="turntable__art" fallbackSize={28} size={400} priority />}
               isPlaying={isPlaying}
-              progress={progress}
+              isBraking={isSpinningDown}
+              progress={displayedProgress}
               duration={duration}
               rpm={rpm}
               pitchModifier={pitchModifier}
@@ -193,6 +198,7 @@ export function ExpandedPlayer({
               onScratchEnd={endScratch}
               onNeedleLift={setNeedleLifted}
               onEject={stop}
+              onProgressPreview={setProgressPreview}
               onLoadSong={song => {
                 const nextIndex = queue.findIndex(item => (item.songKey || item.id) === (song.songKey || song.id));
                 if (nextIndex >= 0) playQueueItem(nextIndex);
@@ -222,15 +228,18 @@ export function ExpandedPlayer({
 
             <div className="expanded-player__controls-area">
             <div className="expanded-progress">
-            <span className="time-label">{formatTime((progress / 100) * duration)}</span>
+            <span className="time-label">{formatTime((displayedProgress / 100) * duration)}</span>
             <input
               type="range"
               className="progress-bar"
               min={0}
               max={100}
               step={0.1}
-              value={progress}
-              onChange={event => seek(Number(event.target.value))}
+              value={displayedProgress}
+              onChange={event => {
+                setProgressPreview(null);
+                seek(Number(event.target.value));
+              }}
               aria-label="Playback position"
             />
             <span className="time-label">{formatTime(duration)}</span>
@@ -448,7 +457,7 @@ export function SongCard({
   };
 
   const handlePointerDown = (event) => {
-    if (event.target.closest('button')) return;
+    if (event.target.closest('.song-card__menu-btn, .song-card__dl-btn, .song-card__actions')) return;
     longPressTriggeredRef.current = false;
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTriggeredRef.current = true;
@@ -473,9 +482,11 @@ export function SongCard({
   const handlePointerUp = () => {
     clearLongPress();
     if (longPressTriggeredRef.current) {
-      longPressTriggeredRef.current = false;
       pointerRef.current.active = false;
       setDragOffset(0);
+      window.setTimeout(() => {
+        longPressTriggeredRef.current = false;
+      }, 0);
       return;
     }
     if (!pointerRef.current.active) return;
@@ -532,10 +543,36 @@ export function SongCard({
     items[nextIndex].focus();
   };
 
+  const actionItems = [
+    { label: isCurrentSong ? 'Resume' : 'Play', icon: Play, action: onPlay },
+    onPlayNext && { label: 'Next', icon: SkipForward, action: onPlayNext },
+    onAddToQueue && { label: 'Queue', icon: ListMusic, action: onAddToQueue },
+    onToggleLike && { label: isLiked ? 'Unlike' : 'Like', icon: Heart, action: onToggleLike, fill: isLiked ? 'currentColor' : 'none' },
+    onDownload && { label: song.driveFileId ? 'Offline' : 'Download', icon: Download, action: onDownload, disabled: isDownloading },
+    onAddToPlaylist && { label: 'Playlist', icon: Plus, action: onAddToPlaylist },
+    onReview && { label: 'Review', icon: RefreshCw, action: onReview },
+    onInfo && { label: 'Info', icon: Info, action: onInfo },
+    onMoreLikeThis && { label: 'Similar', icon: Sparkles, action: onMoreLikeThis },
+    onMarkDuplicate && { label: 'Duplicate', icon: Copy, action: onMarkDuplicate, danger: true },
+    onRestoreDuplicate && { label: 'Restore', icon: FolderOpen, action: onRestoreDuplicate },
+    onDeleteReady && { label: 'Delete', icon: Trash2, action: onDeleteReady, danger: true },
+  ].filter(Boolean);
+
+  const actionRadius = actionItems.length > 9 ? 132 : actionItems.length > 6 ? 110 : 92;
+  const actionStyle = index => {
+    const angle = actionItems.length <= 1 ? -90 : -164 + ((index / (actionItems.length - 1)) * 148);
+    const radians = angle * (Math.PI / 180);
+    return {
+      '--arc-x': `${Math.cos(radians) * actionRadius}px`,
+      '--arc-y': `${Math.sin(radians) * actionRadius}px`,
+      '--arc-delay': `${index * 24}ms`,
+    };
+  };
+
   return (
     <article
       ref={cardRef}
-      className={`song-card ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''}`}
+      className={`song-card ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''} ${menuOpen ? 'song-card--actions-open' : ''}`}
       style={isReadyLoose && dragOffset ? { transform: `translateX(${dragOffset}px)` } : undefined}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -610,75 +647,16 @@ export function SongCard({
         <MoreHorizontal size={18} />
       </button>
       {menuOpen && (
-        <div ref={menuRef} id={menuId} className="song-card__actions" role="menu" onClick={event => event.stopPropagation()} onKeyDown={handleMenuKeyDown}>
-          <button role="menuitem" onClick={event => runAction(event, onPlay)}>
-            <Play size={15} />
-            <span>Play</span>
-          </button>
-          {onPlayNext && (
-            <button role="menuitem" onClick={event => runAction(event, onPlayNext)}>
-              <SkipForward size={15} />
-              <span>Play next</span>
-            </button>
-          )}
-          {onAddToQueue && (
-            <button role="menuitem" onClick={event => runAction(event, onAddToQueue)}>
-              <ListMusic size={15} />
-              <span>Add to queue</span>
-            </button>
-          )}
-          {onToggleLike && (
-            <button role="menuitem" onClick={event => runAction(event, onToggleLike)}>
-              <Heart size={15} fill={isLiked ? 'currentColor' : 'none'} />
-              <span>{isLiked ? 'Unlike' : 'Like'}</span>
-            </button>
-          )}
-          <button role="menuitem" onClick={event => runAction(event, onDownload)} disabled={isDownloading}>
-            <Download size={15} />
-            <span>{song.driveFileId ? 'Offline' : 'Download'}</span>
-          </button>
-          {onAddToPlaylist && (
-            <button role="menuitem" onClick={event => runAction(event, onAddToPlaylist)}>
-              <Plus size={15} />
-              <span>Playlist</span>
-            </button>
-          )}
-          {onReview && (
-            <button role="menuitem" onClick={event => runAction(event, onReview)}>
-              <RefreshCw size={15} />
-              <span>Source review</span>
-            </button>
-          )}
-          {onInfo && (
-            <button role="menuitem" onClick={event => runAction(event, onInfo)}>
-              <Info size={15} />
-              <span>Song info</span>
-            </button>
-          )}
-          {onMoreLikeThis && (
-            <button role="menuitem" onClick={event => runAction(event, onMoreLikeThis)}>
-              <Sparkles size={15} />
-              <span>More like this</span>
-            </button>
-          )}
-          {onMarkDuplicate && (
-            <button role="menuitem" className="song-card__actions-danger" onClick={event => runAction(event, onMarkDuplicate)}>
-              <Copy size={15} />
-              <span>Mark as duplicate</span>
-            </button>
-          )}
-          {onRestoreDuplicate && (
-            <button role="menuitem" onClick={event => runAction(event, onRestoreDuplicate)}>
-              <FolderOpen size={15} />
-              <span>Restore to Ready</span>
-            </button>
-          )}
-          {onDeleteReady && (
-            <button role="menuitem" className="song-card__actions-danger" onClick={event => runAction(event, onDeleteReady)}>
-              <Trash2 size={15} />
-              <span>Delete</span>
-            </button>
-          )}
+        <div ref={menuRef} id={menuId} className="song-card__actions song-card__actions--arc" role="menu" aria-label={`Actions for ${song.track}`} onClick={event => event.stopPropagation()} onKeyDown={handleMenuKeyDown}>
+          {actionItems.map((item, index) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.label} role="menuitem" className={item.danger ? 'song-card__actions-danger' : ''} style={actionStyle(index)} onClick={event => runAction(event, item.action)} disabled={item.disabled}>
+                <Icon size={16} fill={item.fill || 'none'} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
         </div>
       )}
     </article>

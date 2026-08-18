@@ -27,6 +27,7 @@ import { driveService } from './services/GoogleDriveService.js';
 import { useAudioPlayer } from './hooks/useAudioPlayer.js';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
 import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, MacWorkerTasksPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
+import { ExploreView } from './components/ExploreView.jsx';
 import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
@@ -40,7 +41,7 @@ const EqualizerModal = lazy(() => import('./components/EqualizerModal.jsx').then
 const RecommendationsModal = lazy(() => import('./components/RecommendationsModal.jsx').then(module => ({ default: module.RecommendationsModal })));
 const TasteProfileModal = lazy(() => import('./components/TasteProfileModal.jsx').then(module => ({ default: module.TasteProfileModal })));
 
-const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DUPLICATES: 'duplicates', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
+const VIEWS = { HOME: 'home', EXPLORE: 'explore', LIBRARY: 'library', DUPLICATES: 'duplicates', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
 const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
@@ -86,6 +87,11 @@ function currentGreeting() {
   if (hour < 12) return 'Good morning';
   if (hour < 18) return 'Good afternoon';
   return 'Good evening';
+}
+
+function timestampValue(value) {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number(value) || 0;
 }
 
 function isPlayable(song) {
@@ -179,23 +185,6 @@ function playableStatus(song) {
   return song?.downloadJob?.status || (song?.isCatalogueOnly ? 'catalogue' : 'missing');
 }
 
-function searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, jobBySongKey) {
-  if (!searchQuery || searchQuery.length < 2) return [];
-  const tokens = normalizeText(searchQuery).split(' ').filter(token => token.length >= 2);
-  if (tokens.length === 0) return [];
-  let matches = null;
-  for (const token of tokens) {
-    const keys = catalogueSearchIndex.tokenToKeys.get(token);
-    if (!keys) return [];
-    matches = matches ? new Set([...matches].filter(key => keys.has(key))) : new Set(keys);
-  }
-  return [...(matches || [])]
-    .map(key => catalogueSearchIndex.byKey.get(key))
-    .filter(Boolean)
-    .slice(0, 80)
-    .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
-}
-
 function App() {
   const { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error: authError, login, syncLibrary, setupStatus } = useAuth();
   const player = useAudioPlayer();
@@ -261,7 +250,7 @@ function App() {
   const resumePositionRef = useRef(resumePosition);
 
   useEffect(() => {
-    if (![VIEWS.SEARCH, VIEWS.DOWNLOADS].includes(view) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
+    if (![VIEWS.EXPLORE, VIEWS.DOWNLOADS].includes(view) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
     let cancelled = false;
     catalogueLoadStartedRef.current = true;
     const loadCatalogue = async () => {
@@ -289,7 +278,7 @@ function App() {
         if (!cancelled) setCatalogueLoading(false);
       }
     };
-    const cancel = scheduleIdleWork(loadCatalogue, view === VIEWS.SEARCH ? 150 : 1200);
+    const cancel = scheduleIdleWork(loadCatalogue, view === VIEWS.EXPLORE ? 150 : 1200);
     return () => {
       cancelled = true;
       cancel();
@@ -597,29 +586,6 @@ function App() {
     playlistCount: visiblePlaylists.length,
   }), [allSongs, driveReadySongs.length, visiblePlaylists.length]);
 
-  const catalogueSearchIndex = useMemo(() => {
-    const byKey = new Map();
-    const tokenToKeys = new Map();
-    for (const song of catalogue) {
-      byKey.set(song.songKey, song);
-      const tokens = new Set(normalizeText(`${song.artist} ${song.track}`).split(' ').filter(token => token.length >= 2));
-      for (const token of tokens) {
-        const prefixes = new Set([token]);
-        for (let length = 2; length <= Math.min(6, token.length); length++) prefixes.add(token.slice(0, length));
-        for (const prefix of prefixes) {
-          if (!tokenToKeys.has(prefix)) tokenToKeys.set(prefix, new Set());
-          tokenToKeys.get(prefix).add(song.songKey);
-        }
-      }
-    }
-    return { byKey, tokenToKeys };
-  }, [catalogue]);
-
-  const searchResults = useMemo(() => {
-    return searchCatalogueSongs(searchQuery, catalogueSearchIndex, allSongsByKey, jobBySongKey)
-      .filter(song => !duplicateSongKeySet.has(song.songKey));
-  }, [allSongsByKey, catalogueSearchIndex, duplicateSongKeySet, jobBySongKey, searchQuery]);
-
   const selectedPlaylist = useMemo(() => {
     return visiblePlaylists.find(playlist => playlist.playlistKey === selectedPlaylistKey) || null;
   }, [visiblePlaylists, selectedPlaylistKey]);
@@ -631,6 +597,41 @@ function App() {
       .filter(song => !duplicateSongKeySet.has(song.songKey))
       .map(song => mergeJob(allSongsByKey.get(song.songKey) || song, jobBySongKey));
   }, [allSongs, allSongsByKey, driveReadySongs, duplicateSongKeySet, selectedPlaylistKey, jobBySongKey]);
+
+  const exploreLibrarySongs = useMemo(() => {
+    return [...allSongsByKey.values()]
+      .filter(song => song?.songKey)
+      .filter(song => !deletedSongKeySet.has(song.songKey) && !duplicateSongKeySet.has(song.songKey));
+  }, [allSongsByKey, deletedSongKeySet, duplicateSongKeySet]);
+
+  const exploreBrowseSongs = useMemo(() => {
+    const byKey = new Map(exploreLibrarySongs.map(song => [song.songKey, song]));
+    for (const catalogueSong of catalogue) {
+      if (deletedSongKeySet.has(catalogueSong.songKey) || duplicateSongKeySet.has(catalogueSong.songKey)) continue;
+      if (!byKey.has(catalogueSong.songKey)) byKey.set(catalogueSong.songKey, mergeJob(catalogueSong, jobBySongKey));
+    }
+    return [...byKey.values()].sort((a, b) => String(a.track || '').localeCompare(String(b.track || '')));
+  }, [catalogue, deletedSongKeySet, duplicateSongKeySet, exploreLibrarySongs, jobBySongKey]);
+
+  const likedSongKeys = useMemo(() => {
+    if (!likedPlaylist) return [];
+    return exploreLibrarySongs
+      .filter(song => song.playlistKeys?.includes(likedPlaylist.playlistKey))
+      .map(song => song.songKey);
+  }, [exploreLibrarySongs, likedPlaylist]);
+
+  const recentlyAdded = useMemo(() => {
+    return [...exploreLibrarySongs]
+      .sort((a, b) => timestampValue(b.updatedAt || b.createdAt || b.cachedAt) - timestampValue(a.updatedAt || a.createdAt || a.cachedAt))
+      .slice(0, 10);
+  }, [exploreLibrarySongs]);
+
+  const continueListening = useMemo(() => {
+    return [...exploreLibrarySongs]
+      .filter(song => Number(song.lastPlayedAt) || Number(song.playCount))
+      .sort((a, b) => Number(b.lastPlayedAt || 0) - Number(a.lastPlayedAt || 0) || (Number(b.playCount) || 0) - (Number(a.playCount) || 0))
+      .slice(0, 10);
+  }, [exploreLibrarySongs]);
 
   const duplicateSongs = useMemo(() => {
     return driveDuplicateSongs
@@ -1373,25 +1374,14 @@ function App() {
 
   const bannerError = authError || actionError || player.error || localDbError;
   const bannerStatus = bannerError || syncStatus;
-  const effectivePageLimit = [VIEWS.LIBRARY, VIEWS.DUPLICATES].includes(view) ? pageLimit : PAGE_SIZE;
-
   const navItems = [
     { id: VIEWS.HOME, icon: Home, label: 'Home' },
-    { id: VIEWS.SEARCH, icon: Search, label: 'Search' },
+    { id: VIEWS.EXPLORE, icon: Search, label: 'Explore' },
     { id: VIEWS.LIBRARY, icon: Library, label: 'Ready' },
     { id: VIEWS.DUPLICATES, icon: Copy, label: `Duplicates${duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}` },
     { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads' },
     { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy' },
   ];
-
-  let displaySongs = [];
-  if (view === VIEWS.SEARCH) {
-    displaySongs = searchResults;
-  } else if (view === VIEWS.LIBRARY) {
-    displaySongs = librarySongs.slice(0, effectivePageLimit);
-  } else if (view === VIEWS.DUPLICATES) {
-    displaySongs = duplicateSongs.slice(0, effectivePageLimit);
-  }
 
   const renderSongCard = (song, list) => (
     <SongCard
@@ -1571,8 +1561,26 @@ function App() {
                   <TrendingUp size={18} style={{ marginRight: 8, verticalAlign: 'middle' }} />
                   Most Played
                 </h2>
-                <div className="songs-grid">
+                <div className="content-rail">
                   {topPlayed.map(song => renderSongCard(song, topPlayed))}
+                </div>
+              </section>
+            )}
+
+            {continueListening.length > 0 && (
+              <section className="home-section">
+                <h2 className="home-section__title">Continue listening</h2>
+                <div className="content-rail">
+                  {continueListening.map(song => renderSongCard(song, continueListening))}
+                </div>
+              </section>
+            )}
+
+            {recentlyAdded.length > 0 && (
+              <section className="home-section">
+                <h2 className="home-section__title">Recently added</h2>
+                <div className="content-rail">
+                  {recentlyAdded.map(song => renderSongCard(song, recentlyAdded))}
                 </div>
               </section>
             )}
@@ -1580,7 +1588,7 @@ function App() {
             {availableSongs.length > 0 && (
               <section className="home-section">
                 <h2 className="home-section__title">Ready to Play</h2>
-                <div className="songs-grid">
+                <div className="content-rail">
                   {availableSongs.slice(0, 8).map(song => renderSongCard(song, availableSongs))}
                 </div>
               </section>
@@ -1618,47 +1626,15 @@ function App() {
           </>
         )}
 
-        {view === VIEWS.SEARCH && (
-          <>
-            <header className="main-view__header">
-              <h1 className="main-view__title">Search</h1>
-              <div className="search-box">
-                <Search size={18} className="search-box__icon" />
-                <input
-                  type="search"
-                  placeholder="Search songs, artists"
-                  value={searchQuery}
-                  onChange={event => setSearchQuery(event.target.value)}
-                  autoComplete="off"
-                  autoFocus
-                />
-              </div>
-            </header>
-
-            {searchQuery.length < 2 ? (
-              <div className="empty-state">
-                <Search size={48} color="var(--text-muted)" />
-                <h3>Search your library</h3>
-                <p>{catalogueLoading ? 'Loading your searchable catalogue…' : `Find any of your ${catalogue.length.toLocaleString()} songs by name or artist`}</p>
-              </div>
-            ) : catalogueLoading ? (
-              <div className="empty-state" role="status">
-                <Search size={48} color="var(--text-muted)" />
-                <h3>Loading catalogue</h3>
-                <p>Preparing search results…</p>
-              </div>
-            ) : searchResults.length === 0 ? (
-              <div className="empty-state">
-                <Music2 size={48} color="var(--text-muted)" />
-                <h3>No results</h3>
-                <p>Try a different search term</p>
-              </div>
-            ) : (
-              <div className="songs-grid">
-                {displaySongs.map(song => renderSongCard(song, searchResults))}
-              </div>
-            )}
-          </>
+        {view === VIEWS.EXPLORE && (
+          <ExploreView
+            browseSongs={exploreBrowseSongs}
+            librarySongs={exploreLibrarySongs}
+            playbackEvents={playbackEvents}
+            likedSongKeys={likedSongKeys}
+            catalogueLoading={catalogueLoading}
+            renderSong={renderSongCard}
+          />
         )}
 
         {view === VIEWS.LIBRARY && (
