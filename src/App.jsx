@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
