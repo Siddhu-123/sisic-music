@@ -1,4 +1,5 @@
 const DEFAULT_CHUNK_BYTES = 256 * 1024;
+const MAX_RANGE_BYTES = 8 * 1024 * 1024;
 
 let driveAccessToken = '';
 let driveTokenVersion = '';
@@ -23,6 +24,8 @@ async function requestDriveToken() {
 }
 
 async function notifyDriveAuthFailure(message) {
+  driveAccessToken = '';
+  fileMetadataCache.clear();
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   clients.forEach(client => client.postMessage({
     type: 'SISIC_DRIVE_AUTH_ERROR',
@@ -39,11 +42,36 @@ self.addEventListener('activate', event => {
   event.waitUntil(self.clients.claim());
 });
 
+function isTrustedMessage(event) {
+  if (event.origin && event.origin !== self.location.origin) return false;
+  const sourceUrl = event.source?.url;
+  if (!sourceUrl) return true;
+  try {
+    return new URL(sourceUrl).origin === self.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 self.addEventListener('message', event => {
+  if (!isTrustedMessage(event)) return;
   if (event.data?.type === 'SISIC_DRIVE_TOKEN') {
-    driveAccessToken = event.data.accessToken || '';
-    driveTokenVersion = event.data.tokenVersion || '';
+    if (typeof event.data.accessToken !== 'string') return;
+    const nextToken = event.data.accessToken.trim();
+    if (!nextToken || nextToken.length > 4096) return;
+    const nextVersion = typeof event.data.tokenVersion === 'string'
+      ? event.data.tokenVersion.slice(0, 128)
+      : '';
+    if (nextToken !== driveAccessToken || nextVersion !== driveTokenVersion) {
+      fileMetadataCache.clear();
+    }
+    driveAccessToken = nextToken;
+    driveTokenVersion = nextVersion;
     tokenWaiters.forEach(resolve => resolve(Boolean(driveAccessToken)));
+  } else if (event.data?.type === 'SISIC_DRIVE_CLEAR_TOKEN') {
+    driveAccessToken = '';
+    driveTokenVersion = '';
+    fileMetadataCache.clear();
   }
 });
 
@@ -143,10 +171,14 @@ async function getFileMetadata(fileId) {
     throw error;
   }
 
+  const MAX_AUDIO_FILE_SIZE_BYTES = 500 * 1024 * 1024;
   const metadata = await response.json();
   const size = Number(metadata.size || 0);
   if (!Number.isFinite(size) || size <= 0) {
     throw new Error('Drive file size is unavailable.');
+  }
+  if (size > MAX_AUDIO_FILE_SIZE_BYTES) {
+    throw new Error(`Drive file size (${size} bytes) exceeds maximum supported limit (500MB).`);
   }
 
   let mimeType = metadata.mimeType || 'audio/mpeg';
@@ -192,9 +224,12 @@ function requestedRange(rangeHeader, fileSize) {
 
   if (!Number.isFinite(start) || start < 0) start = 0;
   if (!Number.isFinite(end) || end < start) end = start + DEFAULT_CHUNK_BYTES - 1;
+  if (!Number.isSafeInteger(start)) start = 0;
+  if (!Number.isSafeInteger(end)) end = start + DEFAULT_CHUNK_BYTES - 1;
+  const boundedStart = Math.min(start, fileSize - 1);
   return {
-    start: Math.min(start, fileSize - 1),
-    end: Math.min(end, fileSize - 1),
+    start: boundedStart,
+    end: Math.min(end, boundedStart + MAX_RANGE_BYTES - 1, fileSize - 1),
   };
 }
 
