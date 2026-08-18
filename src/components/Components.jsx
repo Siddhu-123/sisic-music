@@ -14,7 +14,6 @@ import {
   AlertTriangle,
   Cloud,
   HardDriveDownload,
-  MoreHorizontal,
   Plus,
   Trash2,
   ChevronDown,
@@ -440,7 +439,6 @@ export function SongCard({
   const menuId = useId();
   const cardRef = useRef(null);
   const menuRef = useRef(null);
-  const menuButtonRef = useRef(null);
   const longPressTimerRef = useRef(null);
   const longPressTriggeredRef = useRef(false);
   const pointerRef = useRef({ active: false, startX: 0, offset: 0, swiped: false });
@@ -456,8 +454,22 @@ export function SongCard({
     action?.(song);
   };
 
+  const openMenu = () => setMenuOpen(true);
+
+  const handleCardContextMenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openMenu();
+  };
+
+  const handleCardKeyDown = event => {
+    if (event.defaultPrevented || !(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return;
+    event.preventDefault();
+    openMenu();
+  };
+
   const handlePointerDown = (event) => {
-    if (event.target.closest('.song-card__menu-btn, .song-card__dl-btn, .song-card__actions')) return;
+    if (event.target.closest('.song-card__dl-btn, .song-card__actions')) return;
     longPressTriggeredRef.current = false;
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTriggeredRef.current = true;
@@ -513,7 +525,7 @@ export function SongCard({
     const handleEscape = event => {
       if (event.key !== 'Escape') return;
       closeMenu();
-      menuButtonRef.current?.focus();
+      cardRef.current?.querySelector('.song-card__primary')?.focus();
     };
     document.addEventListener('pointerdown', handlePointerDownOutside);
     document.addEventListener('keydown', handleEscape);
@@ -558,9 +570,9 @@ export function SongCard({
     onDeleteReady && { label: 'Delete', icon: Trash2, action: onDeleteReady, danger: true },
   ].filter(Boolean);
 
-  const actionRadius = actionItems.length > 9 ? 132 : actionItems.length > 6 ? 110 : 92;
+  const actionRadius = actionItems.length > 9 ? 190 : actionItems.length > 6 ? 150 : 112;
   const actionStyle = index => {
-    const angle = actionItems.length <= 1 ? -90 : -164 + ((index / (actionItems.length - 1)) * 148);
+    const angle = actionItems.length <= 1 ? -90 : -170 + ((index / (actionItems.length - 1)) * 160);
     const radians = angle * (Math.PI / 180);
     return {
       '--arc-x': `${Math.cos(radians) * actionRadius}px`,
@@ -578,6 +590,7 @@ export function SongCard({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onContextMenu={handleCardContextMenu}
     >
       <button
         className="song-card__primary"
@@ -585,6 +598,10 @@ export function SongCard({
           if (pointerRef.current.swiped) return;
           onPlay(song);
         }}
+        onKeyDown={handleCardKeyDown}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        aria-controls={menuOpen ? menuId : undefined}
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
       >
         <div className="song-card__art-wrapper">
@@ -631,21 +648,6 @@ export function SongCard({
           }
         </button>
       </div>
-      <button
-        ref={menuButtonRef}
-        className="song-card__menu-btn"
-        onClick={event => {
-          event.stopPropagation();
-          setMenuOpen(open => !open);
-        }}
-        aria-label="Song actions"
-        aria-expanded={menuOpen}
-        aria-controls={menuOpen ? menuId : undefined}
-        aria-haspopup="menu"
-        title="Song actions"
-      >
-        <MoreHorizontal size={18} />
-      </button>
       {menuOpen && (
         <div ref={menuRef} id={menuId} className="song-card__actions song-card__actions--arc" role="menu" aria-label={`Actions for ${song.track}`} onClick={event => event.stopPropagation()} onKeyDown={handleMenuKeyDown}>
           {actionItems.map((item, index) => {

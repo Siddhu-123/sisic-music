@@ -21,7 +21,6 @@ const TRACK_NOISE_WORDS = new Set([
   'single',
   'the',
   'version',
-  'video',
   'visualizer',
   'with',
 ]);
