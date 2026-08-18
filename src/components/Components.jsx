@@ -26,8 +26,10 @@ import {
   RefreshCw,
   Link2,
   X,
+  Sliders,
+  Sparkles,
 } from 'lucide-react';
-import { useDialogFocus } from '../hooks/useDialogFocus';
+import { useDialogFocus } from '../hooks/useDialogFocus.js';
 import {
   TONEARM_LIFTED_ANGLE,
   TONEARM_START_ANGLE,
@@ -37,7 +39,46 @@ import {
   tonearmProgressFromAngle,
   vinylSecondsFromDegrees,
   wrappedAngleDelta,
-} from '../vinylPhysics';
+} from '../vinylPhysics.js';
+import { getSongArtwork } from '../services/artworkService.js';
+
+export function AsyncArtworkImage({ song, className = '', fallbackSize = 24, alt = '' }) {
+  const [fetchedArtUrl, setFetchedArtUrl] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    if (!song || song.coverArtUrl) return undefined;
+    getSongArtwork(song).then(res => {
+      if (active && res?.coverArtUrl) {
+        setFetchedArtUrl(res.coverArtUrl);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [song]);
+
+  const artUrl = song?.coverArtUrl || fetchedArtUrl;
+  const hue = song?.track ? song.track.charCodeAt(0) % 360 : 200;
+
+  if (artUrl) {
+    return (
+      <img
+        src={artUrl}
+        alt={alt || `${song?.track || 'Song'} cover`}
+        className={className}
+        loading="lazy"
+      />
+    );
+  }
+
+  return (
+    <div
+      className={`${className} artwork-fallback`}
+      style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 35%), hsl(${(hue + 60) % 360}, 70%, 20%))` }}
+    >
+      <span style={{ fontSize: `${fallbackSize}px` }}>♪</span>
+    </div>
+  );
+}
 
 function formatTime(seconds) {
   if (!seconds || Number.isNaN(seconds)) return '0:00';
@@ -75,6 +116,8 @@ export function ExpandedPlayer({
   onDownload,
   onPlayNext,
   onAddToQueue,
+  onOpenEqualizer,
+  onMoreLikeThis,
 }) {
   const {
     currentSong,
@@ -243,6 +286,18 @@ export function ExpandedPlayer({
     <div className="expanded-player">
       <div className="expanded-player__bg" style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 15%), hsl(${(hue + 60) % 360}, 70%, 5%))` }} />
       <div className="expanded-player__header">
+        <div style={{ display: 'flex', gap: '8px' }}>
+          {onOpenEqualizer && (
+            <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onOpenEqualizer(); }} aria-label="Equalizer" title="Equalizer">
+              <Sliders size={22} color="white" />
+            </button>
+          )}
+          {onMoreLikeThis && (
+            <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onMoreLikeThis(currentSong); }} aria-label="More Like This" title="More Like This">
+              <Sparkles size={22} color="white" />
+            </button>
+          )}
+        </div>
         <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onClose(); }} aria-label="Minimize player">
           <ChevronDown size={28} color="white" />
         </button>
@@ -402,6 +457,8 @@ export function PlayerBar({
   onDownload,
   onPlayNext,
   onAddToQueue,
+  onOpenEqualizer,
+  onMoreLikeThis,
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hue = player.currentSong ? player.currentSong.track.charCodeAt(0) % 360 : 0;
@@ -426,7 +483,7 @@ export function PlayerBar({
       <div className="player-song-info" onClick={() => currentSong && setIsExpanded(true)} style={{ cursor: currentSong ? 'pointer' : 'default' }}>
         {currentSong ? (
           <>
-            <div className="player-thumb" />
+            <AsyncArtworkImage song={currentSong} className="player-thumb" fallbackSize={16} />
             <div className="player-meta">
               <span className="player-track">{currentSong.track}</span>
               <span className="player-artist">{currentSong.artist}</span>
@@ -510,6 +567,8 @@ export function PlayerBar({
           onDownload={onDownload}
           onPlayNext={onPlayNext}
           onAddToQueue={onAddToQueue}
+          onOpenEqualizer={onOpenEqualizer}
+          onMoreLikeThis={onMoreLikeThis}
         />
       )}
     </div>
@@ -526,11 +585,11 @@ export function SongCard({
   onDeleteReady,
   onReview,
   onInfo,
+  onMoreLikeThis,
   isReadyLoose = false,
   isCurrentSong,
   isDownloading,
 }) {
-  const hue = song.track.charCodeAt(0) % 360;
   const status = statusDetails(song);
   const StatusIcon = status.icon;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -631,14 +690,11 @@ export function SongCard({
         }}
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
       >
-        <div
-          className="song-card__art"
-          style={{ background: `linear-gradient(135deg, hsl(${hue}, 70%, 35%), hsl(${(hue + 60) % 360}, 70%, 20%))` }}
-        >
-          {isCurrentSong
-            ? <div className="song-card__playing-bars"><span /><span /><span /></div>
-            : <Play size={32} className="song-card__play-icon" fill="white" />
-          }
+        <div className="song-card__art-wrapper">
+          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} />
+          {isCurrentSong && (
+            <div className="song-card__playing-bars"><span /><span /><span /></div>
+          )}
         </div>
         <div className="song-card__info">
           <p className="song-card__title">{song.track}</p>
@@ -731,6 +787,12 @@ export function SongCard({
             <button role="menuitem" onClick={event => runAction(event, onInfo)}>
               <Info size={15} />
               <span>Song info</span>
+            </button>
+          )}
+          {onMoreLikeThis && (
+            <button role="menuitem" onClick={event => runAction(event, onMoreLikeThis)}>
+              <Sparkles size={15} />
+              <span>More like this</span>
             </button>
           )}
           {onDeleteReady && (

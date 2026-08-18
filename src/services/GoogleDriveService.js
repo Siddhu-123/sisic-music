@@ -5,11 +5,15 @@ import {
   findSimilarSongMatch,
   getSongKey,
   jobFilePrefix,
-} from '../songIdentity';
-import { tokenExpiryFromResponse } from './driveAuth';
+} from '../songIdentity.js';
+import { tokenExpiryFromResponse } from './driveAuth.js';
 
-const SCOPES = [
-  'https://www.googleapis.com/auth/drive',
+// drive.file limits writes to files created/opened by Sisic. The read-only
+// scope remains necessary because a configured Spotify export may predate the
+// app and therefore may not be visible through drive.file alone.
+export const SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.readonly',
 ].join(' ');
 
 const TOKEN_STORAGE_KEY = 'sisic_access_token';
@@ -30,22 +34,49 @@ const JOB_FILE_FIELDS = 'files(id,name,modifiedTime,appProperties)';
 const AUDIO_FILE_FIELDS = 'files(id,name,mimeType,size,modifiedTime,appProperties)';
 const FILE_METADATA_FIELDS = 'id,name,mimeType,size,appProperties';
 
-function getClientInstanceId() {
+function safeStorageGet(key) {
   try {
-    const existing = localStorage.getItem(CLIENT_INSTANCE_STORAGE_KEY);
-    if (existing) return existing;
-    const next = `web-${crypto.randomUUID()}`;
-    localStorage.setItem(CLIENT_INSTANCE_STORAGE_KEY, next);
-    return next;
+    return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
   } catch {
-    return 'web';
+    return null;
   }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, value);
+  } catch (error) {
+    console.warn(`Storage set error for key ${key}:`, error);
+  }
+}
+
+function safeStorageRemove(key) {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(key);
+  // eslint-disable-next-line no-empty
+  } catch {}
+}
+
+function getClientInstanceId() {
+  const existing = safeStorageGet(CLIENT_INSTANCE_STORAGE_KEY);
+  if (existing) return existing;
+  const next = typeof crypto !== 'undefined' && crypto.randomUUID ? `web-${crypto.randomUUID()}` : `web-${Date.now()}`;
+  safeStorageSet(CLIENT_INSTANCE_STORAGE_KEY, next);
+  return next;
 }
 
 const CLIENT_INSTANCE_ID = getClientInstanceId();
 
-function escapeDriveQuery(value = '') {
-  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+export function escapeDriveQuery(value = '') {
+  return String(value || '')
+    .split('')
+    .filter(ch => {
+      const code = ch.charCodeAt(0);
+      return (code >= 32 && code !== 127 && !(code >= 128 && code <= 159));
+    })
+    .join('')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
 }
 
 function normalizeJob(raw, file = {}) {
@@ -179,18 +210,17 @@ function normalizeDeletedEntry(songInput = {}, extra = {}) {
 class GoogleDriveService {
   constructor() {
     this.tokenClient = null;
-    const storedScopes = localStorage.getItem(TOKEN_SCOPE_STORAGE_KEY) || '';
-    const hasCurrentScopes = storedScopes === SCOPES;
-    this.accessToken = hasCurrentScopes ? localStorage.getItem(TOKEN_STORAGE_KEY) || null : null;
-    this.tokenExpiry = hasCurrentScopes ? Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || null : null;
-    this.tokenVersion = hasCurrentScopes ? localStorage.getItem(TOKEN_VERSION_STORAGE_KEY) || '' : '';
-    this.hasAuthorizedSession = localStorage.getItem(AUTH_HISTORY_STORAGE_KEY) === 'true' || Boolean(this.accessToken);
-    if (!hasCurrentScopes) {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      localStorage.removeItem(EXPIRY_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_VERSION_STORAGE_KEY);
-    }
+    // Access tokens are intentionally memory-only. Remove values written by
+    // older builds so an upgrade does not leave a usable token in storage.
+    const hadLegacyToken = Boolean(safeStorageGet(TOKEN_STORAGE_KEY));
+    this.accessToken = null;
+    this.tokenExpiry = null;
+    this.tokenVersion = '';
+    this.hasAuthorizedSession = safeStorageGet(AUTH_HISTORY_STORAGE_KEY) === 'true' || hadLegacyToken;
+    safeStorageRemove(TOKEN_STORAGE_KEY);
+    safeStorageRemove(EXPIRY_STORAGE_KEY);
+    safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
+    safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
     this.jobCache = new Map();
     this.indexFileCache = new Map();
     this.songIndexCache = null;
@@ -204,22 +234,40 @@ class GoogleDriveService {
   _persistToken(token, expiry, tokenVersion = '') {
     this.accessToken = token;
     this.tokenExpiry = expiry;
-    this.tokenVersion = token ? (tokenVersion || crypto.randomUUID()) : '';
+    this.tokenVersion = token ? (tokenVersion || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))) : '';
     if (token && expiry) this.authRequired = false;
     if (token && expiry) {
       this.hasAuthorizedSession = true;
-      localStorage.setItem(TOKEN_STORAGE_KEY, token);
-      localStorage.setItem(EXPIRY_STORAGE_KEY, String(expiry));
-      localStorage.setItem(TOKEN_SCOPE_STORAGE_KEY, SCOPES);
-      localStorage.setItem(TOKEN_VERSION_STORAGE_KEY, this.tokenVersion);
-      localStorage.setItem(AUTH_HISTORY_STORAGE_KEY, 'true');
+      safeStorageSet(AUTH_HISTORY_STORAGE_KEY, 'true');
+      // Never persist the bearer token. The non-secret auth history flag only
+      // lets the next session request a silent token first.
+      safeStorageRemove(TOKEN_STORAGE_KEY);
+      safeStorageRemove(EXPIRY_STORAGE_KEY);
+      safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
+      safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
     } else {
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
-      localStorage.removeItem(EXPIRY_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_SCOPE_STORAGE_KEY);
-      localStorage.removeItem(TOKEN_VERSION_STORAGE_KEY);
+      safeStorageRemove(TOKEN_STORAGE_KEY);
+      safeStorageRemove(EXPIRY_STORAGE_KEY);
+      safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
+      safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
     }
-    if (token) this.syncTokenToServiceWorker();
+    if (token) {
+      this.syncTokenToServiceWorker();
+    } else {
+      this.clearServiceWorkerToken();
+    }
+  }
+
+  clearServiceWorkerToken() {
+    if (typeof navigator === 'undefined') return;
+    const message = { type: 'SISIC_DRIVE_CLEAR_TOKEN' };
+    const controller = navigator.serviceWorker?.controller;
+    if (controller) controller.postMessage(message);
+    navigator.serviceWorker?.ready?.then(registration => {
+      if (registration.active && registration.active !== controller) {
+        registration.active.postMessage(message);
+      }
+    }).catch(() => {});
   }
 
   syncTokenToServiceWorker(target = null) {
@@ -241,14 +289,13 @@ class GoogleDriveService {
   }
 
   adoptStoredToken() {
-    const storedScopes = localStorage.getItem(TOKEN_SCOPE_STORAGE_KEY) || '';
-    const accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
-    const expiry = Number(localStorage.getItem(EXPIRY_STORAGE_KEY)) || 0;
-    const tokenVersion = localStorage.getItem(TOKEN_VERSION_STORAGE_KEY) || '';
-    if (storedScopes !== SCOPES || !accessToken || expiry <= Date.now()) return false;
-    if (tokenVersion === this.tokenVersion && accessToken === this.accessToken) return this.isAuthenticated;
-    this._persistToken(accessToken, expiry, tokenVersion);
-    return true;
+    // Kept as a migration hook for callers from older builds. Tokens are no
+    // longer restored from localStorage.
+    safeStorageRemove(TOKEN_STORAGE_KEY);
+    safeStorageRemove(EXPIRY_STORAGE_KEY);
+    safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
+    safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
+    return false;
   }
 
   subscribeAuthRequired(listener) {

@@ -43,6 +43,18 @@ export function useAuth() {
       if (window.google?.accounts?.oauth2) {
         driveService.initTokenClient(CLIENT_ID);
         driveService.syncTokenToServiceWorker();
+        if (driveService.hasAuthorizedSession && !driveService.isAuthenticated) {
+          driveService.requestToken()
+            .then(() => {
+              setIsAuthenticated(true);
+              setHasAuthorizedSession(true);
+              setError('');
+            })
+            .catch(() => {
+              // Silent restore is best-effort. The reconnect action remains
+              // available when Google requires user interaction.
+            });
+        }
         return true;
       }
       return false;

@@ -1,5 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
+  cacheSongBlob,
+  enforceAudioCacheLimit,
+  getCachedSongAudio,
+} from '../db.js';
+import {
   dedupeQueue,
   insertAfter,
   insertAtEnd,
@@ -9,10 +14,12 @@ import {
   reorderQueue,
   restoreQueueState,
   serializeQueueState,
-} from '../queueManager';
-import { driveService } from '../services/GoogleDriveService';
+} from '../queueManager.js';
+import { driveService } from '../services/GoogleDriveService.js';
+import { audioGraph, EQ_PRESETS } from '../services/audioGraph.js';
 
 const MIN_CACHED_AUDIO_BYTES = 16 * 1024;
+const MAX_PREFETCH_BYTES = 50 * 1024 * 1024;
 const QUEUE_STORAGE_KEY = 'sisic:queue-state:v1';
 let streamWorkerReadyPromise = null;
 
@@ -131,7 +138,16 @@ function readPersistedQueueState() {
 }
 
 export function useAudioPlayer() {
-  const audioRef = useRef(new Audio());
+  const audioRef = useRef(typeof Audio !== 'undefined' ? new Audio() : {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    play: () => Promise.resolve(),
+    pause: () => {},
+    load: () => {},
+    removeAttribute: () => {},
+    setAttribute: () => {},
+    getAttribute: () => '',
+  });
   const [restoredInitialState] = useState(() => readPersistedQueueState());
   const [currentSong, setCurrentSong] = useState(null);
   const [queue, setQueue] = useState(() => restoredInitialState?.queue || []);
@@ -146,6 +162,11 @@ export function useAudioPlayer() {
   const [resumeOnRestore, setResumeOnRestore] = useState(() => Boolean(restoredInitialState?.isPlaying));
   const [resumePosition, setResumePosition] = useState(() => restoredInitialState?.positionSeconds || 0);
   const [playbackEvent, setPlaybackEvent] = useState(null);
+  const [eqPreset, setEqPresetState] = useState('flat');
+  const [eqGains, setEqGainsState] = useState(() => [...EQ_PRESETS.flat.gains]);
+  const prefetchedSongsRef = useRef(new Set());
+  const prefetchingSongsRef = useRef(new Set());
+  const volumeRef = useRef(1);
   const blobUrlRef = useRef(null);
   const playedInSessionRef = useRef(new Set());
   const failedSongKeysRef = useRef(new Set());
@@ -286,7 +307,8 @@ export function useAudioPlayer() {
       return false;
     }
 
-    audio.volume = volume;
+    audio.volume = audioGraph.isAttachedTo(audio) ? 1 : volume;
+    if (audioGraph.isAttachedTo(audio)) audioGraph.setVolume(volume);
     const restoreSeconds = Math.max(0, Number(startAt) || 0);
     if (restoreSeconds > 0) {
       const applyRestorePosition = () => {
@@ -446,9 +468,51 @@ export function useAudioPlayer() {
     });
   }, [queue, queueIndex]);
 
+  const prefetchNextSong = useCallback(async () => {
+    const activeQueue = queueRef.current;
+    const activeIndex = queueIndexRef.current;
+    const current = activeQueue[activeIndex];
+    const currentKey = current?.songKey || '';
+    if (!currentKey || prefetchedSongsRef.current.has(currentKey) || prefetchingSongsRef.current.has(currentKey)) return;
+    const nextIdx = nextUnfailedIndex(activeQueue, activeIndex, failedSongKeysRef.current, false, repeatModeRef.current);
+    if (nextIdx < 0 || nextIdx >= activeQueue.length) return;
+    const nextSong = activeQueue[nextIdx];
+    if (!nextSong || !nextSong.driveFileId) return;
+
+    prefetchingSongsRef.current.add(currentKey);
+    try {
+      if (!driveService.isAuthenticated) return;
+      const cached = nextSong.songKey ? await getCachedSongAudio(nextSong.songKey) : null;
+      if (cached || hasUsableCachedAudio(nextSong)) {
+        prefetchedSongsRef.current.add(currentKey);
+        return;
+      }
+      const metadata = await driveService.getAudioFileMetadata(nextSong.driveFileId);
+      const size = Number(nextSong.size || metadata?.size || 0);
+      if (!metadata || !size || size > MAX_PREFETCH_BYTES) return;
+      const blob = await driveService.downloadFileAsBlob(nextSong.driveFileId);
+      await cacheSongBlob(nextSong.songKey, blob, nextSong.driveFileId);
+      await enforceAudioCacheLimit();
+      prefetchedSongsRef.current.add(currentKey);
+    } catch (e) {
+      console.debug('Predictive prefetch non-fatal:', e);
+    } finally {
+      prefetchingSongsRef.current.delete(currentKey);
+    }
+  }, []);
+
   useEffect(() => {
     const audio = audioRef.current;
-    const onPlay = () => setIsPlaying(true);
+    const onPlay = () => {
+      setIsPlaying(true);
+      if (typeof window !== 'undefined') {
+        const context = audioGraph.attachAudioElement(audio);
+        if (context) {
+          audio.volume = 1;
+          audioGraph.setVolume(volumeRef.current);
+        }
+      }
+    };
     const onPause = () => setIsPlaying(false);
     const onEnded = () => {
       const durationSeconds = Number(audio.duration || 0);
@@ -478,7 +542,13 @@ export function useAudioPlayer() {
       }
     };
     const onTimeUpdate = () => {
-      if (audio.duration) setProgress((audio.currentTime / audio.duration) * 100);
+      if (audio.duration) {
+        const pct = (audio.currentTime / audio.duration) * 100;
+        setProgress(pct);
+        if (pct >= 70 && audio.duration >= 15 && currentSong?.songKey && !prefetchedSongsRef.current.has(currentSong.songKey)) {
+          prefetchNextSong();
+        }
+      }
       if (Date.now() - lastPersistedAtRef.current > 1000) {
         lastPersistedAtRef.current = Date.now();
         persistQueueState();
@@ -536,7 +606,54 @@ export function useAudioPlayer() {
       audio.removeEventListener('durationchange', onDurationChange);
       audio.removeEventListener('error', onError);
     };
-  }, [emitPlaybackEvent, loadAndPlay, persistQueueState, playNext, repeatMode, currentSong]);
+  }, [emitPlaybackEvent, loadAndPlay, persistQueueState, playNext, repeatMode, currentSong, prefetchNextSong]);
+
+  const setEqPreset = useCallback((presetKey) => {
+    audioGraph.applyPreset(presetKey);
+    setEqPresetState(presetKey);
+    setEqGainsState([...(EQ_PRESETS[presetKey]?.gains || [0, 0, 0, 0, 0])]);
+  }, []);
+
+  const setBandGain = useCallback((bandIndex, gainDb) => {
+    audioGraph.setBandGain(bandIndex, gainDb);
+    setEqPresetState('custom');
+    setEqGainsState([...audioGraph.currentGains]);
+  }, []);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator) || !currentSong) return;
+
+    try {
+      const artwork = currentSong.coverArtUrl && !currentSong.coverArtUrl.startsWith('data:')
+        ? [{ src: currentSong.coverArtUrl, sizes: '512x512', type: 'image/jpeg' }]
+        : [];
+
+      if (typeof window !== 'undefined' && window.MediaMetadata) {
+        navigator.mediaSession.metadata = new window.MediaMetadata({
+          title: currentSong.track || 'Unknown Track',
+          artist: currentSong.artist || 'Unknown Artist',
+          album: currentSong.album || 'Sisic Music',
+          artwork,
+        });
+      }
+
+      navigator.mediaSession.setActionHandler('play', () => {
+        if (audioRef.current.paused) audioRef.current.play().catch(() => {});
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        if (!audioRef.current.paused) audioRef.current.pause();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => playPrev({ reason: 'user-media-session' }));
+      navigator.mediaSession.setActionHandler('nexttrack', () => playNext({ reason: 'user-media-session' }));
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (details.seekTime != null && Number.isFinite(details.seekTime)) {
+          audioRef.current.currentTime = details.seekTime;
+        }
+      });
+    } catch (e) {
+      console.debug('MediaSession setup non-fatal:', e);
+    }
+  }, [currentSong, playNext, playPrev]);
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current;
@@ -602,8 +719,18 @@ export function useAudioPlayer() {
   }, [currentSong, emitPlaybackEvent]);
 
   const changeVolume = useCallback((v) => {
-    audioRef.current.volume = v;
-    setVolume(v);
+    const nextVolume = Math.max(0, Math.min(1, Number(v) || 0));
+    const audio = audioRef.current;
+    volumeRef.current = nextVolume;
+    if (audioGraph.isAttachedTo(audio)) {
+      // MediaElementAudioSourceNode already includes the element's volume;
+      // keep it at unity and apply the user's volume exactly once in the graph.
+      audio.volume = 1;
+      audioGraph.setVolume(nextVolume);
+    } else {
+      audio.volume = nextVolume;
+    }
+    setVolume(nextVolume);
   }, []);
 
   const clearError = useCallback(() => setError(''), []);
@@ -829,5 +956,10 @@ export function useAudioPlayer() {
     playQueueItem,
     toggleShuffle,
     toggleRepeat,
+    eqPreset,
+    eqGains,
+    setEqPreset,
+    setBandGain,
+    audioGraph,
   };
 }

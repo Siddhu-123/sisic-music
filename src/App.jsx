@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
@@ -20,21 +20,25 @@ import {
   updateSongPipelineStatus,
   updateSyncOutbox,
   upsertSongToDb,
-} from './db';
-import { driveService } from './services/GoogleDriveService';
-import { useAudioPlayer } from './hooks/useAudioPlayer';
-import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth';
-import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components';
-import { QueuePanel } from './components/QueuePanel';
-import { ToastContainer } from './components/Toast';
-import { useToast } from './hooks/useToast';
-import { useDialogFocus } from './hooks/useDialogFocus';
-import { asSongRecord, getSongKey, normalizeText } from './songIdentity';
-import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService';
-import { processPendingEmbeddingJobs } from './services/embeddingService';
+} from './db.js';
+import { driveService } from './services/GoogleDriveService.js';
+import { useAudioPlayer } from './hooks/useAudioPlayer.js';
+import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
+import { DownloadStatusPanel, ImportStatusPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
+import { QueuePanel } from './components/QueuePanel.jsx';
+import { ToastContainer } from './components/Toast.jsx';
+import { useToast } from './hooks/useToast.js';
+import { useDialogFocus } from './hooks/useDialogFocus.js';
+import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
+import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService.js';
+import { processPendingEmbeddingJobs } from './services/embeddingService.js';
+import { ConstellationView } from './components/views/ConstellationView.jsx';
+import { EqualizerModal } from './components/EqualizerModal.jsx';
+import { RecommendationsModal } from './components/RecommendationsModal.jsx';
+import { TasteProfileModal } from './components/TasteProfileModal.jsx';
 import './App.css';
 
-const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DOWNLOADS: 'downloads' };
+const VIEWS = { HOME: 'home', SEARCH: 'search', LIBRARY: 'library', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
 const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
@@ -204,6 +208,9 @@ function App() {
   const [songInfo, setSongInfo] = useState(null);
   const [reviewSong, setReviewSong] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [isEqOpen, setIsEqOpen] = useState(false);
+  const [recommendationTarget, setRecommendationTarget] = useState(null);
+  const [isTasteProfileOpen, setIsTasteProfileOpen] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
   const stagedLocalImportKeysRef = useRef(new Set());
@@ -508,6 +515,13 @@ function App() {
       .sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0))
       .slice(0, 8);
   }, [driveReadySongs]);
+
+  const librarySummary = useMemo(() => ({
+    totalSongs: allSongs.length,
+    readySongs: driveReadySongs.length,
+    downloadedSongs: allSongs.filter(s => s.isDownloaded).length,
+    playlistCount: visiblePlaylists.length,
+  }), [allSongs, driveReadySongs.length, visiblePlaylists.length]);
 
   const catalogueSearchIndex = useMemo(() => {
     const byKey = new Map();
@@ -1173,6 +1187,7 @@ function App() {
     { id: VIEWS.SEARCH, icon: Search, label: 'Search' },
     { id: VIEWS.LIBRARY, icon: Library, label: 'Ready' },
     { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads' },
+    { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy' },
   ];
 
   let displaySongs = [];
@@ -1193,6 +1208,7 @@ function App() {
       onAddToPlaylist={openPlaylistPicker}
       onReview={setReviewSong}
       onInfo={setSongInfo}
+      onMoreLikeThis={(selected) => setRecommendationTarget(selected)}
       onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
       isCurrentSong={player.currentSongKey === song.songKey}
@@ -1224,6 +1240,22 @@ function App() {
               {item.label}
             </button>
           ))}
+          <button
+            className="sidebar__nav-item"
+            onClick={() => setIsTasteProfileOpen(true)}
+            aria-label="View personal taste profile"
+          >
+            <Compass size={20} />
+            Taste Profile
+          </button>
+          <button
+            className="sidebar__nav-item"
+            onClick={() => setIsEqOpen(true)}
+            aria-label="Open audio equalizer"
+          >
+            <Sliders size={20} />
+            Equalizer
+          </button>
         </nav>
 
         <button className="sidebar__import-btn" onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
@@ -1468,6 +1500,15 @@ function App() {
             })()}
           </>
         )}
+
+        {view === VIEWS.CONSTELLATION && (
+          <ConstellationView
+            songs={allSongs}
+            currentSong={player.currentSong}
+            onPlaySong={(song) => handlePlaySong(song, allSongs)}
+            onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+          />
+        )}
       </main>
 
       {showStoragePanel && (
@@ -1595,8 +1636,35 @@ function App() {
         onDownload={handleDownload}
         onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
         onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+        onOpenEqualizer={() => setIsEqOpen(true)}
+        onMoreLikeThis={song => setRecommendationTarget(song)}
       />
       <ToastContainer toasts={toasts} />
+
+      <EqualizerModal
+        isOpen={isEqOpen}
+        onClose={() => setIsEqOpen(false)}
+        eqPreset={player.eqPreset}
+        eqGains={player.eqGains}
+        onSetPreset={player.setEqPreset}
+        onSetGain={player.setBandGain}
+      />
+
+      <RecommendationsModal
+        isOpen={Boolean(recommendationTarget)}
+        onClose={() => setRecommendationTarget(null)}
+        targetSong={recommendationTarget}
+        librarySongs={allSongs}
+        onPlaySong={song => handlePlaySong(song, allSongs)}
+        onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+      />
+
+      <TasteProfileModal
+        isOpen={isTasteProfileOpen}
+        onClose={() => setIsTasteProfileOpen(false)}
+        librarySummary={librarySummary}
+        songs={allSongs}
+      />
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
         {navItems.map(item => (

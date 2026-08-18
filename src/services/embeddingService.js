@@ -1,9 +1,10 @@
-import { db, updateSongPipelineStatus } from '../db';
+import { db, updateSongPipelineStatus } from '../db.js';
+import { defaultSisicEmbeddingProvider } from './tasteEmbeddingService.js';
 
-let embeddingProvider = null;
+let embeddingProvider = defaultSisicEmbeddingProvider;
 
 export function setEmbeddingProvider(provider) {
-  embeddingProvider = provider || null;
+  embeddingProvider = provider || defaultSisicEmbeddingProvider;
 }
 
 export function getEmbeddingProvider() {

@@ -1,5 +1,5 @@
 import Dexie from 'dexie';
-import { asSongRecord, getPlaylistKey, getSongKey } from './songIdentity';
+import { asSongRecord, getPlaylistKey, getSongKey } from './songIdentity.js';
 
 export const AUDIO_CACHE_LIMIT_BYTES = 500 * 1024 * 1024;
 export const db = new Dexie('SisicMusicDB');
@@ -164,6 +164,23 @@ db.version(7).stores({
   metadata: 'key',
 }).upgrade(async tx => {
   await tx.table('metadata').put({ key: 'schemaVersion', value: 7 });
+});
+
+db.version(8).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, isDownloaded, isCached, playCount, lastPlayedAt, cachedAt, fileIdentity, importStatus, syncStatus, embeddingStatus, coverArtUrl',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songAudio: '&songKey, cachedAt, cacheSizeBytes, explicit',
+  songArt: '&songKey, coverArtUrl, cachedAt',
+  songEmbeddings: '&songKey, updatedAt',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  playbackEvents: '&eventId, songKey, eventType, createdAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 8 });
 });
 
 function errorMessage(error) {
@@ -722,3 +739,53 @@ export async function resetLocalDatabase() {
   await db.delete();
   await db.open();
 }
+
+export async function saveSongArtwork(songKey, artworkData = {}) {
+  if (!songKey || !db?.songArt) return;
+  await db.songArt.put({
+    songKey,
+    coverArtUrl: artworkData.coverArtUrl || '',
+    album: artworkData.album || '',
+    genre: artworkData.genre || '',
+    releaseYear: artworkData.releaseYear || null,
+    isProcedural: Boolean(artworkData.isProcedural),
+    cachedAt: Date.now(),
+  });
+  if (artworkData.coverArtUrl && db.songs) {
+    const existing = await db.songs.where('songKey').equals(songKey).first();
+    if (existing) {
+      await db.songs.update(existing.id, {
+        coverArtUrl: artworkData.coverArtUrl,
+        album: artworkData.album || existing.album || '',
+      });
+    }
+  }
+}
+
+export async function getStoredSongArtwork(songKey) {
+  if (!songKey || !db?.songArt) return null;
+  return await db.songArt.get(songKey);
+}
+
+export async function saveSongEmbedding(songKey, embeddingData = {}) {
+  if (!songKey || !db?.songEmbeddings) return;
+  await db.songEmbeddings.put({
+    songKey,
+    vector: embeddingData.vector || [],
+    dimensions: embeddingData.vector?.length || 0,
+    tags: embeddingData.tags || [],
+    provider: embeddingData.provider || 'sisic-client',
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function getStoredSongEmbedding(songKey) {
+  if (!songKey || !db?.songEmbeddings) return null;
+  return await db.songEmbeddings.get(songKey);
+}
+
+export async function getAllSongEmbeddings() {
+  if (!db?.songEmbeddings) return [];
+  return await db.songEmbeddings.toArray();
+}
+
