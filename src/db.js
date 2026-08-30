@@ -187,6 +187,12 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
 
+function completedAudioFileId(job = {}) {
+  const fileId = String(job.uploadedFileId || '');
+  if (!fileId || fileId.startsWith('queue:') || fileId === String(job.jobFileId || '')) return '';
+  return fileId;
+}
+
 function normalizeSongInput(input = {}) {
   const song = asSongRecord(input);
   return {
@@ -689,11 +695,11 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
     }
 
     for (const job of latestJobsBySongKey.values()) {
-      if (job.status !== 'done' || !job.uploadedFileId) continue;
+      const uploadedFileId = completedAudioFileId(job);
+      if (job.status !== 'done' || !uploadedFileId) continue;
       const song = await db.songs.where('songKey').equals(job.songKey).first();
       const cachedAudio = await db.songAudio.get(job.songKey);
       const cachedFileId = String(cachedAudio?.driveFileId || '');
-      const uploadedFileId = String(job.uploadedFileId);
       const cacheBelongsToUploadedFile = Boolean(cachedAudio && cachedFileId && cachedFileId === uploadedFileId);
       const isReplacement = Boolean(job.replacementForFileId);
       const shouldInvalidateCache = Boolean(cachedAudio && (
@@ -706,11 +712,11 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
         // A legacy local-import cache has no provenance, but it is the source
         // file for a first upload. Adopt the uploaded Drive ID so future
         // playback can distinguish it from a later replacement.
-        await db.songAudio.update(job.songKey, { driveFileId: job.uploadedFileId });
+        await db.songAudio.update(job.songKey, { driveFileId: uploadedFileId });
       }
       if (song) {
         await db.songs.update(song.id, {
-          driveFileId: job.uploadedFileId,
+          driveFileId: uploadedFileId,
           ...(shouldInvalidateCache ? {
             isDownloaded: false,
             isCached: false,

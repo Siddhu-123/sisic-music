@@ -19,6 +19,7 @@ export function statusDetails(song) {
   const status = song.status || song.downloadJob?.status;
   if (song.isDownloaded) return { label: 'Offline', icon: CheckCircle2, className: 'song-status--ready' };
   if (song.isCached || song.hasBlob) return { label: 'Cached', icon: HardDriveDownload, className: 'song-status--ready' };
+  if (status === 'needs-review') return { label: 'Choose source', icon: AlertTriangle, className: 'song-status--error' };
   if (song.driveFileId) return { label: 'Ready', icon: Cloud, className: 'song-status--ready' };
   if (status === 'queued') return { label: 'Queued', icon: Clock3, className: 'song-status--queued' };
   if (status === 'downloading') return { label: 'Downloading', icon: Clock3, className: 'song-status--downloading' };
@@ -32,6 +33,7 @@ export function downloadStatusText(song) {
   const job = song.downloadJob;
   if (job?.status === 'queued') return 'Queued for the Mac worker';
   if (job?.status === 'downloading') return 'Mac worker is downloading';
+  if (job?.status === 'needs-review') return 'Choose a YouTube source for the Mac worker';
   if (job?.status === 'blocked') return 'Blocked; manual import required';
   if (job?.status === 'failed' || job?.status === 'error') return `Mac failed${job.lastError ? ` · ${job.lastError}` : ''}`;
   return 'Not queued for the Mac worker';
@@ -40,6 +42,7 @@ export function downloadStatusText(song) {
 export function workerTaskStatus(job = {}) {
   if (job.status === 'queued') return { label: 'Queued', tone: 'queued' };
   if (job.status === 'downloading') return { label: 'Downloading', tone: 'active' };
+  if (job.status === 'needs-review') return { label: 'Choose source', tone: 'attention' };
   if (job.status === 'blocked') return { label: 'Blocked', tone: 'attention' };
   if (job.status === 'failed') return { label: 'Failed', tone: 'attention' };
   if (job.status === 'error') return { label: 'Retry required', tone: 'attention' };

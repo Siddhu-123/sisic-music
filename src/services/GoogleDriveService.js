@@ -25,6 +25,7 @@ const AUTH_HISTORY_STORAGE_KEY = 'sisic_drive_authorized';
 const JOB_MIME_TYPE = 'application/json';
 const SONG_INDEX_FILENAME = 'sisic-songs.json';
 const QUEUE_INDEX_FILENAME = 'sisic-queue.json';
+export const SOURCE_FEEDBACK_FILENAME = 'sisic-source-feedback.json';
 const CANONICAL_QUEUE_STORAGE_MODE = 'canonical';
 const DELETED_INDEX_FILENAME = 'sisic-deleted.json';
 const DUPLICATE_INDEX_FILENAME = 'sisic-duplicates.json';
@@ -114,7 +115,22 @@ function normalizeJob(raw, file = {}) {
   };
 }
 
-function isAudioFileMetadata(file = {}) {
+function candidateSourceUrl(candidate = {}) {
+  const value = candidate.url || candidate.webpage_url || candidate.original_url || '';
+  if (value) {
+    const text = String(value).trim();
+    if (/^https?:\/\//i.test(text)) return text;
+    return `https://www.youtube.com/watch?v=${encodeURIComponent(text)}`;
+  }
+  const videoId = String(candidate.videoId || candidate.id || '').trim();
+  return videoId ? `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}` : '';
+}
+
+function candidateIdentity(candidate = {}) {
+  return String(candidate.candidateId || candidate.videoId || candidate.id || candidate.url || candidate.webpage_url || '').trim();
+}
+
+export function isAudioFileMetadata(file = {}) {
   const name = String(file.name || '').toLowerCase();
   const mimeType = String(file.mimeType || '').toLowerCase();
   const appProperties = file.appProperties || {};
@@ -255,7 +271,7 @@ function normalizeDuplicateEntry(songInput = {}, extra = {}) {
   };
 }
 
-class GoogleDriveService {
+export class GoogleDriveService {
   constructor() {
     this.tokenClient = null;
     // Clean up any legacy localStorage tokens from older builds.
@@ -721,14 +737,20 @@ class GoogleDriveService {
     }
 
     if (!matched) return null;
+    // The song index is metadata, not proof that the referenced Drive object
+    // is still the audio file. Older queue versions could leave a job JSON ID
+    // in this field after a replacement. Validate the object before returning
+    // it to playback or to the download/review actions.
+    const metadata = await this.getAudioFileMetadata(matched.driveFileId);
+    if (!metadata) return null;
     return {
-      id: matched.driveFileId,
-      name: matched.filename,
-      mimeType: matched.mimeType || 'audio/mpeg',
-      size: matched.size,
-      modifiedTime: matched.modifiedTime,
+      id: metadata.id || matched.driveFileId,
+      name: metadata.name || matched.filename,
+      mimeType: metadata.mimeType || matched.mimeType || 'audio/mpeg',
+      size: Number(metadata.size || matched.size || 0),
+      modifiedTime: metadata.modifiedTime || matched.modifiedTime,
       similarity,
-      appProperties: {
+      appProperties: metadata.appProperties || {
         sisicAudio: 'true',
         sisicSongKey: matched.songKey,
         sisicArtist: matched.artist,
@@ -817,6 +839,128 @@ class GoogleDriveService {
     await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
     this.queueIndexCache = body;
     return body;
+  }
+
+  async updateQueueIndexJob(folderId, jobInput, updates = {}) {
+    const current = await this.readQueueIndex(folderId);
+    const existing = (current.jobs || []).find(job => job.jobId === jobInput?.jobId);
+    if (!existing) throw new Error('The download job is no longer in the canonical Drive queue. Refresh and try again.');
+    const updated = normalizeQueueIndexJob({
+      ...existing,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    });
+    const jobsById = new Map((current.jobs || []).map(job => [job.jobId, job]));
+    jobsById.set(updated.jobId, updated);
+    const body = indexBody(
+      'jobs',
+      [...jobsById.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))),
+      current,
+    );
+    if (current.storageMode === CANONICAL_QUEUE_STORAGE_MODE) body.storageMode = CANONICAL_QUEUE_STORAGE_MODE;
+    await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
+    this.queueIndexCache = body;
+    return updated;
+  }
+
+  async recordSourceFeedback(folderId, songInput, candidate, decision) {
+    const song = asSongRecord(songInput);
+    const normalizedDecision = String(decision || '').toLowerCase();
+    if (!['accepted', 'rejected'].includes(normalizedDecision)) throw new Error('Source feedback must be accepted or rejected.');
+    const sourceUrl = candidateSourceUrl(candidate);
+    const candidateId = candidateIdentity(candidate) || sourceUrl;
+    if (!song.songKey || !candidateId || !sourceUrl) throw new Error('The YouTube candidate is missing its source URL.');
+    const entry = {
+      decisionId: crypto.randomUUID(),
+      songKey: song.songKey,
+      artist: song.artist || '',
+      track: song.track || '',
+      candidateId,
+      sourceVideoId: candidate.videoId || candidate.id || '',
+      sourceUrl,
+      sourceTitle: candidate.title || '',
+      sourceUploader: candidate.uploader || candidate.channel || '',
+      decision: normalizedDecision,
+      createdAt: new Date().toISOString(),
+      createdBy: CLIENT_INSTANCE_ID,
+    };
+    await this.mutateJsonIndex(folderId, SOURCE_FEEDBACK_FILENAME, 'decisions', [], decisions => {
+      const sameCandidate = item => (
+        item.songKey === entry.songKey
+        && (item.candidateId === entry.candidateId || item.sourceUrl === entry.sourceUrl)
+      );
+      return [...decisions.filter(item => !sameCandidate(item)), entry].slice(-500);
+    });
+    return entry;
+  }
+
+  async selectDownloadCandidate(folderId, songInput, candidate) {
+    const song = asSongRecord(songInput);
+    const sourceUrl = candidateSourceUrl(candidate);
+    if (!sourceUrl) throw new Error('The selected candidate has no YouTube URL.');
+    const existing = songInput?.downloadJob?.jobId
+      ? songInput.downloadJob
+      : await this.findDownloadJob(song, folderId);
+    if (!existing?.jobId) {
+      const result = await this.requestSongDownload(song, folderId, sourceUrl, {
+        allowRedownload: true,
+        replaceExisting: Boolean(song.driveFileId),
+        replacementForFileId: song.driveFileId || '',
+        reviewAction: 'accepted-candidate',
+      });
+      await this.recordSourceFeedback(folderId, song, candidate, 'accepted');
+      return result;
+    }
+    const now = new Date().toISOString();
+    const updated = await this.updateQueueIndexJob(folderId, existing, {
+      status: 'queued',
+      attempts: 0,
+      lastError: '',
+      nextAttemptAt: '',
+      uploadedFileId: '',
+      sourceUrl,
+      selectedSourceUrl: sourceUrl,
+      sourceVideoId: candidate.videoId || candidate.id || '',
+      sourceTitle: candidate.title || '',
+      sourceUploader: candidate.uploader || candidate.channel || '',
+      sourceDuration: candidate.duration || '',
+      sourceSelectionMode: 'reviewed-youtube-candidate',
+      reviewState: 'accepted',
+      reviewDecision: 'accepted',
+      reviewDecisionAt: now,
+      reviewCandidates: [],
+      reviewAction: 'accepted-candidate',
+    });
+    await this.recordSourceFeedback(folderId, song, candidate, 'accepted');
+    return { queued: true, alreadyQueued: false, job: updated };
+  }
+
+  async retryDownloadSearch(folderId, songInput) {
+    const song = asSongRecord(songInput);
+    const existing = songInput?.downloadJob?.jobId
+      ? songInput.downloadJob
+      : await this.findDownloadJob(song, folderId);
+    if (!existing?.jobId) {
+      return await this.requestSongDownload(song, folderId, '', { allowRedownload: true });
+    }
+    const updated = await this.updateQueueIndexJob(folderId, existing, {
+      status: 'queued',
+      attempts: 0,
+      lastError: '',
+      nextAttemptAt: '',
+      sourceUrl: '',
+      selectedSourceUrl: '',
+      sourceVideoId: '',
+      sourceTitle: '',
+      sourceUploader: '',
+      sourceDuration: '',
+      sourceSelectionMode: '',
+      reviewState: 'search-again',
+      reviewDecision: '',
+      reviewDecisionAt: '',
+      reviewCandidates: [],
+    });
+    return { queued: true, alreadyQueued: false, job: updated };
   }
 
   async ensureDeletedIndex(folderId) {

@@ -1,12 +1,89 @@
 import { useState } from 'react';
-import { ThumbsUp, RefreshCw, Link2, X } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Link2, RefreshCw, ShieldAlert, ThumbsDown, ThumbsUp, X } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
-export function SongReviewPanel({ song, onClose, onApprove, onRetryStudio, onUseYoutubeLink, busy = false }) {
+function candidateUrl(candidate = {}) {
+  const value = candidate.url || candidate.webpage_url || candidate.original_url || '';
+  if (/^https?:\/\//i.test(String(value))) return String(value);
+  const videoId = candidate.videoId || candidate.id || value;
+  return videoId ? `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}` : '';
+}
+
+function candidateVideoId(candidate = {}) {
+  const direct = String(candidate.videoId || candidate.id || '').trim();
+  if (/^[A-Za-z0-9_-]{6,}$/.test(direct)) return direct;
+  const source = candidateUrl(candidate);
+  try {
+    const parsed = new URL(source);
+    const pathParts = parsed.pathname.split('/').filter(Boolean);
+    const value = parsed.searchParams.get('v') || pathParts[pathParts.length - 1] || '';
+    return /^[A-Za-z0-9_-]{6,}$/.test(value) ? value : '';
+  } catch {
+    return '';
+  }
+}
+
+function candidateKey(candidate = {}) {
+  return String(candidate.candidateId || candidateVideoId(candidate) || candidateUrl(candidate) || candidate.title || 'candidate');
+}
+
+function candidatePreviewUrl(candidate) {
+  const videoId = candidateVideoId(candidate);
+  if (!videoId) return '';
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?autoplay=1&mute=1&controls=0&playsinline=1&rel=0&start=0&end=20`;
+}
+
+function candidateThumbnail(candidate) {
+  if (candidate.thumbnail) return candidate.thumbnail;
+  const videoId = candidateVideoId(candidate);
+  return videoId ? `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg` : '';
+}
+
+function candidateDuration(value) {
+  if (!value) return '';
+  if (typeof value === 'string' && value.includes(':')) return value;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
+}
+
+function candidateReason(candidate) {
+  if (candidate.selectionStatus === 'safety-filtered') {
+    return 'The automatic safety filter flagged this result. Inspect it before selecting.';
+  }
+  return candidate.reason || 'Possible match from YouTube search.';
+}
+
+export function SongReviewPanel({
+  song,
+  onClose,
+  onApprove,
+  onRetryStudio,
+  onUseYoutubeLink,
+  onSelectCandidate,
+  onRejectCandidate,
+  busy = false,
+}) {
   const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [activePreviewId, setActivePreviewId] = useState('');
+  const [rejectedIds, setRejectedIds] = useState(() => new Set());
   const sourceUrl = song.sourceUrl || song.selectedSourceUrl || '';
   const job = song.downloadJob;
+  const candidates = Array.isArray(job?.reviewCandidates)
+    ? job.reviewCandidates
+    : (Array.isArray(song.reviewCandidates) ? song.reviewCandidates : []);
+  const visibleCandidates = candidates.filter(candidate => !rejectedIds.has(candidateKey(candidate)));
   const dialogRef = useDialogFocus(true, onClose, { canClose: !busy });
+
+  const rejectCandidate = async candidate => {
+    try {
+      await onRejectCandidate?.(song, candidate);
+      setRejectedIds(previous => new Set([...previous, candidateKey(candidate)]));
+    } catch {
+      // The parent reports the error; keep the candidate visible if persistence failed.
+    }
+  };
 
   return (
     <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
@@ -38,6 +115,89 @@ export function SongReviewPanel({ song, onClose, onApprove, onRetryStudio, onUse
 
         {job?.lastError && <p className="song-review-panel__error">{job.lastError}</p>}
 
+        {candidates.length > 0 && (
+          <section className="song-review-candidates" aria-labelledby="song-review-candidates-title">
+            <div className="song-review-candidates__header">
+              <div>
+                <h3 id="song-review-candidates-title">Worker could not decide</h3>
+                <p>Choose the result that is actually the song. Hover a result to preview its first 20 seconds. Your choices improve future ranking.</p>
+              </div>
+              <span>{visibleCandidates.length} to review</span>
+            </div>
+
+            {visibleCandidates.length === 0 ? (
+              <div className="song-review-candidates__empty">You rejected every result shown. Search again or paste a YouTube link below.</div>
+            ) : (
+              <div className="song-review-candidates__list">
+                {visibleCandidates.map(candidate => {
+                  const key = candidateKey(candidate);
+                  const previewUrl = candidatePreviewUrl(candidate);
+                  const thumbnail = candidateThumbnail(candidate);
+                  const isFiltered = candidate.selectionStatus === 'safety-filtered';
+                  const score = Number(candidate.score);
+                  return (
+                    <article className="song-review-candidate" key={key}>
+                      <div
+                        className="song-review-candidate__media"
+                        tabIndex={previewUrl ? 0 : -1}
+                        onMouseEnter={() => previewUrl && setActivePreviewId(key)}
+                        onMouseLeave={() => setActivePreviewId('')}
+                        onFocus={event => { if (event.target === event.currentTarget && previewUrl) setActivePreviewId(key); }}
+                        onBlur={() => setActivePreviewId('')}
+                        aria-label={previewUrl ? `Preview ${candidate.title}` : undefined}
+                      >
+                        {activePreviewId === key && previewUrl ? (
+                          <iframe
+                            src={previewUrl}
+                            title={`Preview of ${candidate.title}`}
+                            allow="autoplay; encrypted-media; picture-in-picture"
+                          />
+                        ) : thumbnail ? (
+                          <img src={thumbnail} alt={`Thumbnail for ${candidate.title}`} loading="lazy" />
+                        ) : (
+                          <div className="song-review-candidate__no-art">YouTube</div>
+                        )}
+                        <span className={`song-review-candidate__badge ${isFiltered ? 'song-review-candidate__badge--filtered' : ''}`}>
+                          {isFiltered ? <ShieldAlert size={13} /> : <CheckCircle2 size={13} />}
+                          {isFiltered ? 'Safety filtered' : 'Possible match'}
+                        </span>
+                      </div>
+                      <div className="song-review-candidate__body">
+                        <a
+                          className="song-review-candidate__title"
+                          href={candidateUrl(candidate)}
+                          target="_blank"
+                          rel="noreferrer"
+                          onMouseEnter={() => previewUrl && setActivePreviewId(key)}
+                          onMouseLeave={() => setActivePreviewId('')}
+                        >
+                          {candidate.title || 'Untitled YouTube result'}
+                          <ExternalLink size={13} />
+                        </a>
+                        <div className="song-review-candidate__meta">
+                          {candidate.uploader || candidate.channel || 'Unknown channel'}
+                          {candidateDuration(candidate.duration) ? ` · ${candidateDuration(candidate.duration)}` : ''}
+                          {Number.isFinite(score) && score > 0 ? ` · ${Math.round(score * 100)}% match` : ''}
+                        </div>
+                        <small>{candidateReason(candidate)}</small>
+                        <div className="song-review-candidate__actions">
+                          <button className="btn-primary" onClick={() => onSelectCandidate?.(song, candidate)} disabled={busy || !candidateUrl(candidate)}>
+                            <CheckCircle2 size={15} /> Use this source
+                          </button>
+                          <button className="panel-action-btn" onClick={() => rejectCandidate(candidate)} disabled={busy}>
+                            <ThumbsDown size={15} /> Not this
+                          </button>
+                          <a className="song-review-candidate__open" href={candidateUrl(candidate)} target="_blank" rel="noreferrer">Open on YouTube</a>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
         <div className="song-review-panel__actions">
           <button className="panel-action-btn" onClick={() => onApprove(song)} disabled={busy}>
             <ThumbsUp size={16} />
@@ -45,7 +205,7 @@ export function SongReviewPanel({ song, onClose, onApprove, onRetryStudio, onUse
           </button>
           <button className="panel-action-btn" onClick={() => onRetryStudio(song)} disabled={busy}>
             <RefreshCw size={16} />
-            <span>{busy ? 'Queueing...' : 'Video/noisy — try another studio result'}</span>
+            <span>{busy ? 'Queueing...' : 'Search again for another source'}</span>
           </button>
         </div>
 

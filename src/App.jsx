@@ -53,6 +53,28 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
 }
 
+function youtubeFeedbackCandidate(song) {
+  const sourceUrl = song?.sourceUrl || song?.selectedSourceUrl || '';
+  if (!sourceUrl) return null;
+  let parsed;
+  try {
+    parsed = new URL(sourceUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!['youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be'].includes(hostname)) return null;
+  } catch {
+    return null;
+  }
+  const pathParts = parsed.pathname.split('/').filter(Boolean);
+  const videoId = song.sourceVideoId || parsed.searchParams.get('v') || pathParts[pathParts.length - 1] || '';
+  return {
+    candidateId: videoId || sourceUrl,
+    videoId,
+    url: sourceUrl,
+    title: song.sourceTitle || '',
+    uploader: song.sourceUploader || '',
+  };
+}
+
 function scheduleIdleWork(callback, timeout = 1200) {
   if (typeof window.requestIdleCallback === 'function') {
     const id = window.requestIdleCallback(callback, { timeout });
@@ -171,8 +193,12 @@ function mergeJob(song, jobBySongKey) {
   if (!song?.songKey) return song;
   const job = jobBySongKey.get(song.songKey) || song.downloadJob || null;
   if (!job) return { ...song, downloadJob: null };
-  const uploadedDriveFileId = job.status === 'done' && job.uploadedFileId
-    ? job.uploadedFileId
+  const uploadedFileId = String(job.uploadedFileId || '');
+  const isJobFileReference = uploadedFileId && (
+    uploadedFileId.startsWith('queue:') || uploadedFileId === String(job.jobFileId || '')
+  );
+  const uploadedDriveFileId = job.status === 'done' && uploadedFileId && !isJobFileReference
+    ? uploadedFileId
     : '';
   return {
     ...song,
@@ -488,7 +514,7 @@ function App() {
       byKey.set(normalized.songKey, mergeJob({
         ...normalized,
         ...local,
-        driveFileId: local?.driveFileId || indexedSong.driveFileId || null,
+        driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
       }, jobBySongKey));
     }
     return byKey;
@@ -507,7 +533,7 @@ function App() {
   }, [driveDeletedSongs]);
 
   const workerTasks = useMemo(() => {
-    const priority = { downloading: 0, queued: 1, error: 2, failed: 3, blocked: 4 };
+    const priority = { downloading: 0, queued: 1, 'needs-review': 2, error: 3, failed: 4, blocked: 5 };
     return [...jobBySongKey.values()]
       .filter(job => !(job.status === 'done' && job.uploadedFileId))
       .filter(job => !driveSongKeySet.has(job.songKey) || job.replacementForFileId)
@@ -546,7 +572,7 @@ function App() {
         return mergeJob({
           ...normalized,
           ...local,
-          driveFileId: local?.driveFileId || indexedSong.driveFileId || null,
+          driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
         }, jobBySongKey);
       })
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
@@ -781,10 +807,19 @@ function App() {
 
   const queueSongReplacement = useCallback(async (song, sourceUrl = '', reviewAction = 'reject-video') => {
     if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
+    let replacementForFileId = '';
+    if (song.driveFileId) {
+      const currentAudio = await driveService.getAudioFileMetadata(song.driveFileId);
+      replacementForFileId = currentAudio?.id || '';
+    }
+    if (!replacementForFileId) {
+      const currentAudio = await driveService.findSongFile(song, DRIVE_FOLDER_ID);
+      replacementForFileId = currentAudio?.id || '';
+    }
     const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, sourceUrl, {
       allowRedownload: true,
       replaceExisting: true,
-      replacementForFileId: song.driveFileId || '',
+      replacementForFileId,
       reviewAction,
     });
     if (result.job) {
@@ -816,6 +851,14 @@ function App() {
     setReviewBusy(true);
     try {
       const updated = await driveService.updateSongReview(DRIVE_FOLDER_ID, song, 'approved-studio');
+      const acceptedSource = youtubeFeedbackCandidate(song);
+      if (acceptedSource) {
+        try {
+          await driveService.recordSourceFeedback(DRIVE_FOLDER_ID, song, acceptedSource, 'accepted');
+        } catch (feedbackError) {
+          console.warn('Accepted source feedback could not be saved:', feedbackError);
+        }
+      }
       setDriveIndexSongs(prev => prev.map(item => item.songKey === song.songKey ? { ...item, ...updated } : item));
       setReviewSong(prev => prev ? { ...prev, ...updated } : prev);
       addToast(`Marked "${song.track}" as the correct studio song`);
@@ -829,11 +872,28 @@ function App() {
   }, [addToast]);
 
   const handleRetryStudioReview = useCallback(async song => {
+    if (!DRIVE_FOLDER_ID) return;
     setReviewBusy(true);
     try {
-      const result = await queueSongReplacement(song);
+      const rejectedSource = song.downloadJob?.status === 'needs-review' ? null : youtubeFeedbackCandidate(song);
+      if (rejectedSource) {
+        try {
+          await driveService.recordSourceFeedback(DRIVE_FOLDER_ID, song, rejectedSource, 'rejected');
+        } catch (feedbackError) {
+          console.warn('Rejected source feedback could not be saved:', feedbackError);
+        }
+      }
+      const result = song.downloadJob?.status === 'needs-review'
+        ? await driveService.retryDownloadSearch(DRIVE_FOLDER_ID, song)
+        : await queueSongReplacement(song);
+      if (result.job) {
+        await syncDownloadJobsToDb([result.job]);
+        setHasPendingJobs(true);
+      }
       if (result.queued) {
-        addToast(`Queued a studio replacement for "${song.track}"`);
+        addToast(song.downloadJob?.status === 'needs-review'
+          ? `Queued another source search for "${song.track}"`
+          : `Queued a studio replacement for "${song.track}"`);
         setReviewSong(null);
       } else {
         addToast(`Replacement is already ${result.job?.status || 'queued'}`);
@@ -846,6 +906,41 @@ function App() {
       setReviewBusy(false);
     }
   }, [addToast, queueSongReplacement]);
+
+  const handleSelectReviewCandidate = useCallback(async (song, candidate) => {
+    if (!DRIVE_FOLDER_ID) return;
+    setReviewBusy(true);
+    try {
+      const result = await driveService.selectDownloadCandidate(DRIVE_FOLDER_ID, song, candidate);
+      if (result.job) {
+        await syncDownloadJobsToDb([result.job]);
+        setHasPendingJobs(true);
+      }
+      addToast(`Queued "${song.track}" from "${candidate.title || 'the selected YouTube result'}"`);
+      setReviewSong(null);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [addToast]);
+
+  const handleRejectReviewCandidate = useCallback(async (song, candidate) => {
+    if (!DRIVE_FOLDER_ID) return;
+    setReviewBusy(true);
+    try {
+      await driveService.recordSourceFeedback(DRIVE_FOLDER_ID, song, candidate, 'rejected');
+      addToast(`Saved your rejection for "${candidate.title || 'this source'}"`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [addToast]);
 
   const handleYoutubeReplacement = useCallback(async (song, sourceUrl) => {
     let parsed;
@@ -861,6 +956,14 @@ function App() {
     }
     setReviewBusy(true);
     try {
+      const rejectedSource = youtubeFeedbackCandidate(song);
+      if (rejectedSource) {
+        try {
+          await driveService.recordSourceFeedback(DRIVE_FOLDER_ID, song, rejectedSource, 'rejected');
+        } catch (feedbackError) {
+          console.warn('Rejected source feedback could not be saved:', feedbackError);
+        }
+      }
       const result = await queueSongReplacement(song, parsed.toString(), 'explicit-youtube-link');
       if (result.queued) {
         addToast(`Queued the YouTube replacement for "${song.track}"`);
@@ -1671,6 +1774,7 @@ function App() {
               tasks={workerTasks}
               canonicalRecordCount={jobBySongKey.size}
               onRetry={song => handleQueueDownload(song, { allowRedownload: true })}
+              onReview={song => setReviewSong(allSongsByKey.get(song.songKey) || song)}
               onRefresh={refreshDownloadJobs}
             />
             <DownloadStatusPanel
@@ -1935,7 +2039,7 @@ function App() {
           onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
           onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
           onAddToPlaylist={openPlaylistPicker}
-          onReview={song => { setSongInfo(null); setReviewSong(song); }}
+          onReview={song => { setSongInfo(null); setReviewSong(allSongsByKey.get(song.songKey) || song); }}
           onDelete={handleDeleteReadySong}
           onMarkDuplicate={duplicateSongKeySet.has(songInfo.songKey) ? undefined : handleMarkDuplicate}
           onRestoreDuplicate={duplicateSongKeySet.has(songInfo.songKey) ? handleRestoreDuplicate : undefined}
@@ -1951,6 +2055,8 @@ function App() {
           onApprove={handleApproveSongReview}
           onRetryStudio={handleRetryStudioReview}
           onUseYoutubeLink={handleYoutubeReplacement}
+          onSelectCandidate={handleSelectReviewCandidate}
+          onRejectCandidate={handleRejectReviewCandidate}
           busy={reviewBusy}
         />
       )}
@@ -1960,7 +2066,7 @@ function App() {
         onOpenSongInfo={setSongInfo}
         onAddToPlaylist={openPlaylistPicker}
         onDelete={handleDeleteReadySong}
-        onReview={setReviewSong}
+        onReview={song => setReviewSong(allSongsByKey.get(song.songKey) || song)}
         onDownload={handleDownload}
         onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
         onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
