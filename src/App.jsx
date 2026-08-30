@@ -171,9 +171,17 @@ function mergeJob(song, jobBySongKey) {
   if (!song?.songKey) return song;
   const job = jobBySongKey.get(song.songKey) || song.downloadJob || null;
   if (!job) return { ...song, downloadJob: null };
+  const uploadedDriveFileId = job.status === 'done' && job.uploadedFileId
+    ? job.uploadedFileId
+    : '';
   return {
     ...song,
+    driveFileId: uploadedDriveFileId || song.driveFileId || null,
+    filename: job.filename || song.filename || '',
     sourceUrl: job.sourceUrl || song.sourceUrl || '',
+    sourceTitle: job.sourceTitle || song.sourceTitle || '',
+    sourceUploader: job.sourceUploader || song.sourceUploader || '',
+    sourceSelectionMode: job.sourceSelectionMode || song.sourceSelectionMode || '',
     qualityStatus: job.qualityStatus || song.qualityStatus || '',
     downloadJob: job,
   };
@@ -260,12 +268,13 @@ function App() {
     playbackEvent,
     queue,
     queueIndex,
+    queueRevision,
     resumeOnRestore,
     resumePosition,
     setPlayerError,
   } = player;
   const activeQueueSong = queue[queueIndex] || null;
-  const activeQueueSongKey = activeQueueSong?.songKey || activeQueueSong?.id || '';
+  const activeQueueSongKey = `${activeQueueSong?.songKey || activeQueueSong?.id || ''}:${activeQueueSong?.driveFileId || ''}`;
   const queueIndexRef = useRef(queueIndex);
   const resumeOnRestoreRef = useRef(resumeOnRestore);
   const resumePositionRef = useRef(resumePosition);
@@ -479,7 +488,7 @@ function App() {
       byKey.set(normalized.songKey, mergeJob({
         ...normalized,
         ...local,
-        driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
+        driveFileId: local?.driveFileId || indexedSong.driveFileId || null,
       }, jobBySongKey));
     }
     return byKey;
@@ -537,7 +546,7 @@ function App() {
         return mergeJob({
           ...normalized,
           ...local,
-          driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
+          driveFileId: local?.driveFileId || indexedSong.driveFileId || null,
         }, jobBySongKey);
       })
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
@@ -680,6 +689,12 @@ function App() {
       await syncDownloadJobsToDb(jobs, { replaceSnapshot: true });
       // Only keep polling if there are active (queued/downloading) jobs
       const pending = jobs.some(j => j.status === 'queued' || j.status === 'downloading');
+      if (!pending) {
+        // Completed jobs may be compacted out of the queue. Refresh the song
+        // index once so an open tab picks up replacement Drive file IDs.
+        const refreshedSongs = await driveService.readSongIndex(DRIVE_FOLDER_ID, { forceRefresh: true });
+        setDriveIndexSongs(refreshedSongs.songs || []);
+      }
       setHasPendingJobs(pending);
     } catch (error) {
       console.error('Failed to refresh Drive jobs:', error);
@@ -912,8 +927,17 @@ function App() {
     let resolved = { ...song, ...localSong, downloadJob: jobBySongKey.get(localSong.songKey) || localSong.downloadJob || null };
 
     if (resolved.isDownloaded || resolved.isCached || resolved.hasBlob) {
-      const cachedAudio = await getCachedSongAudio(resolved.songKey);
+      const cachedAudio = await getCachedSongAudio(resolved.songKey, resolved.driveFileId);
       if (cachedAudio) return { ...resolved, ...cachedAudio };
+      resolved = {
+        ...resolved,
+        isDownloaded: false,
+        isCached: false,
+        hasBlob: false,
+        blob: null,
+        cacheSizeBytes: 0,
+        cachedAt: null,
+      };
     }
 
     if (resolved.driveFileId) {
@@ -1024,7 +1048,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeQueueSongKey, isAuthenticated]);
+  }, [activeQueueSongKey, isAuthenticated, queueRevision]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;

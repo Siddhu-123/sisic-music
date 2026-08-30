@@ -695,8 +695,8 @@ class GoogleDriveService {
     return body;
   }
 
-  async readSongIndex(folderId) {
-    if (this.songIndexCache) return this.songIndexCache;
+  async readSongIndex(folderId, { forceRefresh = false } = {}) {
+    if (this.songIndexCache && !forceRefresh) return this.songIndexCache;
     const body = await this.readJsonIndex(folderId, SONG_INDEX_FILENAME, indexBody('songs', []));
     this.songIndexCache = {
       ...body,
