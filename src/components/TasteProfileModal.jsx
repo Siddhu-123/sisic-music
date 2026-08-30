@@ -1,9 +1,9 @@
-import React from 'react';
-import { Compass, Download, Upload, X, Music, Radio, Disc } from 'lucide-react';
+import { Compass, Download, X, Music, Radio, Disc } from 'lucide-react';
 import { computeTasteCentroid } from '../services/tasteEmbeddingService.js';
+import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
 export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] }) {
-  if (!isOpen) return null;
+  const dialogRef = useDialogFocus(isOpen, onClose);
 
   const metrics = librarySummary?.metrics || {};
   const tasteSignals = (librarySummary?.playbackEvents || [])
@@ -11,7 +11,7 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
   const tasteVector = computeTasteCentroid(songs, tasteSignals);
   const tasteSignalCount = tasteSignals.filter(event => event.songKey).length;
 
-  const topArtists = React.useMemo(() => {
+  const topArtists = (() => {
     if (metrics.topArtistsByStarts && metrics.topArtistsByStarts.length > 0) {
       return metrics.topArtistsByStarts.slice(0, 8);
     }
@@ -26,7 +26,9 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
       .map(([artist, plays]) => ({ artist, plays }));
-  }, [metrics.topArtistsByStarts, songs]);
+  })();
+
+  if (!isOpen) return null;
 
   const listeningMinutes = metrics.estimatedListeningMinutes || Math.round(
     songs.reduce((sum, s) => sum + ((s.playCount || 0) * (s.duration || 180)), 0) / 60
@@ -58,17 +60,25 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Taste Profile">
-      <div className="modal-content taste-profile-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        ref={dialogRef}
+        className="modal-content taste-profile-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="taste-profile-title"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <div className="modal-title-row">
             <Compass className="modal-icon" size={20} />
             <div>
-              <h2 className="modal-title">Personal Taste Profile</h2>
+              <h2 id="taste-profile-title" className="modal-title">Personal Taste Profile</h2>
               <p className="modal-subtitle">Client-side derived music taste vector & listening insights</p>
             </div>
           </div>
-          <button className="neumorphic-button neumorphic-button--icon" onClick={onClose} aria-label="Close">
+          <button type="button" className="neumorphic-button neumorphic-button--icon" onClick={onClose} aria-label="Close taste profile">
             <X size={18} />
           </button>
         </div>

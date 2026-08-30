@@ -2476,7 +2476,7 @@ input:focus-visible {
 
 .song-card__art {
   border-radius: 18px;
-  background: linear-gradient(145deg, #f5f6f8, #c7cbd2) !important;
+  background: linear-gradient(145deg, #f5f6f8, #c7cbd2);
   box-shadow: inset 8px 8px 16px rgba(165, 170, 181, 0.5), inset -8px -8px 16px rgba(255, 255, 255, 0.86);
 }
 
@@ -2594,7 +2594,7 @@ input:focus-visible {
 .playlist-card__art {
   width: 76px;
   height: 76px;
-  background: linear-gradient(145deg, #f6f7f9, #c5c9d0) !important;
+  background: linear-gradient(145deg, #f6f7f9, #c5c9d0);
   box-shadow: inset 7px 7px 14px rgba(165, 170, 181, 0.48), inset -7px -7px 14px rgba(255, 255, 255, 0.82);
 }
 
@@ -2933,7 +2933,7 @@ input:focus-visible {
 
 /* Expanded player inherits the same soft light surface. */
 .expanded-player {
-  background: var(--bg) !important;
+  background: var(--bg);
   color: var(--text);
 }
 
@@ -2941,7 +2941,7 @@ input:focus-visible {
   opacity: 1;
   background:
     radial-gradient(circle at 50% 22%, rgba(255, 255, 255, 0.86), transparent 36%),
-    var(--bg) !important;
+    var(--bg);
 }
 
 .expanded-player__header {
@@ -5227,7 +5227,7 @@ input:focus-visible {
 
 /* Refined studio-deck treatment for the expanded player. */
 .expanded-player {
-  background: #15181e !important;
+  background: #15181e;
   color: #f4f0e8;
 }
 
@@ -5236,7 +5236,7 @@ input:focus-visible {
   background:
     radial-gradient(circle at 18% 18%, rgba(206, 126, 61, .16), transparent 32%),
     radial-gradient(circle at 80% 72%, rgba(67, 83, 122, .2), transparent 38%),
-    linear-gradient(135deg, #20242c, #0d0f13 72%) !important;
+    linear-gradient(135deg, #20242c, #0d0f13 72%);
 }
 
 .expanded-player__content {
@@ -5584,18 +5584,18 @@ input:focus-visible {
 body,
 .app-shell,
 .main-view {
-  background: var(--bg) !important;
-  background-image: none !important;
+  background: var(--bg);
+  background-image: none;
 }
 
 .expanded-player {
-  background: var(--bg) !important;
-  background-image: none !important;
+  background: var(--bg);
+  background-image: none;
 }
 
 .expanded-player__bg {
-  background: linear-gradient(135deg, rgba(235, 239, 245, 0.96), rgba(224, 229, 238, 0.96)) !important;
-  background-image: none !important;
+  background: linear-gradient(135deg, rgba(235, 239, 245, 0.96), rgba(224, 229, 238, 0.96));
+  background-image: none;
 }
 
 .taste-profile-status {

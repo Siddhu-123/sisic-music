@@ -8,6 +8,7 @@ import {
   tonearmAngleFromProgress,
   tonearmProgressFromAngle,
   vinylSecondsFromDegrees,
+  vinylSecondsPerTurn,
   wrappedAngleDelta,
 } from './vinylPhysics.js';
 
@@ -17,6 +18,8 @@ test('vinyl rotates at 45 RPM and maps a full turn to the correct playback time'
   assert.equal(VINYL_SECONDS_PER_TURN, 4 / 3);
   assert.equal(vinylSecondsFromDegrees(360), 4 / 3);
   assert.equal(vinylSecondsFromDegrees(-180), -2 / 3);
+  assert.equal(vinylSecondsPerTurn(33, 1), 60 / 33);
+  assert.equal(vinylSecondsPerTurn(45, 1.08), 60 / (45 * 1.08));
 });
 
 test('record dragging keeps clockwise movement forward across the angle boundary', () => {

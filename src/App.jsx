@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal } from 'lucide-react';
 import {
   AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
@@ -34,6 +34,7 @@ import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService.js';
 import './App.css';
+import './responsive-ui.css';
 
 const QueuePanel = lazy(() => import('./components/QueuePanel.jsx').then(module => ({ default: module.QueuePanel })));
 const ConstellationView = lazy(() => import('./components/views/ConstellationView.jsx').then(module => ({ default: module.ConstellationView })));
@@ -214,13 +215,31 @@ function App() {
   const [isEqOpen, setIsEqOpen] = useState(false);
   const [recommendationTarget, setRecommendationTarget] = useState(null);
   const [isTasteProfileOpen, setIsTasteProfileOpen] = useState(false);
+  const [isMobileMoreOpen, setIsMobileMoreOpen] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
   const stagedLocalImportKeysRef = useRef(new Set());
   const catalogueLoadStartedRef = useRef(false);
   const fileInputRef = useRef(null);
+  const mobileMoreRef = useRef(null);
   const storageDialogRef = useDialogFocus(showStoragePanel, () => setShowStoragePanel(false));
   const playlistDialogRef = useDialogFocus(Boolean(playlistPicker), () => setPlaylistPicker(null), { canClose: !playlistPicker?.busy });
+
+  useEffect(() => {
+    if (!isMobileMoreOpen) return undefined;
+    const handleEscape = event => {
+      if (event.key === 'Escape') setIsMobileMoreOpen(false);
+    };
+    const handlePointerDownOutside = event => {
+      if (!mobileMoreRef.current?.contains(event.target)) setIsMobileMoreOpen(false);
+    };
+    document.addEventListener('keydown', handleEscape);
+    document.addEventListener('pointerdown', handlePointerDownOutside);
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+      document.removeEventListener('pointerdown', handlePointerDownOutside);
+    };
+  }, [isMobileMoreOpen]);
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
@@ -1387,13 +1406,15 @@ function App() {
   const bannerError = authError || actionError || player.error || localDbError;
   const bannerStatus = bannerError || syncStatus;
   const navItems = [
-    { id: VIEWS.HOME, icon: Home, label: 'Home' },
-    { id: VIEWS.EXPLORE, icon: Search, label: 'Explore' },
-    { id: VIEWS.LIBRARY, icon: Library, label: 'Ready' },
-    { id: VIEWS.DUPLICATES, icon: Copy, label: `Duplicates${duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}` },
-    { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads' },
-    { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy' },
+    { id: VIEWS.HOME, icon: Home, label: 'Home', mobileLabel: 'Home' },
+    { id: VIEWS.EXPLORE, icon: Search, label: 'Explore', mobileLabel: 'Explore' },
+    { id: VIEWS.LIBRARY, icon: Library, label: 'Ready', mobileLabel: 'Ready' },
+    { id: VIEWS.DUPLICATES, icon: Copy, label: `Duplicates${duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}`, mobileLabel: 'Duplicates' },
+    { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads', mobileLabel: 'Offline' },
+    { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy', mobileLabel: 'Galaxy' },
   ];
+  const mobilePrimaryNavItems = navItems.filter(item => item.id !== VIEWS.DUPLICATES);
+  const mobileMoreActive = view === VIEWS.DUPLICATES || isTasteProfileOpen || isEqOpen;
 
   const renderSongCard = (song, list) => (
     <SongCard
@@ -1957,17 +1978,46 @@ function App() {
       )}
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
-        {navItems.map(item => (
+        {mobilePrimaryNavItems.map(item => (
           <button
             key={item.id}
             className={`mobile-nav__btn ${view === item.id ? 'mobile-nav__btn--active' : ''}`}
-            onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); }}
+            onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); setIsMobileMoreOpen(false); }}
             aria-current={view === item.id ? 'page' : undefined}
           >
             <item.icon size={22} />
-            {item.label}
+            {item.mobileLabel}
           </button>
         ))}
+        <div ref={mobileMoreRef} className="mobile-nav__more">
+          <button
+            type="button"
+            className={`mobile-nav__btn ${mobileMoreActive ? 'mobile-nav__btn--active' : ''}`}
+            onClick={() => setIsMobileMoreOpen(open => !open)}
+            aria-expanded={isMobileMoreOpen}
+            aria-controls="mobile-more-menu"
+            aria-label="More navigation options"
+          >
+            <MoreHorizontal size={22} />
+            More
+          </button>
+          {isMobileMoreOpen && (
+            <div id="mobile-more-menu" className="mobile-nav__more-menu" role="menu" aria-label="More navigation options">
+              <button type="button" role="menuitem" onClick={() => { setView(VIEWS.DUPLICATES); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); setIsMobileMoreOpen(false); }}>
+                <Copy size={18} />
+                Duplicates{duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setIsTasteProfileOpen(true); setIsMobileMoreOpen(false); }}>
+                <Compass size={18} />
+                Taste profile
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setIsEqOpen(true); setIsMobileMoreOpen(false); }}>
+                <Sliders size={18} />
+                Equalizer
+              </button>
+            </div>
+          )}
+        </div>
       </nav>
     </div>
   );

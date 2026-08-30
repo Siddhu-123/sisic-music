@@ -6,6 +6,7 @@ import {
   clamp,
   tonearmAngleFromProgress,
   tonearmProgressFromAngle,
+  vinylSecondsPerTurn,
   wrappedAngleDelta,
 } from '../vinylPhysics.js';
 
@@ -14,6 +15,14 @@ const INERTIA_TIME_CONSTANT_MS = 190;
 
 function pointerAngle(event, centerX, centerY) {
   return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
+}
+
+function cssLengthToPixels(value, reference) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return 0;
+  const number = Number.parseFloat(normalized);
+  if (!Number.isFinite(number)) return 0;
+  return normalized.endsWith('%') ? (number / 100) * reference : number;
 }
 
 function formatTime(seconds) {
@@ -54,6 +63,7 @@ export function Turntable({
 }) {
   const deckRef = useRef(null);
   const vinylRef = useRef(null);
+  const tonearmRef = useRef(null);
   const interactionRef = useRef(null);
   const longPressRef = useRef(null);
   const inertiaFrameRef = useRef(null);
@@ -79,6 +89,8 @@ export function Turntable({
       ? TONEARM_LIFTED_ANGLE
       : tonearmAngleFromProgress(releasedTonearmProgress ?? displayedProgress);
   const pitchPercent = ((pitchModifier - 1) * 100).toFixed(1);
+  const vinylSpinDuration = `${vinylSecondsPerTurn(rpm, pitchModifier)}s`;
+  const motorIsRunning = Boolean(isPlaying && !dragMode && !isBraking);
 
   const updatePreviewProgress = nextProgress => {
     const boundedProgress = nextProgress == null ? null : clamp(nextProgress, 0, 100);
@@ -269,10 +281,16 @@ export function Turntable({
   };
 
   const tonearmAngleFromPointer = event => {
-    const rect = deckRef.current?.getBoundingClientRect();
+    const deck = deckRef.current;
+    const rect = deck?.getBoundingClientRect();
     if (!rect) return TONEARM_START_ANGLE;
-    const pivotX = rect.left + (rect.width * 0.94);
-    const pivotY = rect.top + (rect.height * 0.16);
+    const deckStyle = window.getComputedStyle(deck);
+    const tonearmTop = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-top'), rect.height) || (rect.height * 0.13);
+    const tonearmRight = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-right'), rect.width) || (rect.width * 0.02);
+    const pivotOffset = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-pivot-offset'), rect.width) || 16;
+    const tonearmHeight = tonearmRef.current?.offsetHeight || 32;
+    const pivotX = rect.right - tonearmRight - pivotOffset;
+    const pivotY = rect.top + tonearmTop + (tonearmHeight / 2);
     const rawAngle = pointerAngle(event, pivotX, pivotY);
     let angle = 180 - rawAngle;
     if (angle > 180) angle -= 360;
@@ -390,11 +408,13 @@ export function Turntable({
           <div className="turntable__platter-rim" aria-hidden="true" />
           <div
             ref={vinylRef}
-            className={`turntable__vinyl ${isPlaying && !dragMode && !isBraking ? 'turntable__vinyl--spinning' : ''} ${isBraking ? 'turntable__vinyl--braking' : ''}`}
+            className={`turntable__vinyl turntable__vinyl--motor ${isBraking ? 'turntable__vinyl--braking' : ''}`}
             style={{
               '--manual-record-angle': `${manualRecordAngle}deg`,
               '--eject-x': `${recordOffset.x}px`,
               '--eject-y': `${recordOffset.y}px`,
+              '--vinyl-spin-duration': vinylSpinDuration,
+              '--vinyl-animation-state': motorIsRunning ? 'running' : 'paused',
             }}
             role="slider"
             tabIndex={0}
@@ -409,12 +429,15 @@ export function Turntable({
             onPointerCancel={finishRecordPointer}
             onKeyDown={handleVinylKeyDown}
           >
-            <div className="turntable__label">{artwork}<span className="turntable__spindle" /></div>
+            <div className="turntable__vinyl-surface" aria-hidden="true">
+              <div className="turntable__label">{artwork}<span className="turntable__spindle" /></div>
+            </div>
           </div>
         </div>
 
         <button
           type="button"
+          ref={tonearmRef}
           className={`turntable__tonearm ${tonearmLifted ? 'turntable__tonearm--lifted' : ''} ${dragMode === 'tonearm' ? 'turntable__tonearm--dragging' : ''}`}
           style={{ '--tonearm-angle': `${tonearmAngle}deg` }}
           role="slider"
@@ -435,28 +458,29 @@ export function Turntable({
         </button>
 
         <div className="turntable__readout" aria-live="polite">{status}</div>
-        <div className="turntable__controls">
-          <div className="turntable__rpm-control" role="group" aria-label="Turntable speed">
-            <span>RPM</span>
-            <button type="button" className={rpm === 33 ? 'is-active' : ''} onClick={() => onRpmChange?.(33)}>33⅓</button>
-            <button type="button" className={rpm === 45 ? 'is-active' : ''} onClick={() => onRpmChange?.(45)}>45</button>
-          </div>
-          <label className="turntable__pitch-control">
-            <span>Pitch {pitchPercent}%</span>
-            <input
-              type="range"
-              min={1 - pitchRange}
-              max={1 + pitchRange}
-              step="0.001"
-              value={pitchModifier}
-              onChange={event => onPitchChange?.(Number(event.target.value))}
-              aria-label="Pitch fader"
-            />
-            <button type="button" onClick={() => onPitchRangeChange?.(pitchRange >= 0.16 ? 0.08 : 0.16)} aria-label="Toggle pitch range">
-              ±{Math.round(pitchRange * 100)}%
-            </button>
-          </label>
+      </div>
+
+      <div className="turntable__controls" role="group" aria-label="Turntable controls">
+        <div className="turntable__rpm-control" role="group" aria-label="Turntable speed">
+          <span>RPM</span>
+          <button type="button" className={rpm === 33 ? 'is-active' : ''} onClick={() => onRpmChange?.(33)}>33⅓</button>
+          <button type="button" className={rpm === 45 ? 'is-active' : ''} onClick={() => onRpmChange?.(45)}>45</button>
         </div>
+        <label className="turntable__pitch-control">
+          <span>Pitch {pitchPercent}%</span>
+          <input
+            type="range"
+            min={1 - pitchRange}
+            max={1 + pitchRange}
+            step="0.001"
+            value={pitchModifier}
+            onChange={event => onPitchChange?.(Number(event.target.value))}
+            aria-label="Pitch fader"
+          />
+          <button type="button" onClick={() => onPitchRangeChange?.(pitchRange >= 0.16 ? 0.08 : 0.16)} aria-label="Toggle pitch range">
+            ±{Math.round(pitchRange * 100)}%
+          </button>
+        </label>
       </div>
 
       <aside className="turntable__crate" aria-label="Vinyl crate">

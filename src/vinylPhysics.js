@@ -6,6 +6,12 @@ export const TONEARM_START_ANGLE = 22;
 export const TONEARM_END_ANGLE = 42;
 export const TONEARM_LIFTED_ANGLE = 10;
 
+export function vinylSecondsPerTurn(rpm = VINYL_RPM, pitchModifier = 1) {
+  const safeRpm = Math.max(1, Number(rpm) || VINYL_RPM);
+  const safePitch = Math.max(0.01, Number(pitchModifier) || 1);
+  return 60 / (safeRpm * safePitch);
+}
+
 export function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
 }

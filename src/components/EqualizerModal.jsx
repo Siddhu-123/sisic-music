@@ -1,8 +1,11 @@
 import React from 'react';
 import { Sliders, X, RotateCcw } from 'lucide-react';
 import { EQ_FREQUENCIES, EQ_PRESETS } from '../services/audioGraph.js';
+import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
 export function EqualizerModal({ isOpen, onClose, eqPreset, eqGains, onSetPreset, onSetGain }) {
+  const dialogRef = useDialogFocus(isOpen, onClose);
+
   if (!isOpen) return null;
 
   const formatFrequency = (hz) => {
@@ -10,14 +13,22 @@ export function EqualizerModal({ isOpen, onClose, eqPreset, eqGains, onSetPreset
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose} role="dialog" aria-modal="true" aria-label="Equalizer">
-      <div className="modal-content equalizer-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        ref={dialogRef}
+        className="modal-content equalizer-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="equalizer-title"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="modal-header">
           <div className="modal-title-row">
             <Sliders className="modal-icon" size={20} />
-            <h2 className="modal-title">Audio Equalizer</h2>
+            <h2 id="equalizer-title" className="modal-title">Audio Equalizer</h2>
           </div>
-          <button className="neumorphic-button neumorphic-button--icon" onClick={onClose} aria-label="Close Equalizer">
+          <button type="button" className="neumorphic-button neumorphic-button--icon" onClick={onClose} aria-label="Close Equalizer">
             <X size={18} />
           </button>
         </div>
