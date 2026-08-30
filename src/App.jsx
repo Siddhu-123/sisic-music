@@ -33,6 +33,7 @@ import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService.js';
+import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import './App.css';
 import './responsive-ui.css';
 
@@ -170,9 +171,17 @@ function mergeJob(song, jobBySongKey) {
   if (!song?.songKey) return song;
   const job = jobBySongKey.get(song.songKey) || song.downloadJob || null;
   if (!job) return { ...song, downloadJob: null };
+  const uploadedDriveFileId = job.status === 'done' && job.uploadedFileId
+    ? job.uploadedFileId
+    : '';
   return {
     ...song,
+    driveFileId: uploadedDriveFileId || song.driveFileId || null,
+    filename: job.filename || song.filename || '',
     sourceUrl: job.sourceUrl || song.sourceUrl || '',
+    sourceTitle: job.sourceTitle || song.sourceTitle || '',
+    sourceUploader: job.sourceUploader || song.sourceUploader || '',
+    sourceSelectionMode: job.sourceSelectionMode || song.sourceSelectionMode || '',
     qualityStatus: job.qualityStatus || song.qualityStatus || '',
     downloadJob: job,
   };
@@ -243,6 +252,7 @@ function App() {
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
+  const playbackSessionRef = useRef({ id: '', lastTimestamp: 0, sequence: 0 });
   const autoQueuedSongKeysRef = useRef(new Set());
   const activeQueueSongRef = useRef(null);
   const queueRef = useRef([]);
@@ -258,12 +268,13 @@ function App() {
     playbackEvent,
     queue,
     queueIndex,
+    queueRevision,
     resumeOnRestore,
     resumePosition,
     setPlayerError,
   } = player;
   const activeQueueSong = queue[queueIndex] || null;
-  const activeQueueSongKey = activeQueueSong?.songKey || activeQueueSong?.id || '';
+  const activeQueueSongKey = `${activeQueueSong?.songKey || activeQueueSong?.id || ''}:${activeQueueSong?.driveFileId || ''}`;
   const queueIndexRef = useRef(queueIndex);
   const resumeOnRestoreRef = useRef(resumeOnRestore);
   const resumePositionRef = useRef(resumePosition);
@@ -477,7 +488,7 @@ function App() {
       byKey.set(normalized.songKey, mergeJob({
         ...normalized,
         ...local,
-        driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
+        driveFileId: local?.driveFileId || indexedSong.driveFileId || null,
       }, jobBySongKey));
     }
     return byKey;
@@ -535,7 +546,7 @@ function App() {
         return mergeJob({
           ...normalized,
           ...local,
-          driveFileId: indexedSong.driveFileId || local?.driveFileId || null,
+          driveFileId: local?.driveFileId || indexedSong.driveFileId || null,
         }, jobBySongKey);
       })
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
@@ -678,6 +689,12 @@ function App() {
       await syncDownloadJobsToDb(jobs, { replaceSnapshot: true });
       // Only keep polling if there are active (queued/downloading) jobs
       const pending = jobs.some(j => j.status === 'queued' || j.status === 'downloading');
+      if (!pending) {
+        // Completed jobs may be compacted out of the queue. Refresh the song
+        // index once so an open tab picks up replacement Drive file IDs.
+        const refreshedSongs = await driveService.readSongIndex(DRIVE_FOLDER_ID, { forceRefresh: true });
+        setDriveIndexSongs(refreshedSongs.songs || []);
+      }
       setHasPendingJobs(pending);
     } catch (error) {
       console.error('Failed to refresh Drive jobs:', error);
@@ -910,8 +927,17 @@ function App() {
     let resolved = { ...song, ...localSong, downloadJob: jobBySongKey.get(localSong.songKey) || localSong.downloadJob || null };
 
     if (resolved.isDownloaded || resolved.isCached || resolved.hasBlob) {
-      const cachedAudio = await getCachedSongAudio(resolved.songKey);
+      const cachedAudio = await getCachedSongAudio(resolved.songKey, resolved.driveFileId);
       if (cachedAudio) return { ...resolved, ...cachedAudio };
+      resolved = {
+        ...resolved,
+        isDownloaded: false,
+        isCached: false,
+        hasBlob: false,
+        blob: null,
+        cacheSizeBytes: 0,
+        cachedAt: null,
+      };
     }
 
     if (resolved.driveFileId) {
@@ -1022,7 +1048,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeQueueSongKey, isAuthenticated]);
+  }, [activeQueueSongKey, isAuthenticated, queueRevision]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -1033,26 +1059,29 @@ function App() {
 
   useEffect(() => {
     if (!playbackEvent) return;
-    if (playbackEvent.eventType === 'unexpected-playback-skip' || playbackEvent.eventType === 'playback-short-ended') {
-      console.warn('Playback anomaly:', playbackEvent);
+    const event = enrichPlaybackEvent(playbackEvent, playbackSessionRef.current, {
+      userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+    });
+    if (event.eventType === 'unexpected-playback-skip' || event.eventType === 'playback-short-ended') {
+      console.warn('Playback anomaly:', event);
     }
     const syncPlaybackEvent = async () => {
-      await recordPlaybackEvent(playbackEvent);
+      await recordPlaybackEvent(event);
       if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) {
         await enqueueSyncOutbox({
           entityType: 'playback-event',
-          entityKey: playbackEvent.id,
-          payload: playbackEvent,
+          entityKey: event.id,
+          payload: event,
         });
         return;
       }
       try {
-        await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, playbackEvent);
+        await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, event);
       } catch (error) {
         await enqueueSyncOutbox({
           entityType: 'playback-event',
-          entityKey: playbackEvent.id,
-          payload: playbackEvent,
+          entityKey: event.id,
+          payload: event,
           error: errorMessage(error),
         });
         console.warn('Playback log write failed; queued for retry:', error);
@@ -1660,7 +1689,7 @@ function App() {
           <ExploreView
             browseSongs={exploreBrowseSongs}
             librarySongs={exploreLibrarySongs}
-            playbackEvents={playbackEvents}
+            playbackEvents={librarySummary.playbackEvents}
             likedSongKeys={likedSongKeys}
             catalogueLoading={catalogueLoading}
             renderSong={renderSongCard}

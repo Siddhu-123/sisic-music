@@ -506,6 +506,7 @@ export async function cacheSongBlob(songKey, blob, driveFileId, { explicit = fal
   if (!songKey || !blob) return;
   const song = await db.songs.where('songKey').equals(songKey).first();
   if (!song) return;
+  const cachedDriveFileId = driveFileId || song.driveFileId || null;
   const audioData = await blob.arrayBuffer();
   const cacheSizeBytes = blob.size || audioData.byteLength || 0;
   const cachedAt = Date.now();
@@ -517,9 +518,10 @@ export async function cacheSongBlob(songKey, blob, driveFileId, { explicit = fal
       cacheSizeBytes,
       cachedAt,
       explicit: Boolean(explicit),
+      driveFileId: cachedDriveFileId,
     });
     await db.songs.update(song.id, {
-      driveFileId: driveFileId || song.driveFileId || null,
+      driveFileId: cachedDriveFileId,
       isDownloaded: Boolean(explicit || song.isDownloaded),
       isCached: true,
       cacheSizeBytes,
@@ -529,16 +531,18 @@ export async function cacheSongBlob(songKey, blob, driveFileId, { explicit = fal
   });
 }
 
-export async function getCachedSongAudio(songKey) {
+export async function getCachedSongAudio(songKey, expectedDriveFileId = '') {
   if (!songKey) return null;
   const audio = await db.songAudio.where('songKey').equals(songKey).first();
   if (!isCachedAudioUsable(audio)) return null;
+  if (expectedDriveFileId && String(audio.driveFileId || '') !== String(expectedDriveFileId)) return null;
   return {
     blob: new Blob([audio.audioData], { type: audio.audioMimeType || 'audio/mpeg' }),
     hasBlob: true,
     isCached: true,
     cacheSizeBytes: audio.cacheSizeBytes || audio.audioData.byteLength || 0,
     cachedAt: audio.cachedAt || null,
+    driveFileId: audio.driveFileId || null,
   };
 }
 
@@ -657,7 +661,7 @@ export async function getPlaylistSnapshotForDrive({ excludePlaylistKeys = [] } =
 
 export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false } = {}) {
   if (!replaceSnapshot && !jobs.length) return;
-  await db.transaction('rw', db.downloadJobs, db.songs, async () => {
+  await db.transaction('rw', db.downloadJobs, db.songs, db.songAudio, async () => {
     if (replaceSnapshot) {
       const remoteJobIds = new Set(jobs.map(job => job?.jobId).filter(Boolean));
       const staleJobIds = (await db.downloadJobs.toArray())
@@ -665,15 +669,55 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
         .filter(jobId => jobId && !remoteJobIds.has(jobId));
       if (staleJobIds.length) await db.downloadJobs.bulkDelete(staleJobIds);
     }
+    const latestJobsBySongKey = new Map();
+    const considerLatestJob = job => {
+      if (!job?.jobId || !job?.songKey) return;
+      const previous = latestJobsBySongKey.get(job.songKey);
+      if (!previous || String(job.updatedAt || '') >= String(previous.updatedAt || '')) {
+        latestJobsBySongKey.set(job.songKey, job);
+      }
+    };
+    (await db.downloadJobs.toArray()).forEach(considerLatestJob);
+    jobs.forEach(considerLatestJob);
+
     for (const job of jobs) {
       if (!job?.jobId || !job?.songKey) continue;
       await db.downloadJobs.put({
         ...job,
         updatedAt: job.updatedAt || new Date().toISOString(),
       });
-      if (job.status === 'done' && job.uploadedFileId) {
-        const song = await db.songs.where('songKey').equals(job.songKey).first();
-        if (song) await db.songs.update(song.id, { driveFileId: job.uploadedFileId });
+    }
+
+    for (const job of latestJobsBySongKey.values()) {
+      if (job.status !== 'done' || !job.uploadedFileId) continue;
+      const song = await db.songs.where('songKey').equals(job.songKey).first();
+      const cachedAudio = await db.songAudio.get(job.songKey);
+      const cachedFileId = String(cachedAudio?.driveFileId || '');
+      const uploadedFileId = String(job.uploadedFileId);
+      const cacheBelongsToUploadedFile = Boolean(cachedAudio && cachedFileId && cachedFileId === uploadedFileId);
+      const isReplacement = Boolean(job.replacementForFileId);
+      const shouldInvalidateCache = Boolean(cachedAudio && (
+        (cachedFileId && !cacheBelongsToUploadedFile)
+        || (!cachedFileId && isReplacement)
+      ));
+
+      if (shouldInvalidateCache) await db.songAudio.delete(job.songKey);
+      else if (cachedAudio && !cachedFileId) {
+        // A legacy local-import cache has no provenance, but it is the source
+        // file for a first upload. Adopt the uploaded Drive ID so future
+        // playback can distinguish it from a later replacement.
+        await db.songAudio.update(job.songKey, { driveFileId: job.uploadedFileId });
+      }
+      if (song) {
+        await db.songs.update(song.id, {
+          driveFileId: job.uploadedFileId,
+          ...(shouldInvalidateCache ? {
+            isDownloaded: false,
+            isCached: false,
+            cacheSizeBytes: 0,
+            cachedAt: null,
+          } : {}),
+        });
       }
     }
   });
@@ -681,12 +725,13 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
 
 export async function getLibrarySnapshot() {
   try {
-    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
+    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, embeddingRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
       db.songs.toArray(),
       db.playlists.toArray(),
       db.playlistSongs.toArray(),
       db.downloadJobs.toArray(),
       db.songAudio.toArray(),
+      db.songEmbeddings.toArray(),
       db.importJobs.toArray(),
       db.embeddingJobs.toArray(),
       db.syncOutbox.toArray(),
@@ -695,6 +740,7 @@ export async function getLibrarySnapshot() {
 
     const playlistByKey = new Map(playlistsRaw.map(pl => [pl.playlistKey, pl]));
     const audioBySongKey = new Map(audioRows.map(audio => [audio.songKey, audio]));
+    const embeddingsBySongKey = new Map(embeddingRows.map(embedding => [embedding.songKey, embedding]));
     const linksBySong = new Map();
     const countsByPlaylist = new Map();
     for (const link of links) {
@@ -718,6 +764,7 @@ export async function getLibrarySnapshot() {
       const playlistKeys = linksBySong.get(song.songKey) || [];
       const playlistNames = playlistKeys.map(key => playlistByKey.get(key)?.name).filter(Boolean);
       const audio = audioBySongKey.get(song.songKey);
+      const embedding = embeddingsBySongKey.get(song.songKey);
       const hasAudio = isCachedAudioUsable(audio);
       const hasJobFileAsDriveFile = Boolean(song.driveFileId && jobFileIds.has(song.driveFileId));
       return {
@@ -732,6 +779,11 @@ export async function getLibrarySnapshot() {
         playlists: playlistNames,
         playlistName: playlistNames[0] || '',
         downloadJob: jobsBySong.get(song.songKey) || null,
+        ...(embedding?.vector?.length === 64 ? {
+          vector: embedding.vector,
+          embeddingProvider: embedding.provider || '',
+          embeddingUpdatedAt: embedding.updatedAt || '',
+        } : {}),
       };
     }).sort((a, b) => (a.track || '').localeCompare(b.track || ''));
 

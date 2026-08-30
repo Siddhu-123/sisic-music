@@ -109,6 +109,7 @@ export function useAudioPlayer() {
   const [repeatMode, setRepeatMode] = useState(() => restoredInitialState?.repeatMode || 'off');
   const [resumeOnRestore, setResumeOnRestore] = useState(() => Boolean(restoredInitialState?.isPlaying));
   const [resumePosition, setResumePosition] = useState(() => restoredInitialState?.positionSeconds || 0);
+  const [queueRevision, setQueueRevision] = useState(0);
   const [playbackEvent, setPlaybackEvent] = useState(null);
   const [eqPreset, setEqPresetState] = useState('flat');
   const [eqGains, setEqGainsState] = useState(() => [...EQ_PRESETS.flat.gains]);
@@ -191,7 +192,12 @@ export function useAudioPlayer() {
     audio.pause({ immediate: true });
 
     let audioBlob = null;
-    if (hasUsableCachedAudio(song)) {
+    const cachedAudio = song.songKey
+      ? await getCachedSongAudio(song.songKey, song.driveFileId)
+      : null;
+    if (cachedAudio?.blob) {
+      audioBlob = cachedAudio.blob;
+    } else if (hasUsableCachedAudio(song) && !song.driveFileId) {
       audioBlob = song.blob;
     } else if (song.driveFileId && (accessToken || driveService.accessToken)) {
       audioBlob = await driveService.downloadFileAsBlob(song.driveFileId);
@@ -385,8 +391,10 @@ export function useAudioPlayer() {
     prefetchingSongsRef.current.add(currentKey);
     try {
       if (!driveService.isAuthenticated) return;
-      const cached = nextSong.songKey ? await getCachedSongAudio(nextSong.songKey) : null;
-      if (cached || hasUsableCachedAudio(nextSong)) {
+      const cached = nextSong.songKey
+        ? await getCachedSongAudio(nextSong.songKey, nextSong.driveFileId)
+        : null;
+      if (cached || (hasUsableCachedAudio(nextSong) && !nextSong.driveFileId)) {
         prefetchedSongsRef.current.add(currentKey);
         return;
       }
@@ -725,6 +733,7 @@ export function useAudioPlayer() {
 
   const setQueueAndPlay = useCallback((songs, startIndex = 0) => {
     setError('');
+    setQueueRevision(previous => previous + 1);
     failedSongKeysRef.current.clear();
     playedInSessionRef.current.clear();
     originalQueueRef.current = [];
@@ -865,6 +874,7 @@ export function useAudioPlayer() {
     audioRef,
     currentSong,
     currentSongKey: currentSong?.songKey || null,
+    queueRevision,
     isPlaying,
     isSpinningDown,
     progress,

@@ -1,5 +1,8 @@
 import { getSongKey, normalizeText } from '../songIdentity.js';
-import { computeSongEmbedding, computeTasteCentroid, cosineSimilarity } from './tasteEmbeddingService.js';
+import {
+  buildContextualTasteProfile,
+  rankContextualSongs,
+} from './contextualRecommendationService.js';
 
 const GENRE_RULES = [
   ['Pop', ['pop', 'dance pop', 'synthpop']],
@@ -136,20 +139,6 @@ function songKey(song) {
   return song.songKey || getSongKey(song);
 }
 
-function sortByTaste(songs, centroid, playCountByKey, likedSongKeys) {
-  return [...songs]
-    .map(song => {
-      const key = songKey(song);
-      const plays = Math.max(Number(song.playCount) || 0, playCountByKey.get(key) || 0);
-      const affinity = centroid ? cosineSimilarity(centroid, song.vector || computeSongEmbedding(song)) : 0;
-      const likedBoost = likedSongKeys.has(key) ? 0.22 : 0;
-      const playBoost = Math.min(0.18, Math.log1p(plays) * 0.06);
-      const discoveryBoost = plays === 0 ? 0.05 : 0;
-      return { ...song, tasteScore: affinity + likedBoost + playBoost + discoveryBoost };
-    })
-    .sort((a, b) => b.tasteScore - a.tasteScore || (Number(b.playCount) || 0) - (Number(a.playCount) || 0));
-}
-
 function dominantFacet(songs, getLabels) {
   const counts = new Map();
   for (const song of songs) {
@@ -158,7 +147,12 @@ function dominantFacet(songs, getLabels) {
   return [...counts.entries()].sort(([, a], [, b]) => b - a)[0]?.[0] || '';
 }
 
-export function buildExploreMixes(songs = [], { playbackEvents = [], likedSongKeys = [] } = {}) {
+export function buildExploreMixes(songs = [], {
+  playbackEvents = [],
+  likedSongKeys = [],
+  now = Date.now(),
+  currentContext,
+} = {}) {
   const pool = songs.filter(song => songKey(song));
   const liked = new Set(likedSongKeys);
   const starts = playbackEvents.filter(event => ['playback-start', 'playback-resume'].includes(event.eventType));
@@ -166,8 +160,14 @@ export function buildExploreMixes(songs = [], { playbackEvents = [], likedSongKe
   for (const event of starts) {
     if (event.songKey) playCountByKey.set(event.songKey, (playCountByKey.get(event.songKey) || 0) + 1);
   }
-  const centroid = computeTasteCentroid(pool, starts);
-  const ranked = sortByTaste(pool, centroid, playCountByKey, liked);
+  const profile = buildContextualTasteProfile(pool, playbackEvents, { now, currentContext });
+  const ranked = rankContextualSongs(pool, {
+    profile,
+    likedSongKeys: liked,
+    playCountByKey,
+    now,
+    limit: pool.length,
+  });
   const topMood = dominantFacet(ranked.slice(0, 30), getSongMoods);
   const topGenre = dominantFacet(ranked.slice(0, 30), getSongGenres);
   const moodSongs = topMood ? ranked.filter(song => getSongMoods(song).includes(topMood)) : [];
@@ -187,6 +187,6 @@ export function buildExploreMixes(songs = [], { playbackEvents = [], likedSongKe
     suggestions: (suggestions.length ? suggestions : ranked).slice(0, 12),
     topMood,
     topGenre,
-    hasTasteSignal: Boolean(centroid && (starts.length || liked.size || pool.some(song => Number(song.playCount) > 0))),
+    hasTasteSignal: Boolean(profile.hasSignal || liked.size || pool.some(song => Number(song.playCount) > 0)),
   };
 }

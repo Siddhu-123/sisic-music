@@ -695,8 +695,8 @@ class GoogleDriveService {
     return body;
   }
 
-  async readSongIndex(folderId) {
-    if (this.songIndexCache) return this.songIndexCache;
+  async readSongIndex(folderId, { forceRefresh = false } = {}) {
+    if (this.songIndexCache && !forceRefresh) return this.songIndexCache;
     const body = await this.readJsonIndex(folderId, SONG_INDEX_FILENAME, indexBody('songs', []));
     this.songIndexCache = {
       ...body,
@@ -994,8 +994,13 @@ class GoogleDriveService {
       driveFileId: event.driveFileId || '',
       positionSeconds: Number(event.positionSeconds || 0),
       durationSeconds: Number(event.durationSeconds || 0),
+      secondsPlayed: Number(event.secondsPlayed == null ? event.positionSeconds || 0 : event.secondsPlayed),
       expectedFullPlay: Boolean(event.expectedFullPlay),
       userInitiated: Boolean(event.userInitiated),
+      sessionId: event.sessionId || '',
+      context: event.context && typeof event.context === 'object' ? { ...event.context } : null,
+      sourceSurface: event.sourceSurface || event.source || 'player',
+      skipReason: event.skipReason || '',
       message: event.message || '',
       createdAt: event.createdAt || new Date().toISOString(),
       createdBy: CLIENT_INSTANCE_ID,
