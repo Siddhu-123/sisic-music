@@ -275,14 +275,20 @@ class GoogleDriveService {
       this.tokenVersion = safeSessionGet(TOKEN_VERSION_STORAGE_KEY) || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
       this.hasAuthorizedSession = true;
       this.authRequired = false;
+      // Repair the non-secret marker if it was lost while the tab still had
+      // a valid session token.
+      safeStorageSet(AUTH_HISTORY_STORAGE_KEY, 'true');
     } else {
       this.accessToken = null;
       this.tokenExpiry = null;
       this.tokenVersion = '';
-      this.hasAuthorizedSession = safeStorageGet(AUTH_HISTORY_STORAGE_KEY) === 'true';
+      // An expired session token still proves that this tab was previously
+      // authorized. Keep the shell mounted so GIS can renew it silently.
+      this.hasAuthorizedSession = safeStorageGet(AUTH_HISTORY_STORAGE_KEY) === 'true' || Boolean(storedToken);
       safeSessionRemove(TOKEN_STORAGE_KEY);
       safeSessionRemove(EXPIRY_STORAGE_KEY);
       safeSessionRemove(TOKEN_VERSION_STORAGE_KEY);
+      if (storedToken) safeStorageSet(AUTH_HISTORY_STORAGE_KEY, 'true');
     }
     this.jobCache = new Map();
     this.indexFileCache = new Map();
@@ -391,7 +397,7 @@ class GoogleDriveService {
     });
   }
 
-  requestToken() {
+  requestToken({ prompt } = {}) {
     if (this.tokenRequestPromise) return this.tokenRequestPromise;
     this.tokenRequestPromise = new Promise((resolve, reject) => {
       if (!this.tokenClient) {
@@ -410,8 +416,13 @@ class GoogleDriveService {
           finish(reject, new Error(resp.error_description || resp.error));
           return;
         }
-        this._persistToken(resp.access_token, tokenExpiryFromResponse(resp));
-        finish(resolve, resp.access_token);
+        const accessToken = String(resp.access_token || '').trim();
+        if (!accessToken) {
+          finish(reject, new Error('Google sign-in did not return an access token.'));
+          return;
+        }
+        this._persistToken(accessToken, tokenExpiryFromResponse(resp));
+        finish(resolve, accessToken);
       };
       this.tokenErrorCallback = error => {
         const message = error?.type === 'popup_closed'
@@ -419,7 +430,10 @@ class GoogleDriveService {
           : 'Google sign-in could not open. Allow pop-ups and try again.';
         finish(reject, new Error(message));
       };
-      this.tokenClient.requestAccessToken({ prompt: this.hasAuthorizedSession ? '' : 'consent' });
+      const requestedPrompt = typeof prompt === 'string'
+        ? prompt
+        : (this.hasAuthorizedSession ? '' : 'consent');
+      this.tokenClient.requestAccessToken({ prompt: requestedPrompt });
     }).finally(() => {
       this.tokenRequestPromise = null;
       this.tokenErrorCallback = null;

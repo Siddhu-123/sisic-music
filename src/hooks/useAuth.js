@@ -87,7 +87,7 @@ export function useAuth() {
         driveService.initTokenClient(CLIENT_ID);
         driveService.syncTokenToServiceWorker();
         if (driveService.hasAuthorizedSession && !driveService.isAuthenticated) {
-          driveService.requestToken()
+          driveService.requestToken({ prompt: '' })
             .then(() => {
               if (cancelled) return;
               setIsAuthenticated(true);
@@ -216,7 +216,9 @@ export function useAuth() {
         await loadGoogleIdentityServices();
         driveService.initTokenClient(CLIENT_ID);
       }
-      await driveService.requestToken();
+      // A user-initiated reconnect may need an account picker or consent;
+      // silent mode is reserved for the automatic refresh restore above.
+      await driveService.requestToken({ prompt: driveService.hasAuthorizedSession ? 'select_account' : 'consent' });
       setIsAuthenticated(true);
       setHasAuthorizedSession(true);
       setError('');

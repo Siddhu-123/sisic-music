@@ -30,12 +30,12 @@ export function SongCard({
   const [dragOffset, setDragOffset] = useState(0);
   const menuId = useId();
   const cardRef = useRef(null);
-  const menuRef = useDialogFocus(menuOpen, closeMenu);
   const longPressTimerRef = useRef(null);
   const longPressTriggeredRef = useRef(false);
   const pointerRef = useRef({ active: false, startX: 0, offset: 0, swiped: false });
 
   const closeMenu = () => setMenuOpen(false);
+  const menuRef = useDialogFocus(menuOpen, closeMenu);
   const clearLongPress = () => {
     if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = null;
