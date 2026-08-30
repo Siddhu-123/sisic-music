@@ -681,12 +681,13 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
 
 export async function getLibrarySnapshot() {
   try {
-    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
+    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, embeddingRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
       db.songs.toArray(),
       db.playlists.toArray(),
       db.playlistSongs.toArray(),
       db.downloadJobs.toArray(),
       db.songAudio.toArray(),
+      db.songEmbeddings.toArray(),
       db.importJobs.toArray(),
       db.embeddingJobs.toArray(),
       db.syncOutbox.toArray(),
@@ -695,6 +696,7 @@ export async function getLibrarySnapshot() {
 
     const playlistByKey = new Map(playlistsRaw.map(pl => [pl.playlistKey, pl]));
     const audioBySongKey = new Map(audioRows.map(audio => [audio.songKey, audio]));
+    const embeddingsBySongKey = new Map(embeddingRows.map(embedding => [embedding.songKey, embedding]));
     const linksBySong = new Map();
     const countsByPlaylist = new Map();
     for (const link of links) {
@@ -718,6 +720,7 @@ export async function getLibrarySnapshot() {
       const playlistKeys = linksBySong.get(song.songKey) || [];
       const playlistNames = playlistKeys.map(key => playlistByKey.get(key)?.name).filter(Boolean);
       const audio = audioBySongKey.get(song.songKey);
+      const embedding = embeddingsBySongKey.get(song.songKey);
       const hasAudio = isCachedAudioUsable(audio);
       const hasJobFileAsDriveFile = Boolean(song.driveFileId && jobFileIds.has(song.driveFileId));
       return {
@@ -732,6 +735,11 @@ export async function getLibrarySnapshot() {
         playlists: playlistNames,
         playlistName: playlistNames[0] || '',
         downloadJob: jobsBySong.get(song.songKey) || null,
+        ...(embedding?.vector?.length === 64 ? {
+          vector: embedding.vector,
+          embeddingProvider: embedding.provider || '',
+          embeddingUpdatedAt: embedding.updatedAt || '',
+        } : {}),
       };
     }).sort((a, b) => (a.track || '').localeCompare(b.track || ''));
 

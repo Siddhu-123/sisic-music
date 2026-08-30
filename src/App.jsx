@@ -33,6 +33,7 @@ import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService.js';
+import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import './App.css';
 import './responsive-ui.css';
 
@@ -243,6 +244,7 @@ function App() {
 
   const playbackRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
+  const playbackSessionRef = useRef({ id: '', lastTimestamp: 0, sequence: 0 });
   const autoQueuedSongKeysRef = useRef(new Set());
   const activeQueueSongRef = useRef(null);
   const queueRef = useRef([]);
@@ -1033,26 +1035,29 @@ function App() {
 
   useEffect(() => {
     if (!playbackEvent) return;
-    if (playbackEvent.eventType === 'unexpected-playback-skip' || playbackEvent.eventType === 'playback-short-ended') {
-      console.warn('Playback anomaly:', playbackEvent);
+    const event = enrichPlaybackEvent(playbackEvent, playbackSessionRef.current, {
+      userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+    });
+    if (event.eventType === 'unexpected-playback-skip' || event.eventType === 'playback-short-ended') {
+      console.warn('Playback anomaly:', event);
     }
     const syncPlaybackEvent = async () => {
-      await recordPlaybackEvent(playbackEvent);
+      await recordPlaybackEvent(event);
       if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) {
         await enqueueSyncOutbox({
           entityType: 'playback-event',
-          entityKey: playbackEvent.id,
-          payload: playbackEvent,
+          entityKey: event.id,
+          payload: event,
         });
         return;
       }
       try {
-        await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, playbackEvent);
+        await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, event);
       } catch (error) {
         await enqueueSyncOutbox({
           entityType: 'playback-event',
-          entityKey: playbackEvent.id,
-          payload: playbackEvent,
+          entityKey: event.id,
+          payload: event,
           error: errorMessage(error),
         });
         console.warn('Playback log write failed; queued for retry:', error);
@@ -1660,7 +1665,7 @@ function App() {
           <ExploreView
             browseSongs={exploreBrowseSongs}
             librarySongs={exploreLibrarySongs}
-            playbackEvents={playbackEvents}
+            playbackEvents={librarySummary.playbackEvents}
             likedSongKeys={likedSongKeys}
             catalogueLoading={catalogueLoading}
             renderSong={renderSongCard}
