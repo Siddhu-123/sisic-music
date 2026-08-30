@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { driveService } from '../services/GoogleDriveService';
+import { workerAuthMessageAction } from '../services/driveAuth';
 import { syncLibraryToDb, requestPersistentStorage } from '../db';
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
 export const DRIVE_FOLDER_ID = import.meta.env.VITE_DRIVE_FOLDER_ID?.trim() || '';
+const RECONNECT_MESSAGE = 'Drive connection paused. Reconnect to continue syncing; offline music stays available.';
+const DEV_UI_PREVIEW = import.meta.env.DEV && new URLSearchParams(window.location.search).has('ui-preview');
 
 const REQUIRED_CONFIG = {
   VITE_GOOGLE_CLIENT_ID: CLIENT_ID,
@@ -12,10 +15,49 @@ const REQUIRED_CONFIG = {
   VITE_DRIVE_FOLDER_ID: DRIVE_FOLDER_ID,
 };
 
+let googleIdentityScriptPromise;
+
+function loadGoogleIdentityServices() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  if (googleIdentityScriptPromise) return googleIdentityScriptPromise;
+  googleIdentityScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-google-identity-services]');
+    const script = existing || document.createElement('script');
+    script.async = true;
+    script.defer = true;
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.dataset.googleIdentityServices = 'true';
+    script.addEventListener('load', resolve, { once: true });
+    script.addEventListener('error', () => reject(new Error('Google sign-in could not load. Check your connection and try again.')), { once: true });
+    if (!existing) document.head.appendChild(script);
+  });
+  return googleIdentityScriptPromise;
+}
+
+function scheduleIdle(callback, timeout = 1400) {
+  if (typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(callback, { timeout });
+    return () => window.cancelIdleCallback(id);
+  }
+  const id = window.setTimeout(callback, Math.min(timeout, 800));
+  return () => window.clearTimeout(id);
+}
+
 function getMissingConfig() {
   return Object.entries(REQUIRED_CONFIG)
     .filter(([, value]) => !value)
     .map(([key]) => key);
+}
+
+export function getAuthSetupStatus() {
+  const missing = getMissingConfig();
+  return {
+    missing,
+    ready: missing.length === 0,
+    hasClientId: Boolean(CLIENT_ID),
+    hasDriveFolder: Boolean(DRIVE_FOLDER_ID),
+    hasLibraryFile: Boolean(SPOTIFY_JSON_FILE_ID),
+  };
 }
 
 function missingConfigMessage(missing = getMissingConfig()) {
@@ -24,31 +66,96 @@ function missingConfigMessage(missing = getMissingConfig()) {
 
 export function useAuth() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => driveService.isAuthenticated);
+  const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || DEV_UI_PREVIEW);
+  const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
-  const [error, setError] = useState(() => missingConfigMessage());
+  const [error, setError] = useState(() => missingConfigMessage()
+    || ((driveService.hasAuthorizedSession || DEV_UI_PREVIEW) && !driveService.isAuthenticated ? RECONNECT_MESSAGE : ''));
   const hasSyncedOnMount = useRef(false);
 
   useEffect(() => {
     const missing = getMissingConfig();
     if (missing.length > 0) return undefined;
 
-    const tryInit = () => {
-      if (window.google?.accounts?.oauth2) {
+    if (!driveService.hasAuthorizedSession) return undefined;
+    let cancelled = false;
+    const init = async () => {
+      try {
+        await loadGoogleIdentityServices();
+        if (cancelled) return;
         driveService.initTokenClient(CLIENT_ID);
-        return true;
+        driveService.syncTokenToServiceWorker();
+        if (driveService.hasAuthorizedSession && !driveService.isAuthenticated) {
+          driveService.requestToken({ prompt: '' })
+            .then(() => {
+              if (cancelled) return;
+              setIsAuthenticated(true);
+              setHasAuthorizedSession(true);
+              setError('');
+            })
+            .catch(() => {
+              // Silent restore is best-effort. The reconnect action remains
+              // available when Google requires user interaction.
+            });
+        }
+      } catch (error) {
+        if (!cancelled) setError(error instanceof Error ? error.message : 'Google sign-in could not load.');
       }
-      return false;
     };
-
-    if (!tryInit()) {
-      const interval = setInterval(() => {
-        if (tryInit()) clearInterval(interval);
-      }, 300);
-      return () => clearInterval(interval);
-    }
-    return undefined;
+    const cancel = scheduleIdle(init);
+    return () => {
+      cancelled = true;
+      cancel();
+    };
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = driveService.subscribeAuthRequired(() => {
+      setIsAuthenticated(false);
+      setHasAuthorizedSession(true);
+      setError(RECONNECT_MESSAGE);
+      setSyncStatus('');
+    });
+
+    const handleServiceWorkerMessage = event => {
+      const action = workerAuthMessageAction(event.data, {
+        isAuthenticated: driveService.isAuthenticated,
+        tokenVersion: driveService.tokenVersion,
+      });
+      if (action === 'sync-token') {
+        driveService.syncTokenToServiceWorker(event.source);
+      } else if (action === 'reauthorize') {
+        driveService.requireAuthentication(new Error(event.data.message || 'Google Drive authorization ended.'));
+      }
+    };
+    const handleStoredToken = () => {
+      if (!driveService.adoptStoredToken()) return;
+      setIsAuthenticated(true);
+      setHasAuthorizedSession(true);
+      setError('');
+    };
+    navigator.serviceWorker?.addEventListener('message', handleServiceWorkerMessage);
+    window.addEventListener('storage', handleStoredToken);
+
+    return () => {
+      unsubscribe();
+      navigator.serviceWorker?.removeEventListener('message', handleServiceWorkerMessage);
+      window.removeEventListener('storage', handleStoredToken);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated || !driveService.tokenExpiry) return undefined;
+
+    const delay = Math.max(0, driveService.tokenExpiry - Date.now() + 250);
+    const timer = window.setTimeout(() => {
+      if (!driveService.isAuthenticated) {
+        driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
+      }
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [isAuthenticated]);
 
   const syncLibrary = useCallback(async () => {
     setError('');
@@ -97,6 +204,7 @@ export function useAuth() {
   }, []);
 
   const login = useCallback(async () => {
+    setIsAuthorizing(true);
     try {
       setError('');
       const missing = getMissingConfig();
@@ -105,25 +213,33 @@ export function useAuth() {
         return;
       }
       if (!driveService.tokenClient) {
-        setError('Google sign-in is not ready yet. Wait a moment and try again.');
-        return;
+        await loadGoogleIdentityServices();
+        driveService.initTokenClient(CLIENT_ID);
       }
-      await driveService.requestToken();
+      // A user-initiated reconnect may need an account picker or consent;
+      // silent mode is reserved for the automatic refresh restore above.
+      await driveService.requestToken({ prompt: driveService.hasAuthorizedSession ? 'select_account' : 'consent' });
       setIsAuthenticated(true);
+      setHasAuthorizedSession(true);
+      setError('');
       await requestPersistentStorage();
       await syncLibrary();
     } catch (e) {
       console.error('Login failed:', e);
       setError(e instanceof Error ? e.message : 'Login failed.');
+    } finally {
+      setIsAuthorizing(false);
     }
   }, [syncLibrary]);
 
   useEffect(() => {
     if (isAuthenticated && !hasSyncedOnMount.current && !isSyncing) {
       hasSyncedOnMount.current = true;
-      syncLibrary();
+      const cancel = scheduleIdle(() => syncLibrary(), 1800);
+      return cancel;
     }
+    return undefined;
   }, [isAuthenticated, isSyncing, syncLibrary]);
 
-  return { isAuthenticated, isSyncing, syncStatus, error, login, syncLibrary };
+  return { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error, login, syncLibrary, setupStatus: getAuthSetupStatus() };
 }
