@@ -6,6 +6,7 @@ export const VINYL_PITCH_LIMITS = {
 };
 
 const NATIVE_MIN_PLAYBACK_RATE = 0.0625;
+const MOTOR_RATE_RAMP_MS = 240;
 
 export function clampAudioRate(rate, minimum = -8, maximum = 8) {
   return Math.max(minimum, Math.min(maximum, Number(rate) || 0));
@@ -43,6 +44,7 @@ export class VinylAudioEngine {
     this.duration = 0;
     this.position = 0;
     this.currentRate = 0;
+    this.rateRampFrame = null;
     this.rpm = 45;
     this.pitchModifier = 1;
     this.volume = 1;
@@ -56,6 +58,7 @@ export class VinylAudioEngine {
     this.timeUpdateTimer = null;
     this.scratchTimer = null;
     this.scratchLastAt = 0;
+    this.scratchPosition = 0;
     this.nativePauseSuppressed = false;
 
     this.handleLoadedMetadata = this.handleLoadedMetadata.bind(this);
@@ -103,7 +106,7 @@ export class VinylAudioEngine {
   }
 
   get currentTime() {
-    return this._nativeTime();
+    return this.isScratching && this.currentRate < 0 ? this.position : this._nativeTime();
   }
 
   set currentTime(value) {
@@ -184,7 +187,9 @@ export class VinylAudioEngine {
   }
 
   handleNativeTimeUpdate() {
-    this.position = this._nativeTime();
+    if (!(this.isScratching && this.currentRate < 0)) {
+      this.position = this._nativeTime();
+    }
     this._emit('timeupdate');
   }
 
@@ -193,7 +198,10 @@ export class VinylAudioEngine {
     this.position = this.duration || this._nativeTime();
     this.isPlaying = false;
     this.isStopping = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
     this.currentRate = 0;
+    this._stopScratchTicker();
     this._stopTicker();
     this._emit('timeupdate');
     this._emit('ended');
@@ -201,7 +209,10 @@ export class VinylAudioEngine {
 
   handleNativeError() {
     this.isPlaying = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
     this.currentRate = 0;
+    this._stopScratchTicker();
     this._stopTicker();
     const nativeError = this.element?.error;
     this._emit('error', {
@@ -215,6 +226,7 @@ export class VinylAudioEngine {
     this._stopScratchTicker();
     this._stopTicker();
     this._cancelBrake();
+    this._cancelRateRamp();
     this.isPlaying = false;
     this.isStopping = false;
     this.isScratching = false;
@@ -290,6 +302,58 @@ export class VinylAudioEngine {
     }
   }
 
+  _cancelRateRamp() {
+    if (this.rateRampFrame == null) return;
+    if (typeof window !== 'undefined' && typeof this.rateRampFrame === 'number') {
+      window.cancelAnimationFrame(this.rateRampFrame);
+    } else {
+      clearTimeout(this.rateRampFrame);
+    }
+    this.rateRampFrame = null;
+  }
+
+  _rampPlaybackRate(targetRate) {
+    const target = clampAudioRate(targetRate);
+    if (!this.isPlaying || this.isScratching || !this.element) {
+      this._setPlaybackRate(target);
+      return;
+    }
+
+    this._cancelRateRamp();
+    const start = Math.abs(Number(this.element.playbackRate) || Math.abs(this.currentRate) || 0);
+    if (Math.abs(start - Math.abs(target)) < 0.001) {
+      this.currentRate = target;
+      this._nativePlaybackRate(target);
+      return;
+    }
+
+    const startedAt = nowMs();
+    const tick = now => {
+      if (!this.isPlaying || this.isScratching || this.isStopping || !this.element) {
+        this.rateRampFrame = null;
+        return;
+      }
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / MOTOR_RATE_RAMP_MS));
+      const eased = progress * progress * (3 - (2 * progress));
+      const nextRate = start + ((Math.abs(target) - start) * eased);
+      this.currentRate = target < 0 ? -nextRate : nextRate;
+      this._nativePlaybackRate(nextRate);
+      if (progress >= 1) {
+        this.currentRate = target;
+        this._nativePlaybackRate(target);
+        this.rateRampFrame = null;
+        return;
+      }
+      this.rateRampFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+        ? window.requestAnimationFrame(tick)
+        : setTimeout(() => tick(nowMs()), 16);
+    };
+
+    this.rateRampFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame(tick)
+      : setTimeout(() => tick(nowMs()), 16);
+  }
+
   _setPlaybackRate(rate) {
     this.position = this._nativeTime();
     const nextRate = clampAudioRate(rate);
@@ -314,20 +378,31 @@ export class VinylAudioEngine {
 
   setRpm(rpm) {
     this.rpm = Number(rpm) === 33 ? 33 : 45;
-    if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
+    if (!this.isScratching) {
+      if (this.isPlaying) this._rampPlaybackRate(this.targetMotorRate);
+      else this._setPlaybackRate(this.targetMotorRate);
+    }
   }
 
   setPitchModifier(modifier) {
     this.pitchModifier = Math.max(0.84, Math.min(1.16, Number(modifier) || 1));
-    if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
+    if (!this.isScratching) {
+      if (this.isPlaying) this._rampPlaybackRate(this.targetMotorRate);
+      else this._setPlaybackRate(this.targetMotorRate);
+    }
   }
 
   beginScratch({ resume = this.isPlaying } = {}) {
     if (this.isStopping) this._cancelBrake();
+    this._cancelRateRamp();
     this.position = this._nativeTime();
+    this.scratchPosition = this.position;
     this.isScratching = true;
     this.wasPlayingBeforeScratch = Boolean(resume && this.isPlaying);
+    this.currentRate = 0;
     if (this.wasPlayingBeforeScratch) {
+      // Stop exactly at the hand position. setScratchAngularVelocity starts
+      // the native decoder again as soon as the hand moves.
       this.nativePauseSuppressed = true;
       this.element?.pause();
       this.nativePauseSuppressed = false;
@@ -336,8 +411,24 @@ export class VinylAudioEngine {
   }
 
   setScratchAngularVelocity(angularVelocity) {
-    if (!this.isScratching || !this.wasPlayingBeforeScratch) return;
-    this.currentRate = playbackRateFromAngularVelocity(angularVelocity, this.nominalAngularVelocity, this.pitchModifier);
+    if (!this.isScratching) return;
+    // The hand controls the platter directly. The pitch modifier is already
+    // reflected in the motor's physical target, so applying it here too
+    // would make scratch audio run at pitch squared during release inertia.
+    this.currentRate = playbackRateFromAngularVelocity(angularVelocity, this.nominalAngularVelocity);
+    if (!this.wasPlayingBeforeScratch) return;
+    const magnitude = Math.abs(this.currentRate);
+    if (magnitude < 0.002) {
+      this.nativePauseSuppressed = true;
+      this.element?.pause();
+      this.nativePauseSuppressed = false;
+    } else {
+      // Native media has no portable reverse-playback support. Forward
+      // motion is audible at the hand speed; reverse motion is represented
+      // by a low forward decoder rate plus a controlled backwards seek.
+      this._nativePlaybackRate(this.currentRate < 0 ? NATIVE_MIN_PLAYBACK_RATE : magnitude);
+      if (this.element?.paused) this.element.play().catch(() => {});
+    }
     this._startScratchTicker();
   }
 
@@ -349,7 +440,7 @@ export class VinylAudioEngine {
     if (resume && this.isPlaying) {
       this.currentRate = this.targetMotorRate;
       this._nativePlaybackRate(this.currentRate);
-      this.element?.play().catch(() => {});
+      if (this.element?.paused) this.element.play().catch(() => {});
     } else {
       this.currentRate = 0;
     }
@@ -359,6 +450,7 @@ export class VinylAudioEngine {
     if (!this.element || !this.src) return;
     this._syncDuration();
     this.position = Math.max(0, Math.min(this.duration || Number.MAX_SAFE_INTEGER, Number(seconds) || 0));
+    this.scratchPosition = this.position;
     try {
       this.element.currentTime = this.position;
     } catch {
@@ -371,6 +463,7 @@ export class VinylAudioEngine {
     if (!this.element || !this.src) throw new Error('Load a track before pressing play.');
     const context = this.ensureContext();
     if (context?.state === 'suspended') await context.resume();
+    this._cancelRateRamp();
     this._syncDuration();
     if (this.duration && this.position >= this.duration - 0.01) this.seek(0);
     const wasStopping = this.isStopping;
@@ -433,12 +526,16 @@ export class VinylAudioEngine {
   }
 
   _finishPause() {
-    this.position = this._nativeTime();
+    if (!(this.isScratching && this.currentRate < 0)) this.position = this._nativeTime();
     this._cancelBrake();
+    this._cancelRateRamp();
+    this._stopScratchTicker();
     this.nativePauseSuppressed = true;
     this.element?.pause();
     this.nativePauseSuppressed = false;
     this.isPlaying = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
     this.currentRate = 0;
     this._stopTicker();
     this._emit('pause');
@@ -474,20 +571,32 @@ export class VinylAudioEngine {
       const now = nowMs();
       const elapsedSeconds = Math.min(0.1, Math.max(0, now - this.scratchLastAt) / 1000);
       this.scratchLastAt = now;
-      const nextPosition = this.position + (this.currentRate * elapsedSeconds);
-      const bounded = Math.max(0, Math.min(this.duration || Number.MAX_SAFE_INTEGER, nextPosition));
-      this.position = bounded;
-      try {
-        this.element.currentTime = bounded;
-      } catch {
-        // Ignore a seek that races metadata loading.
+      if (this.currentRate < -0.002) {
+        // HTMLAudioElement has no reliable reverse playback. Keep it at a
+        // safe audible rate while the hand-driven seek moves the playhead
+        // backwards; forward hand motion uses the native decoder directly.
+        const nextPosition = this.scratchPosition + (this.currentRate * elapsedSeconds);
+        const bounded = Math.max(0, Math.min(this.duration || Number.MAX_SAFE_INTEGER, nextPosition));
+        this.scratchPosition = bounded;
+        this.position = bounded;
+        try {
+          this.element.currentTime = bounded;
+        } catch {
+          // Ignore a seek that races metadata loading.
+        }
+      } else {
+        this.position = this._nativeTime();
+        this.scratchPosition = this.position;
       }
       this._emit('timeupdate');
-      if ((this.currentRate < 0 && bounded <= 0) || (this.currentRate > 0 && this.duration && bounded >= this.duration)) {
+      if ((this.currentRate < 0 && this.position <= 0) || (this.currentRate > 0 && this.duration && this.position >= this.duration)) {
         this.isPlaying = false;
         this.isScratching = false;
         this.wasPlayingBeforeScratch = false;
         this.currentRate = 0;
+        this.nativePauseSuppressed = true;
+        this.element.pause();
+        this.nativePauseSuppressed = false;
         this._stopScratchTicker();
         this._emit('ended');
       }

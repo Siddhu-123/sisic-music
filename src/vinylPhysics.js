@@ -2,8 +2,8 @@ export const VINYL_RPM = 45;
 export const VINYL_SECONDS_PER_TURN = 60 / VINYL_RPM;
 // The record starts at the outer groove (0%) and travels inward toward the center label (100%).
 // These angles keep the stylus strictly on the vinyl grooves instead of swinging off the deck.
-export const TONEARM_START_ANGLE = 22;
-export const TONEARM_END_ANGLE = 42;
+export const TONEARM_START_ANGLE = 2;
+export const TONEARM_END_ANGLE = 21;
 export const TONEARM_LIFTED_ANGLE = 10;
 
 export function vinylSecondsPerTurn(rpm = VINYL_RPM, pitchModifier = 1) {

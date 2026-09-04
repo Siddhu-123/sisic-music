@@ -250,8 +250,7 @@ select:focus-visible,
 .turntable__vinyl {
   background: transparent;
   box-shadow: none;
-  animation: none;
-  animation-play-state: paused;
+  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--record-rotation, 0deg));
 }
 
 .turntable--lifted .turntable__vinyl {
@@ -273,8 +272,6 @@ select:focus-visible,
   box-shadow: 0 18px 30px rgba(0, 0, 0, 0.58), inset 0 0 0 1px rgba(255, 255, 255, 0.16), inset 0 0 22px rgba(0, 0, 0, 0.92);
   pointer-events: none;
   will-change: transform;
-  animation: turntable-surface-spin var(--vinyl-spin-duration, 1.333333s) linear infinite;
-  animation-play-state: var(--vinyl-animation-state, paused);
 }
 
 .turntable__vinyl-surface::before,
@@ -289,11 +286,6 @@ select:focus-visible,
 .turntable__vinyl-surface::after {
   inset: 16%;
   border-color: rgba(0, 0, 0, 0.72);
-}
-
-.turntable__vinyl--paused .turntable__vinyl-surface,
-.turntable__vinyl--braking .turntable__vinyl-surface {
-  animation-play-state: paused;
 }
 
 .turntable--lifted .turntable__vinyl-surface {
@@ -383,11 +375,6 @@ select:focus-visible,
 
 .turntable__jacket {
   min-height: 44px;
-}
-
-@keyframes turntable-surface-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
 }
 
 /* Cards and artwork ------------------------------------------------------ */
@@ -776,12 +763,5 @@ select:focus-visible,
     bottom: 12px;
     left: 14px;
     font-size: 0.6rem;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .turntable__vinyl-surface,
-  .turntable__vinyl--braking .turntable__vinyl-surface {
-    animation: none;
   }
 }

@@ -3989,7 +3989,7 @@ input:focus-visible {
   cursor: grab;
   touch-action: none;
   user-select: none;
-  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg));
+  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--record-rotation, 0deg));
   background:
     radial-gradient(circle at 32% 27%, rgba(255, 255, 255, 0.08), transparent 19%, transparent 100%),
     repeating-radial-gradient(circle at center, #202229 0 0.55px, #08090d 0.9px 1.7px, #292c35 2px 2.25px),
@@ -4011,10 +4011,6 @@ input:focus-visible {
 .turntable__vinyl::after {
   inset: 16%;
   border-color: rgba(0, 0, 0, 0.72);
-}
-
-.turntable__vinyl--spinning {
-  animation: turntable-vinyl-spin 1.333333s linear infinite;
 }
 
 .turntable__vinyl:active,
@@ -4292,11 +4288,6 @@ input:focus-visible {
 }
 
 .turntable__crate-empty { margin: 4px 0; color: #777c85; font-size: 0.68rem; line-height: 1.4; }
-
-@keyframes turntable-vinyl-spin {
-  from { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg)); }
-  to { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(calc(var(--manual-record-angle, 0deg) + 360deg)); }
-}
 
 @media (max-width: 900px) {
   .turntable-shell { grid-template-columns: 1fr; }
