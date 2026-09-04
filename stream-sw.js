@@ -83,6 +83,10 @@ self.addEventListener('message', event => {
     driveAccessToken = nextToken;
     driveTokenVersion = nextVersion;
     tokenWaiters.forEach(resolve => resolve(Boolean(driveAccessToken)));
+    event.source?.postMessage?.({
+      type: 'SISIC_DRIVE_TOKEN_READY',
+      tokenVersion: driveTokenVersion,
+    });
   } else if (event.data?.type === 'SISIC_DRIVE_CLEAR_TOKEN') {
     driveAccessToken = '';
     driveTokenVersion = '';
@@ -146,8 +150,15 @@ async function streamDriveFile(fileId, request) {
       headers: responseHeaders,
     });
   } catch (error) {
-    const status = Number(error?.status) === 401 ? 401 : 502;
-    return streamError(error instanceof Error ? error.message : 'Drive stream failed.', status, status === 401 ? 'Unauthorized' : 'Bad Gateway');
+    const candidateStatus = Number(error?.status);
+    const status = Number.isInteger(candidateStatus) && candidateStatus >= 400 && candidateStatus <= 599
+      ? candidateStatus
+      : 502;
+    return streamError(
+      error instanceof Error ? error.message : 'Drive stream failed.',
+      status,
+      status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : 'Bad Gateway',
+    );
   }
 }
 
