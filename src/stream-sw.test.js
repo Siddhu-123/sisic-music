@@ -14,7 +14,7 @@ function workerContext() {
     },
   };
   vm.createContext(context);
-  const source = fs.readFileSync(new URL('./stream-sw.js', import.meta.url), 'utf8');
+  const source = fs.readFileSync(new URL('../public/stream-sw.js', import.meta.url), 'utf8');
   vm.runInContext(source, context);
   return context;
 }
