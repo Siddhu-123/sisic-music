@@ -9,6 +9,7 @@ import {
 import { cleanImportedFilename } from '../importIdentity.js';
 import { tokenExpiryFromResponse } from './driveAuth.js';
 import { getKnownDurationSeconds } from './downloadPolicy.js';
+import { getDriveAudioStreamUrl } from './driveStream.js';
 
 // drive.file limits writes to files created/opened by Sisic. The read-only
 // scope remains necessary because a configured Spotify export may predate the
@@ -1244,8 +1245,7 @@ export class GoogleDriveService {
   getAudioStreamUrl(fileId) {
     if (!fileId) return '';
     const baseHref = typeof window === 'undefined' ? 'http://localhost/' : window.location.href;
-    const appBase = new URL(import.meta.env?.BASE_URL || './', baseHref);
-    return new URL(`stream/${encodeURIComponent(fileId)}`, appBase).toString();
+    return getDriveAudioStreamUrl(fileId, import.meta.env?.BASE_URL || './', baseHref);
   }
 
   async findSongFile(songOrTitle, folderId, maybeArtist = '') {

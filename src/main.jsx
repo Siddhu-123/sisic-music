@@ -3,10 +3,11 @@ import { Component } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
 import App from './App.jsx';
+import { getDriveAppBaseUrl, getDriveStreamWorkerUrl } from './services/driveStream.js';
 
 if ('serviceWorker' in navigator) {
-  const appBase = new URL(import.meta.env.BASE_URL || './', window.location.href);
-  const workerUrl = new URL('stream-sw.js', appBase);
+  const appBase = getDriveAppBaseUrl(import.meta.env.BASE_URL || './', window.location.href);
+  const workerUrl = getDriveStreamWorkerUrl(import.meta.env.BASE_URL || './', window.location.href);
   navigator.serviceWorker.register(workerUrl, { scope: appBase.pathname })
     .then(registration => registration.update())
     .catch(error => console.warn('Drive stream worker registration failed:', error));

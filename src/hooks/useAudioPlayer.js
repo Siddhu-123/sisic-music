@@ -12,9 +12,19 @@ import {
 } from '../queueManager.js';
 import { driveService } from '../services/GoogleDriveService.js';
 import { EQ_PRESETS } from '../services/audioGraph.js';
+import {
+  getDriveAppBaseUrl,
+  getDriveStreamWorkerUrl,
+  isAudioStreamResponse,
+  isDriveStreamWorker,
+  streamFailureMessage,
+} from '../services/driveStream.js';
 import { VinylAudioEngine } from '../services/VinylAudioEngine.js';
 
 const QUEUE_STORAGE_KEY = 'sisic:queue-state:v1';
+const STREAM_WORKER_READY_TIMEOUT_MS = 5000;
+const STREAM_TOKEN_READY_TIMEOUT_MS = 1500;
+const TRANSIENT_MEDIA_FIELDS = ['localFile', 'blob', 'isDownloaded', 'isCached', 'hasBlob', 'cacheSizeBytes', 'cachedAt'];
 
 function isQueueReady(song) {
   return Boolean(song?.driveFileId);
@@ -78,38 +88,110 @@ function readPersistedQueueState() {
 }
 
 async function waitForStreamWorker() {
-  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return false;
-  if (navigator.serviceWorker.controller) return true;
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return null;
+  const baseUrl = import.meta.env.BASE_URL || './';
+  const appBase = getDriveAppBaseUrl(baseUrl, window.location.href);
+  const expectedWorkerUrl = getDriveStreamWorkerUrl(baseUrl, window.location.href);
+  const currentStreamWorker = () => {
+    const controller = navigator.serviceWorker.controller;
+    return isDriveStreamWorker(controller, expectedWorkerUrl) ? controller : null;
+  };
+
+  const controlledWorker = currentStreamWorker();
+  if (controlledWorker) return controlledWorker;
+
   try {
-    const registration = await new Promise(resolve => {
-      let timeout;
-      const finish = value => {
-        window.clearTimeout(timeout);
-        resolve(value);
-      };
-      navigator.serviceWorker.ready.then(finish, () => finish(null));
-      timeout = window.setTimeout(() => finish(null), 2000);
-    });
-    if (navigator.serviceWorker.controller) return true;
-    if (!registration?.active) return false;
+    const registration = await navigator.serviceWorker.register(expectedWorkerUrl, { scope: appBase.pathname });
+    registration.update().catch(() => {});
+    if (currentStreamWorker()) return currentStreamWorker();
+
     return await new Promise(resolve => {
-      let timeout;
+      let settled = false;
+      let timeout = null;
       const finish = () => {
-        window.clearTimeout(timeout);
-        navigator.serviceWorker.removeEventListener('controllerchange', finish);
-        resolve(Boolean(navigator.serviceWorker.controller));
+        if (settled) return;
+        settled = true;
+        if (timeout !== null) window.clearTimeout(timeout);
+        navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+        resolve(currentStreamWorker());
       };
-      timeout = window.setTimeout(finish, 2000);
-      navigator.serviceWorker.addEventListener('controllerchange', finish, { once: true });
+      const onControllerChange = () => {
+        if (currentStreamWorker()) finish();
+      };
+      timeout = window.setTimeout(finish, STREAM_WORKER_READY_TIMEOUT_MS);
+      navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+      navigator.serviceWorker.ready.then(() => {
+        if (currentStreamWorker()) finish();
+      }).catch(() => {});
+      if (currentStreamWorker()) finish();
     });
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function syncDriveStreamWorkerToken(worker) {
+  if (!worker || !driveService.isAuthenticated || typeof window === 'undefined') return false;
+  const expectedTokenVersion = driveService.tokenVersion;
+
+  return await new Promise(resolve => {
+    let settled = false;
+    let timeout = null;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== null) window.clearTimeout(timeout);
+      navigator.serviceWorker.removeEventListener('message', onMessage);
+      resolve(value);
+    };
+    const onMessage = event => {
+      if (event.data?.type !== 'SISIC_DRIVE_TOKEN_READY') return;
+      if (expectedTokenVersion && event.data.tokenVersion !== expectedTokenVersion) return;
+      finish(true);
+    };
+
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    if (!driveService.syncTokenToServiceWorker(worker)) {
+      finish(false);
+      return;
+    }
+    timeout = window.setTimeout(() => finish(false), STREAM_TOKEN_READY_TIMEOUT_MS);
+  });
+}
+
+async function probeDriveStream(streamUrl) {
+  try {
+    const response = await fetch(streamUrl, {
+      cache: 'no-store',
+      headers: { Range: 'bytes=0-0' },
+    });
+    const ready = isAudioStreamResponse(response);
+    const message = ready ? '' : streamFailureMessage(response);
+    try {
+      await response.body?.cancel?.();
+    } catch {
+      // The response was already consumed or does not expose a cancelable body.
+    }
+    return { ready, message };
+  } catch {
+    return {
+      ready: false,
+      message: 'The Drive stream could not be reached. Check your connection and try again.',
+    };
+  }
+}
+
+function toPlayerSong(song) {
+  const playerSong = { ...song };
+  TRANSIENT_MEDIA_FIELDS.forEach(field => delete playerSong[field]);
+  return playerSong;
 }
 
 export function useAudioPlayer() {
   const [audioEngine] = useState(() => new VinylAudioEngine());
   const audioRef = useRef(audioEngine);
+  const sourceSongRef = useRef(null);
+  const isSourceLoadingRef = useRef(false);
   const [restoredInitialState] = useState(() => readPersistedQueueState());
   const [currentSong, setCurrentSong] = useState(null);
   const [queue, setQueue] = useState(() => restoredInitialState?.queue || []);
@@ -185,6 +267,8 @@ export function useAudioPlayer() {
 
   const clearSource = useCallback(() => {
     loadRequestRef.current += 1;
+    sourceSongRef.current = null;
+    isSourceLoadingRef.current = false;
     const audio = audioRef.current;
     audio.clear();
     setIsPlaying(false);
@@ -207,12 +291,36 @@ export function useAudioPlayer() {
     setProgress(0);
     setDuration(0);
     if (!isLatestRequest()) return false;
+    const playerSong = toPlayerSong(song);
+    sourceSongRef.current = playerSong;
+    isSourceLoadingRef.current = true;
 
     try {
       if (song.driveFileId) {
         if (!driveService.isAuthenticated) throw new Error('Google Drive sign-in is required before this song can load.');
-        if (!await waitForStreamWorker()) throw new Error('Drive streaming is not ready. Reload the app once, then try again.');
-        await audio.loadUrl(driveService.getAudioStreamUrl(song.driveFileId));
+        const streamWorker = await waitForStreamWorker();
+        if (!streamWorker) throw new Error('Drive streaming is not ready. Reload the app once, then try again.');
+        const streamUrl = driveService.getAudioStreamUrl(song.driveFileId);
+        if (!await syncDriveStreamWorkerToken(streamWorker)) {
+          // A previously deployed stream worker does not acknowledge tokens. A
+          // one-byte same-origin check keeps that migration path working
+          // without ever buffering a media file in JavaScript.
+          const probe = await probeDriveStream(streamUrl);
+          if (!probe.ready) throw new Error(probe.message);
+        }
+        try {
+          await audio.loadUrl(streamUrl);
+        } catch (firstError) {
+          if (firstError?.name === 'AbortError') throw firstError;
+          const probe = await probeDriveStream(streamUrl);
+          if (!probe.ready) throw new Error(probe.message);
+          try {
+            await audio.loadUrl(streamUrl);
+          } catch (retryError) {
+            if (retryError?.name === 'AbortError') throw retryError;
+            throw new Error('Google Drive responded with audio, but the browser could not decode this file. Re-prepare the song or choose another source.');
+          }
+        }
       } else {
         clearSource();
         setCurrentSong(null);
@@ -223,12 +331,14 @@ export function useAudioPlayer() {
       if (!isLatestRequest()) return false;
       if (error?.name === 'AbortError') return false;
       console.error('Audio stream error:', error);
+      sourceSongRef.current = null;
+      isSourceLoadingRef.current = false;
       setError(error instanceof Error ? error.message : 'The audio stream could not be loaded.');
       return false;
     }
     if (!isLatestRequest()) return false;
-    const playerSong = { ...song };
-    ['localFile', 'blob', 'isDownloaded', 'isCached', 'hasBlob', 'cacheSizeBytes', 'cachedAt'].forEach(field => delete playerSong[field]);
+    sourceSongRef.current = playerSong;
+    isSourceLoadingRef.current = false;
     setCurrentSong(playerSong);
     audio.setVolume(volume);
     const restoreSeconds = Math.max(0, Number(startAt) || 0);
@@ -436,27 +546,30 @@ export function useAudioPlayer() {
       }
     };
     const onDurationChange = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
-    const onError = () => {
+    const onError = (event) => {
       if (!audio.getAttribute('src')) return;
-      const key = currentSong?.songKey;
-      const code = audio.error?.code;
-      const msg = audio.error?.message || '';
+      const failedSong = sourceSongRef.current || currentSong;
+      const key = failedSong?.songKey;
+      const code = event?.code || audio.error?.code;
+      const msg = event?.message || audio.error?.message || '';
       const payload = {
         code,
         msg,
         songKey: key,
+        driveFileId: failedSong?.driveFileId || '',
+        sourceUrl: event?.sourceUrl || audio.src,
         currentTime: Number(audio.currentTime || 0),
         duration: Number(audio.duration || 0),
       };
       console.error('Audio error:', payload);
       setIsPlaying(false);
-      if (currentSong) {
+      if (failedSong) {
         emitPlaybackEvent({
           eventType: 'playback-stream-error',
-          songKey: currentSong.songKey || '',
-          artist: currentSong.artist || '',
-          track: currentSong.track || '',
-          driveFileId: currentSong.driveFileId || '',
+          songKey: failedSong.songKey || '',
+          artist: failedSong.artist || '',
+          track: failedSong.track || '',
+          driveFileId: failedSong.driveFileId || '',
           positionSeconds: Number(audio.currentTime || 0),
           durationSeconds: Number(audio.duration || 0),
           expectedFullPlay: false,
@@ -464,11 +577,12 @@ export function useAudioPlayer() {
           message: `Audio error ${code || 'unknown'} ${msg}`.trim(),
         });
       }
-      if (currentSong?.driveFileId && !driveService.isAuthenticated) {
+      if (failedSong?.driveFileId && !driveService.isAuthenticated) {
         driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
         setError('Drive connection paused. Reconnect to continue streaming.');
         return;
       }
+      if (isSourceLoadingRef.current) return;
       if (key) failedSongKeysRef.current.add(key);
       setError('Playback could not continue. Press play to retry this song.');
     };

@@ -203,7 +203,12 @@ export class VinylAudioEngine {
     this.isPlaying = false;
     this.currentRate = 0;
     this._stopTicker();
-    this._emit('error');
+    const nativeError = this.element?.error;
+    this._emit('error', {
+      code: nativeError?.code || 0,
+      message: nativeError?.message || '',
+      sourceUrl: this.src,
+    });
   }
 
   _releaseCurrentSource() {
