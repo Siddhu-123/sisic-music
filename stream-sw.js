@@ -109,6 +109,20 @@ self.addEventListener('fetch', event => {
   }
 });
 
+function partialContentRange(start, end, totalSize) {
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(end)
+    || !Number.isSafeInteger(totalSize)
+    || start < 0
+    || end < start
+    || end >= totalSize
+  ) {
+    throw new Error('Invalid partial-content byte range.');
+  }
+  return `bytes ${start}-${end}/${totalSize}`;
+}
+
 async function streamDriveFile(fileId, request) {
   if (!driveAccessToken && !(await requestDriveToken())) {
     return new Response('Drive connection is not ready.', {
@@ -133,20 +147,25 @@ async function streamDriveFile(fileId, request) {
     }
 
     if (!upstream.body) throw new Error(`Drive returned an empty range for bytes ${start}-${end}.`);
-    const contentRange = upstream.headers.get('Content-Range');
     const contentLength = upstream.headers.get('Content-Length')
       || String(upstream.status === 206 ? end - start + 1 : metadata.size);
+    const responseStatus = upstream.status === 206 ? 206 : 200;
     const responseHeaders = new Headers({
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store',
       'Content-Length': contentLength,
       'Content-Type': metadata.mimeType || 'audio/mpeg',
     });
-    if (contentRange) responseHeaders.set('Content-Range', contentRange);
+    // Google Drive does return Content-Range, but does not expose it to a
+    // cross-origin browser fetch. Construct the required header from the
+    // request we sent and the verified Drive file size instead.
+    if (responseStatus === 206) {
+      responseHeaders.set('Content-Range', partialContentRange(start, end, metadata.size));
+    }
 
     return new Response(upstream.body, {
-      status: upstream.status === 206 ? 206 : 200,
-      statusText: upstream.status === 206 ? 'Partial Content' : 'OK',
+      status: responseStatus,
+      statusText: responseStatus === 206 ? 'Partial Content' : 'OK',
       headers: responseHeaders,
     });
   } catch (error) {
