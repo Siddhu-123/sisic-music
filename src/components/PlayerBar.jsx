@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Volume2, CheckCircle2, Shuffle, ListMusic, Cloud, Info } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Volume2, Shuffle, ListMusic, Cloud, Info } from 'lucide-react';
 import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { ExpandedPlayer } from './ExpandedPlayer.jsx';
@@ -11,7 +11,7 @@ export function PlayerBar({
   onAddToPlaylist,
   onDelete,
   onReview,
-  onDownload,
+  onPrepare,
   onPlayNext,
   onAddToQueue,
   onOpenEqualizer,
@@ -52,10 +52,7 @@ export function PlayerBar({
                 <span className="player-artist">{currentSong.artist}</span>
               </span>
             </button>
-            {currentSong.isDownloaded || currentSong.isCached || currentSong.hasBlob
-              ? <CheckCircle2 size={16} color="var(--green)" style={{ marginLeft: 'auto' }} />
-              : <Cloud size={16} color="var(--text-muted)" style={{ marginLeft: 'auto' }} />
-            }
+            <Cloud size={16} color="var(--text-muted)" style={{ marginLeft: 'auto' }} />
             <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info">
               <Info size={16} />
             </button>
@@ -128,7 +125,7 @@ export function PlayerBar({
           onAddToPlaylist={onAddToPlaylist}
           onDelete={onDelete}
           onReview={onReview}
-          onDownload={onDownload}
+          onPrepare={onPrepare}
           onPlayNext={onPlayNext}
           onAddToQueue={onAddToQueue}
           onOpenEqualizer={onOpenEqualizer}

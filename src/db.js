@@ -1,8 +1,21 @@
 import Dexie from 'dexie';
 import { asSongRecord, getPlaylistKey, getSongKey } from './songIdentity.js';
+import { parseDurationSeconds } from './services/downloadPolicy.js';
 
-export const AUDIO_CACHE_LIMIT_BYTES = 500 * 1024 * 1024;
 export const db = new Dexie('SisicMusicDB');
+
+const LEGACY_AUDIO_FIELDS = new Set([
+  'blob',
+  'isDownloaded',
+  'isCached',
+  'hasBlob',
+  'cacheSizeBytes',
+  'cachedAt',
+  'audioData',
+  'audioMimeType',
+  'imageData',
+  'imageMimeType',
+]);
 
 db.version(2).stores({
   songs: '++id, track, artist, album, driveFileId, isDownloaded, playlistName, playCount',
@@ -19,13 +32,16 @@ db.version(3).stores({
   const songsTable = tx.table('songs');
   const playlistsTable = tx.table('playlists');
   const playlistSongsTable = tx.table('playlistSongs');
-  const oldSongs = await songsTable.toArray();
-
   const bySongKey = new Map();
   const playlistLinks = new Map();
 
-  for (const old of oldSongs) {
-    const base = asSongRecord(old);
+  await songsTable.toCollection().each(old => {
+    // Read one legacy record at a time and never retain its binary payload in
+    // the migration maps. Version 4 drops the payload instead of migrating it.
+    const metadataOnly = Object.fromEntries(
+      Object.entries(old).filter(([key]) => !LEGACY_AUDIO_FIELDS.has(key)),
+    );
+    const base = asSongRecord(metadataOnly);
     const previous = bySongKey.get(base.songKey);
     const candidate = {
       track: base.track,
@@ -33,10 +49,6 @@ db.version(3).stores({
       album: base.album || previous?.album || '',
       songKey: base.songKey,
       driveFileId: base.driveFileId || previous?.driveFileId || null,
-      isDownloaded: Boolean(base.isDownloaded || previous?.isDownloaded),
-      isCached: Boolean(base.isCached || old.blob || previous?.isCached),
-      cacheSizeBytes: base.cacheSizeBytes || old.blob?.size || previous?.cacheSizeBytes || 0,
-      cachedAt: base.cachedAt || previous?.cachedAt || (old.blob ? Date.now() : null),
       playCount: Math.max(base.playCount || 0, previous?.playCount || 0),
       lastPlayedAt: base.lastPlayedAt || previous?.lastPlayedAt || null,
       dateAdded: base.dateAdded || previous?.dateAdded || Date.now(),
@@ -51,7 +63,7 @@ db.version(3).stores({
       playlistName,
       addedAt: old.dateAdded || Date.now(),
     });
-  }
+  });
 
   await songsTable.clear();
   if (bySongKey.size > 0) await songsTable.bulkAdd([...bySongKey.values()]);
@@ -79,50 +91,12 @@ db.version(4).stores({
 }).upgrade(async tx => {
   const songsTable = tx.table('songs');
   const audioTable = tx.table('songAudio');
-  const songs = await songsTable.toArray();
-
-  for (const song of songs) {
-    if (!song.blob) {
-      if (song.isCached || song.isDownloaded || song.cacheSizeBytes || song.cachedAt) {
-        await songsTable.update(song.id, {
-          blob: null,
-          isDownloaded: false,
-          isCached: false,
-          cacheSizeBytes: 0,
-          cachedAt: null,
-        });
-      }
-      continue;
-    }
-
-    const cachedAt = song.cachedAt || Date.now();
-    const cacheSizeBytes = song.cacheSizeBytes || song.blob.size || 0;
-    let storedAudio = false;
-
-    try {
-      const audioData = await song.blob.arrayBuffer();
-      await audioTable.put({
-        songKey: song.songKey,
-        audioData,
-        audioMimeType: song.blob.type || 'audio/mpeg',
-        cacheSizeBytes: cacheSizeBytes || audioData.byteLength || 0,
-        cachedAt,
-        explicit: Boolean(song.isDownloaded),
-      });
-      storedAudio = true;
-    } catch (error) {
-      console.warn('Dropping legacy cached audio that could not be migrated:', song.songKey, error);
-    }
-
-    await songsTable.update(song.id, {
-      blob: null,
-      isDownloaded: storedAudio ? Boolean(song.isDownloaded) : false,
-      isCached: storedAudio,
-      cacheSizeBytes: storedAudio ? cacheSizeBytes : 0,
-      cachedAt: storedAudio ? cachedAt : null,
-    });
-  }
-
+  // Do not deserialize or copy legacy media. This migration intentionally
+  // drops old browser audio instead of moving it into another binary store.
+  await songsTable.toCollection().modify(song => {
+    LEGACY_AUDIO_FIELDS.forEach(field => delete song[field]);
+  });
+  await audioTable.clear();
   await tx.table('metadata').put({ key: 'schemaVersion', value: 4 });
 });
 
@@ -183,6 +157,47 @@ db.version(8).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 8 });
 });
 
+// Remove persisted media bytes from existing installations before dropping the
+// old stores in version 10. Library metadata, playlists, jobs, and embeddings
+// remain intact.
+db.version(9).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, isDownloaded, isCached, playCount, lastPlayedAt, cachedAt, fileIdentity, importStatus, syncStatus, embeddingStatus, coverArtUrl',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songAudio: '&songKey, cachedAt, cacheSizeBytes, explicit',
+  songArt: '&songKey, coverArtUrl, cachedAt',
+  songEmbeddings: '&songKey, updatedAt',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  playbackEvents: '&eventId, songKey, eventType, createdAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  const songs = tx.table('songs');
+  await songs.toCollection().modify(song => {
+    LEGACY_AUDIO_FIELDS.forEach(field => delete song[field]);
+  });
+  await tx.table('songAudio').clear();
+  await tx.table('songArt').clear();
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 9 });
+});
+
+db.version(10).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, playCount, lastPlayedAt, fileIdentity, importStatus, syncStatus, embeddingStatus, coverArtUrl',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songEmbeddings: '&songKey, updatedAt',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  playbackEvents: '&eventId, songKey, eventType, createdAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 10 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -195,6 +210,8 @@ function completedAudioFileId(job = {}) {
 
 function normalizeSongInput(input = {}) {
   const song = asSongRecord(input);
+  const durationSeconds = parseDurationSeconds(song.durationSeconds ?? song.duration)
+    || parseDurationSeconds(Number(song.durationMs || 0) / 1000);
   return {
     songKey: song.songKey,
     track: song.track,
@@ -209,14 +226,10 @@ function normalizeSongInput(input = {}) {
     metadataStatus: song.metadataStatus || '',
     metadataSource: song.metadataSource || '',
     driveFileId: song.driveFileId || null,
-    isDownloaded: Boolean(song.isDownloaded),
-    isCached: Boolean(song.isCached),
-    cacheSizeBytes: song.cacheSizeBytes || 0,
-    cachedAt: song.cachedAt || null,
     playCount: song.playCount || 0,
     lastPlayedAt: song.lastPlayedAt || null,
     dateAdded: song.dateAdded || Date.now(),
-    durationSeconds: Number(song.durationSeconds || 0) || null,
+    durationSeconds,
     format: song.format || '',
     fileIdentity: song.fileIdentity || '',
     localFileName: song.localFileName || '',
@@ -230,8 +243,11 @@ function normalizeSongInput(input = {}) {
 
 function bestSongMerge(previous, incoming) {
   if (!previous) return incoming;
+  const previousWithoutLegacyAudio = Object.fromEntries(
+    Object.entries(previous).filter(([key]) => !LEGACY_AUDIO_FIELDS.has(key)),
+  );
   return {
-    ...previous,
+    ...previousWithoutLegacyAudio,
     track: incoming.track || previous.track,
     artist: incoming.artist || previous.artist,
     album: incoming.album || previous.album || '',
@@ -244,10 +260,6 @@ function bestSongMerge(previous, incoming) {
     metadataStatus: incoming.metadataStatus || previous.metadataStatus || '',
     metadataSource: incoming.metadataSource || previous.metadataSource || '',
     driveFileId: incoming.driveFileId || previous.driveFileId || null,
-    isDownloaded: Boolean(previous.isDownloaded || incoming.isDownloaded),
-    isCached: Boolean(previous.isCached || incoming.isCached),
-    cacheSizeBytes: previous.cacheSizeBytes || incoming.cacheSizeBytes || 0,
-    cachedAt: previous.cachedAt || incoming.cachedAt || null,
     playCount: Math.max(previous.playCount || 0, incoming.playCount || 0),
     lastPlayedAt: previous.lastPlayedAt || incoming.lastPlayedAt || null,
     dateAdded: previous.dateAdded || incoming.dateAdded || Date.now(),
@@ -263,15 +275,10 @@ function bestSongMerge(previous, incoming) {
   };
 }
 
-function withoutLegacyBlob(song) {
+function withoutLegacyAudioState(song) {
   const copy = { ...song };
-  delete copy.blob;
+  LEGACY_AUDIO_FIELDS.forEach(field => delete copy[field]);
   return copy;
-}
-
-function isCachedAudioUsable(audio = {}) {
-  const mimeType = String(audio.audioMimeType || '').toLowerCase();
-  return Boolean(audio.audioData && (!mimeType || mimeType.startsWith('audio/')));
 }
 
 async function putPlaylistMembership(tables, playlistName, songKey, source = 'spotify') {
@@ -476,17 +483,11 @@ export async function markSongPlayable(songKeyOrSong, driveFileId) {
 
 export async function clearSongPlayable(songKeyOrSong) {
   const songKey = typeof songKeyOrSong === 'string' ? songKeyOrSong : getSongKey(songKeyOrSong);
-  await db.transaction('rw', db.songs, db.songAudio, async () => {
-    await db.songAudio.delete(songKey);
+  await db.transaction('rw', db.songs, async () => {
     const song = await db.songs.where('songKey').equals(songKey).first();
     if (!song) return;
     await db.songs.update(song.id, {
       driveFileId: null,
-      isDownloaded: false,
-      isCached: false,
-      cacheSizeBytes: 0,
-      cachedAt: null,
-      blob: null,
     });
   });
 }
@@ -506,84 +507,6 @@ export async function recordPlaybackEvent(event = {}) {
   const row = { eventId: event.id, ...event };
   await db.playbackEvents.put(row);
   return row;
-}
-
-export async function cacheSongBlob(songKey, blob, driveFileId, { explicit = false } = {}) {
-  if (!songKey || !blob) return;
-  const song = await db.songs.where('songKey').equals(songKey).first();
-  if (!song) return;
-  const cachedDriveFileId = driveFileId || song.driveFileId || null;
-  const audioData = await blob.arrayBuffer();
-  const cacheSizeBytes = blob.size || audioData.byteLength || 0;
-  const cachedAt = Date.now();
-  await db.transaction('rw', db.songs, db.songAudio, async () => {
-    await db.songAudio.put({
-      songKey,
-      audioData,
-      audioMimeType: blob.type || 'audio/mpeg',
-      cacheSizeBytes,
-      cachedAt,
-      explicit: Boolean(explicit),
-      driveFileId: cachedDriveFileId,
-    });
-    await db.songs.update(song.id, {
-      driveFileId: cachedDriveFileId,
-      isDownloaded: Boolean(explicit || song.isDownloaded),
-      isCached: true,
-      cacheSizeBytes,
-      cachedAt,
-      blob: null,
-    });
-  });
-}
-
-export async function getCachedSongAudio(songKey, expectedDriveFileId = '') {
-  if (!songKey) return null;
-  const audio = await db.songAudio.where('songKey').equals(songKey).first();
-  if (!isCachedAudioUsable(audio)) return null;
-  if (expectedDriveFileId && String(audio.driveFileId || '') !== String(expectedDriveFileId)) return null;
-  return {
-    blob: new Blob([audio.audioData], { type: audio.audioMimeType || 'audio/mpeg' }),
-    hasBlob: true,
-    isCached: true,
-    cacheSizeBytes: audio.cacheSizeBytes || audio.audioData.byteLength || 0,
-    cachedAt: audio.cachedAt || null,
-    driveFileId: audio.driveFileId || null,
-  };
-}
-
-export async function enforceAudioCacheLimit(limitBytes = AUDIO_CACHE_LIMIT_BYTES) {
-  const cached = await db.songAudio
-    .filter(audio => !audio.explicit)
-    .toArray();
-  let total = cached.reduce((sum, audio) => sum + (audio.cacheSizeBytes || audio.audioData?.byteLength || 0), 0);
-  if (total <= limitBytes) return 0;
-
-  const songs = await db.songs.bulkGet(cached.map(audio => audio.songKey));
-  const lastPlayedBySong = new Map(songs.filter(Boolean).map(song => [song.songKey, song.lastPlayedAt || 0]));
-  cached.sort((a, b) => {
-    const aLastUsed = lastPlayedBySong.get(a.songKey) || a.cachedAt || 0;
-    const bLastUsed = lastPlayedBySong.get(b.songKey) || b.cachedAt || 0;
-    return aLastUsed - bLastUsed;
-  });
-  let removed = 0;
-  for (const audio of cached) {
-    if (total <= limitBytes) break;
-    total -= audio.cacheSizeBytes || audio.audioData?.byteLength || 0;
-    await db.transaction('rw', db.songAudio, db.songs, async () => {
-      await db.songAudio.delete(audio.songKey);
-      const song = await db.songs.where('songKey').equals(audio.songKey).first();
-      if (song && !song.isDownloaded) {
-        await db.songs.update(song.id, {
-          isCached: false,
-          cacheSizeBytes: 0,
-          cachedAt: null,
-        });
-      }
-    });
-    removed++;
-  }
-  return removed;
 }
 
 export async function syncLibraryToDb(songs) {
@@ -667,7 +590,7 @@ export async function getPlaylistSnapshotForDrive({ excludePlaylistKeys = [] } =
 
 export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false } = {}) {
   if (!replaceSnapshot && !jobs.length) return;
-  await db.transaction('rw', db.downloadJobs, db.songs, db.songAudio, async () => {
+  await db.transaction('rw', db.downloadJobs, db.songs, async () => {
     if (replaceSnapshot) {
       const remoteJobIds = new Set(jobs.map(job => job?.jobId).filter(Boolean));
       const staleJobIds = (await db.downloadJobs.toArray())
@@ -698,32 +621,8 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
       const uploadedFileId = completedAudioFileId(job);
       if (job.status !== 'done' || !uploadedFileId) continue;
       const song = await db.songs.where('songKey').equals(job.songKey).first();
-      const cachedAudio = await db.songAudio.get(job.songKey);
-      const cachedFileId = String(cachedAudio?.driveFileId || '');
-      const cacheBelongsToUploadedFile = Boolean(cachedAudio && cachedFileId && cachedFileId === uploadedFileId);
-      const isReplacement = Boolean(job.replacementForFileId);
-      const shouldInvalidateCache = Boolean(cachedAudio && (
-        (cachedFileId && !cacheBelongsToUploadedFile)
-        || (!cachedFileId && isReplacement)
-      ));
-
-      if (shouldInvalidateCache) await db.songAudio.delete(job.songKey);
-      else if (cachedAudio && !cachedFileId) {
-        // A legacy local-import cache has no provenance, but it is the source
-        // file for a first upload. Adopt the uploaded Drive ID so future
-        // playback can distinguish it from a later replacement.
-        await db.songAudio.update(job.songKey, { driveFileId: uploadedFileId });
-      }
       if (song) {
-        await db.songs.update(song.id, {
-          driveFileId: uploadedFileId,
-          ...(shouldInvalidateCache ? {
-            isDownloaded: false,
-            isCached: false,
-            cacheSizeBytes: 0,
-            cachedAt: null,
-          } : {}),
-        });
+        await db.songs.update(song.id, { driveFileId: uploadedFileId });
       }
     }
   });
@@ -731,12 +630,11 @@ export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false 
 
 export async function getLibrarySnapshot() {
   try {
-    const [songsRaw, playlistsRaw, links, jobsRaw, audioRows, embeddingRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
+    const [songsRaw, playlistsRaw, links, jobsRaw, embeddingRows, importJobs, embeddingJobs, syncOutbox, playbackEvents] = await Promise.all([
       db.songs.toArray(),
       db.playlists.toArray(),
       db.playlistSongs.toArray(),
       db.downloadJobs.toArray(),
-      db.songAudio.toArray(),
       db.songEmbeddings.toArray(),
       db.importJobs.toArray(),
       db.embeddingJobs.toArray(),
@@ -745,7 +643,6 @@ export async function getLibrarySnapshot() {
     ]);
 
     const playlistByKey = new Map(playlistsRaw.map(pl => [pl.playlistKey, pl]));
-    const audioBySongKey = new Map(audioRows.map(audio => [audio.songKey, audio]));
     const embeddingsBySongKey = new Map(embeddingRows.map(embedding => [embedding.songKey, embedding]));
     const linksBySong = new Map();
     const countsByPlaylist = new Map();
@@ -766,21 +663,14 @@ export async function getLibrarySnapshot() {
     }
 
     const songs = songsRaw.map(rawSong => {
-      const song = withoutLegacyBlob(rawSong);
+      const song = withoutLegacyAudioState(rawSong);
       const playlistKeys = linksBySong.get(song.songKey) || [];
       const playlistNames = playlistKeys.map(key => playlistByKey.get(key)?.name).filter(Boolean);
-      const audio = audioBySongKey.get(song.songKey);
       const embedding = embeddingsBySongKey.get(song.songKey);
-      const hasAudio = isCachedAudioUsable(audio);
       const hasJobFileAsDriveFile = Boolean(song.driveFileId && jobFileIds.has(song.driveFileId));
       return {
         ...song,
         driveFileId: hasJobFileAsDriveFile ? null : song.driveFileId,
-        hasBlob: hasAudio,
-        isDownloaded: Boolean(song.isDownloaded && hasAudio),
-        isCached: hasAudio,
-        cacheSizeBytes: hasAudio ? (song.cacheSizeBytes || audio?.cacheSizeBytes || 0) : 0,
-        cachedAt: hasAudio ? (song.cachedAt || audio?.cachedAt || null) : null,
         playlistKeys,
         playlists: playlistNames,
         playlistName: playlistNames[0] || '',
@@ -809,43 +699,14 @@ export async function getLibrarySnapshot() {
       error: '',
     };
   } catch (error) {
-    console.error('Local music cache failed:', error);
-    return { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: `Local music cache is unavailable: ${errorMessage(error)}` };
+    console.error('Local library read failed:', error);
+    return { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: `Local library is unavailable: ${errorMessage(error)}` };
   }
 }
 
 export async function resetLocalDatabase() {
   await db.delete();
   await db.open();
-}
-
-export async function saveSongArtwork(songKey, artworkData = {}) {
-  if (!songKey || !db?.songArt) return;
-  await db.songArt.put({
-    songKey,
-    coverArtUrl: artworkData.coverArtUrl || '',
-    imageData: artworkData.imageData || null,
-    imageMimeType: artworkData.imageMimeType || '',
-    album: artworkData.album || '',
-    genre: artworkData.genre || '',
-    releaseYear: artworkData.releaseYear || null,
-    isProcedural: Boolean(artworkData.isProcedural),
-    cachedAt: Date.now(),
-  });
-  if (artworkData.coverArtUrl && db.songs) {
-    const existing = await db.songs.where('songKey').equals(songKey).first();
-    if (existing) {
-      await db.songs.update(existing.id, {
-        coverArtUrl: artworkData.coverArtUrl,
-        album: artworkData.album || existing.album || '',
-      });
-    }
-  }
-}
-
-export async function getStoredSongArtwork(songKey) {
-  if (!songKey || !db?.songArt) return null;
-  return await db.songArt.get(songKey);
 }
 
 export async function saveSongEmbedding(songKey, embeddingData = {}) {
@@ -858,14 +719,4 @@ export async function saveSongEmbedding(songKey, embeddingData = {}) {
     provider: embeddingData.provider || 'sisic-client',
     updatedAt: new Date().toISOString(),
   });
-}
-
-export async function getStoredSongEmbedding(songKey) {
-  if (!songKey || !db?.songEmbeddings) return null;
-  return await db.songEmbeddings.get(songKey);
-}
-
-export async function getAllSongEmbeddings() {
-  if (!db?.songEmbeddings) return [];
-  return await db.songEmbeddings.toArray();
 }

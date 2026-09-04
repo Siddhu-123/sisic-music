@@ -39,6 +39,10 @@ class AudioGraphManager {
     if (!audioElement || typeof window === 'undefined') return null;
     if (this.attachedElement === audioElement && this.sourceNode) return this.audioContext;
 
+    if (this.attachedElement && this.attachedElement !== audioElement) {
+      this.detachAudioElement();
+    }
+
     const ctx = this.ensureContext();
     if (!ctx) return null;
 
@@ -101,6 +105,18 @@ class AudioGraphManager {
     return this.attachedElement === audioElement && Boolean(this.sourceNode);
   }
 
+  detachAudioElement() {
+    this.sourceNode?.disconnect?.();
+    this.filterNodes.forEach(node => node?.disconnect?.());
+    this.masterGainNode?.disconnect?.();
+    this.analyserNode?.disconnect?.();
+    this.sourceNode = null;
+    this.filterNodes = [];
+    this.masterGainNode = null;
+    this.analyserNode = null;
+    this.attachedElement = null;
+  }
+
   setVolume(volume) {
     const clamped = Math.max(0, Math.min(1, Number(volume) || 0));
     if (this.masterGainNode && this.audioContext) {
@@ -146,6 +162,12 @@ class AudioGraphManager {
     const data = new Uint8Array(this.analyserNode.fftSize);
     this.analyserNode.getByteTimeDomainData(data);
     return data;
+  }
+
+  dispose() {
+    this.detachAudioElement();
+    this.audioContext?.close?.().catch?.(() => {});
+    this.audioContext = null;
   }
 }
 

@@ -14,7 +14,7 @@ export function ExpandedPlayer({
   onAddToPlaylist,
   onDelete,
   onReview,
-  onDownload,
+  onPrepare,
   onPlayNext,
   onAddToQueue,
   onOpenEqualizer,
@@ -188,7 +188,7 @@ export function ExpandedPlayer({
                 <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(currentSong)}><Plus size={16} /> Playlist</button>
                 <button className="panel-action-btn" onClick={() => onPlayNext?.(currentSong)}><SkipForward size={16} /> Play next</button>
                 <button className="panel-action-btn" onClick={() => onAddToQueue?.(currentSong)}><ListMusic size={16} /> Queue</button>
-                <button className="panel-action-btn" onClick={() => onDownload?.(currentSong)}><Download size={16} /> Offline</button>
+                <button className="panel-action-btn" onClick={() => onPrepare?.(currentSong)}><Download size={16} /> Prepare on Drive</button>
                 <button className="panel-action-btn" onClick={() => onReview?.(currentSong)}><RefreshCw size={16} /> Review</button>
                 <button className="panel-action-btn panel-action-btn--danger" onClick={() => onDelete?.(currentSong)}><Trash2 size={16} /> Delete</button>
               </div>

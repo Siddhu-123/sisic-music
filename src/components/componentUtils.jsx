@@ -1,10 +1,8 @@
 import {
   AlertTriangle,
-  CheckCircle2,
   Cloud,
   Clock3,
   Download,
-  HardDriveDownload,
   Trash2,
 } from 'lucide-react';
 
@@ -17,14 +15,13 @@ export function formatTime(seconds) {
 
 export function statusDetails(song) {
   const status = song.status || song.downloadJob?.status;
-  if (song.isDownloaded) return { label: 'Offline', icon: CheckCircle2, className: 'song-status--ready' };
-  if (song.isCached || song.hasBlob) return { label: 'Cached', icon: HardDriveDownload, className: 'song-status--ready' };
   if (status === 'needs-review') return { label: 'Choose source', icon: AlertTriangle, className: 'song-status--error' };
   if (song.driveFileId) return { label: 'Ready', icon: Cloud, className: 'song-status--ready' };
   if (status === 'queued') return { label: 'Queued', icon: Clock3, className: 'song-status--queued' };
   if (status === 'downloading') return { label: 'Downloading', icon: Clock3, className: 'song-status--downloading' };
   if (status === 'done') return { label: 'Ready', icon: Cloud, className: 'song-status--ready' };
   if (status === 'blocked' || status === 'deleted') return { label: 'Deleted', icon: Trash2, className: 'song-status--error' };
+  if (status === 'cancelled') return { label: 'Request trashed', icon: Trash2, className: 'song-status--error' };
   if (status === 'error' || status === 'failed') return { label: 'Failed', icon: AlertTriangle, className: 'song-status--error' };
   return { label: 'Request', icon: Download, className: 'song-status--missing' };
 }
@@ -35,6 +32,7 @@ export function downloadStatusText(song) {
   if (job?.status === 'downloading') return 'Mac worker is downloading';
   if (job?.status === 'needs-review') return 'Choose a YouTube source for the Mac worker';
   if (job?.status === 'blocked') return 'Blocked; manual import required';
+  if (job?.status === 'cancelled') return 'Download request trashed; queue again if needed';
   if (job?.status === 'failed' || job?.status === 'error') return `Mac failed${job.lastError ? ` · ${job.lastError}` : ''}`;
   return 'Not queued for the Mac worker';
 }

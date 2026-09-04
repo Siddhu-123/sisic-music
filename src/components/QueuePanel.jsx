@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Shuffle, Repeat, Clock3, AlertTriangle, Cloud, HardDriveDownload, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
+import { X, Shuffle, Repeat, Clock3, AlertTriangle, Cloud, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 
 const SHUFFLE_LABELS = { off: 'Off', shuffle: 'Shuffle', smart: 'Smart' };
@@ -7,7 +7,6 @@ const REPEAT_LABELS = { off: 'Repeat off', one: 'Repeat one', all: 'Repeat all' 
 
 function queueStatus(song, jobBySongKey) {
   const job = jobBySongKey?.get(song.songKey) || song.downloadJob;
-  if (song.isDownloaded || song.isCached || song.hasBlob) return { label: 'Cached', icon: HardDriveDownload, className: 'queue-pill--ready' };
   if (song.driveFileId) return { label: 'Ready', icon: Cloud, className: 'queue-pill--ready' };
   if (job?.status === 'error' || job?.status === 'failed') return { label: 'Failed', icon: AlertTriangle, className: 'queue-pill--error' };
   if (job?.status === 'downloading') return { label: 'Downloading', icon: Clock3, className: 'queue-pill--working' };

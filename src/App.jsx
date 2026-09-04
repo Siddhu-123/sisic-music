@@ -2,13 +2,9 @@ import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRe
 import { useLiveQuery } from 'dexie-react-hooks';
 import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal } from 'lucide-react';
 import {
-  AUDIO_CACHE_LIMIT_BYTES,
   addSongToPlaylist,
-  cacheSongBlob,
   clearSongPlayable,
   enqueueSyncOutbox,
-  enforceAudioCacheLimit,
-  getCachedSongAudio,
   getLibrarySnapshot,
   getPlaylistSnapshotForDrive,
   markSongPlayable,
@@ -32,8 +28,13 @@ import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
-import { collectAudioFiles, importAudioFiles, queueCachedLocalImports } from './services/importService.js';
+import { collectAudioFiles, importAudioFiles } from './services/importService.js';
 import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
+import {
+  formatDurationSeconds,
+  getKnownDurationSeconds,
+  MAX_DOWNLOAD_DURATION_SECONDS,
+} from './services/downloadPolicy.js';
 import './App.css';
 import './responsive-ui.css';
 
@@ -51,6 +52,41 @@ const LISTENING_HISTORY_KEY = 'listening history';
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
+}
+
+function durationLimitMessage(song = {}, durationSeconds = getKnownDurationSeconds(song)) {
+  const label = song.track || song.title || 'This song';
+  return `"${label}" is ${formatDurationSeconds(durationSeconds)} long and exceeds the ${formatDurationSeconds(MAX_DOWNLOAD_DURATION_SECONDS)} download limit.`;
+}
+
+function downloadDurationDecision(song = {}, { automatic = false, allowLongDownload = false } = {}) {
+  const durationSeconds = getKnownDurationSeconds(song);
+  if (allowLongDownload || !durationSeconds || durationSeconds <= MAX_DOWNLOAD_DURATION_SECONDS) {
+    return { allowed: true, durationSeconds, allowLongDownload };
+  }
+
+  const message = durationLimitMessage(song, durationSeconds);
+  if (automatic) {
+    return {
+      allowed: false,
+      durationSeconds,
+      durationLimitExceeded: true,
+      requestTrashed: true,
+      message: `${message} No automatic download request was created.`,
+    };
+  }
+
+  const confirmed = typeof window !== 'undefined' && window.confirm(
+    `${message}\n\nPress OK to download anyway. Press Cancel to trash this download request.`,
+  );
+  return {
+    allowed: confirmed,
+    durationSeconds,
+    durationLimitExceeded: true,
+    allowLongDownload: confirmed,
+    requestTrashed: !confirmed,
+    message: confirmed ? `${message} Download approved.` : `${message} Download request trashed.`,
+  };
 }
 
 function youtubeFeedbackCandidate(song) {
@@ -119,7 +155,7 @@ function timestampValue(value) {
 }
 
 function isPlayable(song) {
-  return Boolean(song?.driveFileId || song?.isDownloaded || song?.isCached || song?.hasBlob);
+  return Boolean(song?.driveFileId);
 }
 
 function buildAnalyticsExport({ songs = [], playlists = [], downloadJobs = [], importJobs = [], embeddingJobs = [], playbackEvents = [], drivePlaybackEvents = [], syncOutbox = [] }) {
@@ -215,8 +251,6 @@ function mergeJob(song, jobBySongKey) {
 
 function playableStatus(song) {
   if (song?.isDeleted) return 'deleted';
-  if (song?.isDownloaded) return 'offline';
-  if (song?.isCached || song?.hasBlob) return 'cached';
   if (song?.driveFileId) return 'ready';
   return song?.downloadJob?.status || (song?.isCatalogueOnly ? 'catalogue' : 'missing');
 }
@@ -253,7 +287,6 @@ function App() {
   const [isMobileMoreOpen, setIsMobileMoreOpen] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
-  const stagedLocalImportKeysRef = useRef(new Set());
   const catalogueLoadStartedRef = useRef(false);
   const fileInputRef = useRef(null);
   const mobileMoreRef = useRef(null);
@@ -536,6 +569,7 @@ function App() {
     const priority = { downloading: 0, queued: 1, 'needs-review': 2, error: 3, failed: 4, blocked: 5 };
     return [...jobBySongKey.values()]
       .filter(job => !(job.status === 'done' && job.uploadedFileId))
+      .filter(job => job.status !== 'cancelled')
       .filter(job => !driveSongKeySet.has(job.songKey) || job.replacementForFileId)
       .map(job => ({
         ...mergeJob(allSongsByKey.get(job.songKey) || asSongRecord(job), jobBySongKey),
@@ -605,7 +639,7 @@ function App() {
       .filter(song => !deletedSongKeySet.has(song.songKey))
       .filter(song => !duplicateSongKeySet.has(song.songKey))
       .filter(song => !isPlayable(song))
-      .filter(song => !song.downloadJob || (song.downloadJob.status === 'done' && !song.downloadJob.uploadedFileId))
+      .filter(song => !song.downloadJob || ['cancelled', 'done'].includes(song.downloadJob.status) && !song.downloadJob.uploadedFileId)
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
   }, [allSongs, allSongsByKey, deletedSongKeySet, driveSongKeySet, duplicateSongKeySet, jobBySongKey]);
 
@@ -647,7 +681,6 @@ function App() {
     return {
       totalSongs: allSongs.length,
       readySongs: driveReadySongs.length,
-      downloadedSongs: allSongs.filter(s => s.isDownloaded).length,
       playlistCount: visiblePlaylists.length,
       metrics: analytics.metrics,
       playbackEvents: analytics.playbackEvents,
@@ -690,7 +723,7 @@ function App() {
 
   const recentlyAdded = useMemo(() => {
     return [...exploreLibrarySongs]
-      .sort((a, b) => timestampValue(b.updatedAt || b.createdAt || b.cachedAt) - timestampValue(a.updatedAt || a.createdAt || a.cachedAt))
+      .sort((a, b) => timestampValue(b.updatedAt || b.createdAt) - timestampValue(a.updatedAt || a.createdAt))
       .slice(0, 10);
   }, [exploreLibrarySongs]);
 
@@ -729,38 +762,6 @@ function App() {
 
   useEffect(() => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
-    const candidates = allSongs.filter(song => (
-      song.sourceType === 'local-import'
-      && !song.driveFileId
-      && !song.driveImportJobId
-      && !stagedLocalImportKeysRef.current.has(song.songKey)
-    ));
-    if (!candidates.length) return undefined;
-    let cancelled = false;
-    candidates.forEach(song => stagedLocalImportKeysRef.current.add(song.songKey));
-    const stageImports = async () => {
-      try {
-        const results = await queueCachedLocalImports(candidates, { driveService, driveFolderId: DRIVE_FOLDER_ID });
-        if (cancelled || !results.length) return;
-        const jobs = results.map(result => result.job).filter(job => job?.jobId);
-        await syncDownloadJobsToDb(jobs);
-        setHasPendingJobs(jobs.some(job => job.status === 'queued' || job.status === 'downloading'));
-        const newlyQueued = results.filter(result => !result.existing).length;
-        if (newlyQueued) addToast(`Queued ${newlyQueued} existing import${newlyQueued === 1 ? '' : 's'} for Mac upload`);
-      } catch (error) {
-        candidates.forEach(song => stagedLocalImportKeysRef.current.delete(song.songKey));
-        console.error('Failed to stage cached local imports:', error);
-      }
-    };
-    const cancel = scheduleIdleWork(stageImports, 1800);
-    return () => {
-      cancelled = true;
-      cancel();
-    };
-  }, [addToast, allSongs, isAuthenticated]);
-
-  useEffect(() => {
-    if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
     let cancelled = false;
 
     const loadIndexes = async () => {
@@ -795,18 +796,59 @@ function App() {
     };
   }, [isAuthenticated, refreshDownloadJobs, hasPendingJobs, isPlaying]);
 
+  const discardDownloadRequest = useCallback(async song => {
+    if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
+    const result = await driveService.trashDownloadRequest(DRIVE_FOLDER_ID, song);
+    if (result.job) await syncDownloadJobsToDb([result.job]);
+    await refreshDownloadJobs();
+    return result;
+  }, [refreshDownloadJobs]);
+
   const queueSongForDownload = useCallback(async (song, options = {}) => {
     if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
-    const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, '', options);
+    const decision = downloadDurationDecision(song, {
+      automatic: Boolean(options.auto),
+      allowLongDownload: Boolean(options.allowLongDownload),
+    });
+    if (!decision.allowed) {
+      const discarded = options.auto ? null : await discardDownloadRequest(song);
+      return {
+        queued: false,
+        alreadyQueued: false,
+        durationLimitExceeded: true,
+        requestTrashed: Boolean(decision.requestTrashed),
+        durationSeconds: decision.durationSeconds,
+        message: decision.message,
+        job: discarded?.job || null,
+      };
+    }
+    const result = await driveService.requestSongDownload(song, DRIVE_FOLDER_ID, '', {
+      ...options,
+      allowLongDownload: Boolean(decision.allowLongDownload),
+      durationSeconds: decision.durationSeconds || options.durationSeconds || null,
+    });
     if (result.job) {
       await syncDownloadJobsToDb([result.job]);
       if (!result.blocked) setHasPendingJobs(true); // Start polling to track this job
     }
     return result;
-  }, []);
+  }, [discardDownloadRequest]);
 
-  const queueSongReplacement = useCallback(async (song, sourceUrl = '', reviewAction = 'reject-video') => {
+  const queueSongReplacement = useCallback(async (song, sourceUrl = '', reviewAction = 'reject-video', options = {}) => {
     if (!DRIVE_FOLDER_ID) throw new Error('Missing required config: VITE_DRIVE_FOLDER_ID.');
+    const decision = downloadDurationDecision(song, options);
+    if (!decision.allowed) {
+      const discarded = await discardDownloadRequest(song);
+      return {
+        queued: false,
+        alreadyQueued: false,
+        durationLimitExceeded: true,
+        requestTrashed: Boolean(decision.requestTrashed),
+        durationSeconds: decision.durationSeconds,
+        message: decision.message,
+        job: discarded.job || null,
+      };
+    }
     let replacementForFileId = '';
     if (song.driveFileId) {
       const currentAudio = await driveService.getAudioFileMetadata(song.driveFileId);
@@ -821,18 +863,22 @@ function App() {
       replaceExisting: true,
       replacementForFileId,
       reviewAction,
+      allowLongDownload: Boolean(decision.allowLongDownload),
+      durationSeconds: decision.durationSeconds || null,
     });
     if (result.job) {
       await syncDownloadJobsToDb([result.job]);
       setHasPendingJobs(true);
     }
     return result;
-  }, []);
+  }, [discardDownloadRequest]);
 
   const handleQueueDownload = useCallback(async (song, { allowRedownload = false } = {}) => {
     try {
       const result = await queueSongForDownload(song, { allowRedownload });
-      if (result.blocked) {
+      if (result.durationLimitExceeded) {
+        addToast(result.message || durationLimitMessage(song, result.durationSeconds));
+      } else if (result.blocked) {
         addToast(`"${song.track}" is blocked by deleted history.`);
       } else if (result.queued) {
         addToast(`Queued "${song.track}" for the Mac worker`);
@@ -845,6 +891,21 @@ function App() {
       addToast(message);
     }
   }, [addToast, queueSongForDownload]);
+
+  const handleTrashDownloadRequest = useCallback(async song => {
+    setReviewBusy(true);
+    try {
+      await discardDownloadRequest(song);
+      addToast(`Trashed the download request for "${song.track}"`);
+      setReviewSong(null);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [addToast, discardDownloadRequest]);
 
   const handleApproveSongReview = useCallback(async song => {
     if (!DRIVE_FOLDER_ID) return;
@@ -875,6 +936,14 @@ function App() {
     if (!DRIVE_FOLDER_ID) return;
     setReviewBusy(true);
     try {
+      const retryingSearch = song.downloadJob?.status === 'needs-review';
+      const decision = retryingSearch ? downloadDurationDecision(song) : null;
+      if (decision && !decision.allowed) {
+        await discardDownloadRequest(song);
+        addToast(decision.message);
+        setReviewSong(null);
+        return;
+      }
       const rejectedSource = song.downloadJob?.status === 'needs-review' ? null : youtubeFeedbackCandidate(song);
       if (rejectedSource) {
         try {
@@ -883,14 +952,18 @@ function App() {
           console.warn('Rejected source feedback could not be saved:', feedbackError);
         }
       }
-      const result = song.downloadJob?.status === 'needs-review'
-        ? await driveService.retryDownloadSearch(DRIVE_FOLDER_ID, song)
+      const result = retryingSearch
+        ? await driveService.retryDownloadSearch(DRIVE_FOLDER_ID, song, {
+          allowLongDownload: Boolean(decision?.allowLongDownload),
+        })
         : await queueSongReplacement(song);
       if (result.job) {
         await syncDownloadJobsToDb([result.job]);
         setHasPendingJobs(true);
       }
-      if (result.queued) {
+      if (result.durationLimitExceeded) {
+        addToast(result.message || durationLimitMessage(song, result.durationSeconds));
+      } else if (result.queued) {
         addToast(song.downloadJob?.status === 'needs-review'
           ? `Queued another source search for "${song.track}"`
           : `Queued a studio replacement for "${song.track}"`);
@@ -905,13 +978,26 @@ function App() {
     } finally {
       setReviewBusy(false);
     }
-  }, [addToast, queueSongReplacement]);
+  }, [addToast, discardDownloadRequest, queueSongReplacement]);
 
   const handleSelectReviewCandidate = useCallback(async (song, candidate) => {
     if (!DRIVE_FOLDER_ID) return;
     setReviewBusy(true);
     try {
-      const result = await driveService.selectDownloadCandidate(DRIVE_FOLDER_ID, song, candidate);
+      const durationSeconds = getKnownDurationSeconds(candidate) || getKnownDurationSeconds(song);
+      const decision = downloadDurationDecision({
+        ...song,
+        durationSeconds,
+      });
+      if (!decision.allowed) {
+        await discardDownloadRequest(song);
+        addToast(decision.message);
+        setReviewSong(null);
+        return;
+      }
+      const result = await driveService.selectDownloadCandidate(DRIVE_FOLDER_ID, song, candidate, {
+        allowLongDownload: Boolean(decision.allowLongDownload),
+      });
       if (result.job) {
         await syncDownloadJobsToDb([result.job]);
         setHasPendingJobs(true);
@@ -925,7 +1011,7 @@ function App() {
     } finally {
       setReviewBusy(false);
     }
-  }, [addToast]);
+  }, [addToast, discardDownloadRequest]);
 
   const handleRejectReviewCandidate = useCallback(async (song, candidate) => {
     if (!DRIVE_FOLDER_ID) return;
@@ -965,7 +1051,9 @@ function App() {
         }
       }
       const result = await queueSongReplacement(song, parsed.toString(), 'explicit-youtube-link');
-      if (result.queued) {
+      if (result.durationLimitExceeded) {
+        addToast(result.message || durationLimitMessage(song, result.durationSeconds));
+      } else if (result.queued) {
         addToast(`Queued the YouTube replacement for "${song.track}"`);
         setReviewSong(null);
       } else {
@@ -989,24 +1077,32 @@ function App() {
         .filter(song => {
           if (autoQueuedSongKeysRef.current.has(song.songKey)) return false;
           const job = jobBySongKey.get(song.songKey);
-          return !['queued', 'downloading', 'done', 'blocked'].includes(job?.status);
+          return !['queued', 'downloading', 'done', 'blocked', 'cancelled'].includes(job?.status);
         })
         .slice(0, isPlaying ? Math.min(5, AUTO_QUEUE_LIMIT) : AUTO_QUEUE_LIMIT);
 
       if (candidates.length === 0) return;
       let queuedCount = 0;
+      let durationLimitCount = 0;
       for (const song of candidates) {
         if (cancelled) return;
         autoQueuedSongKeysRef.current.add(song.songKey);
         try {
           const result = await queueSongForDownload(song, { auto: true });
           if (result.queued) queuedCount++;
+          if (result.durationLimitExceeded) durationLimitCount++;
         } catch (error) {
           console.error('Playlist readiness queue failed:', song.songKey, error);
         }
       }
-      if (!cancelled && queuedCount > 0) {
-        addToast(`Queued ${queuedCount} missing playlist song${queuedCount === 1 ? '' : 's'}`);
+      if (!cancelled && (queuedCount > 0 || durationLimitCount > 0)) {
+        const queuedMessage = queuedCount > 0
+          ? `Queued ${queuedCount} missing playlist song${queuedCount === 1 ? '' : 's'}`
+          : '';
+        const skippedMessage = durationLimitCount > 0
+          ? `Skipped ${durationLimitCount} song${durationLimitCount === 1 ? '' : 's'} over the 8-minute limit`
+          : '';
+        addToast([queuedMessage, skippedMessage].filter(Boolean).join(' · '));
       }
     };
 
@@ -1029,20 +1125,6 @@ function App() {
     const localSong = await ensureLocalSong(song, song.playlistName || '');
     let resolved = { ...song, ...localSong, downloadJob: jobBySongKey.get(localSong.songKey) || localSong.downloadJob || null };
 
-    if (resolved.isDownloaded || resolved.isCached || resolved.hasBlob) {
-      const cachedAudio = await getCachedSongAudio(resolved.songKey, resolved.driveFileId);
-      if (cachedAudio) return { ...resolved, ...cachedAudio };
-      resolved = {
-        ...resolved,
-        isDownloaded: false,
-        isCached: false,
-        hasBlob: false,
-        blob: null,
-        cacheSizeBytes: 0,
-        cachedAt: null,
-      };
-    }
-
     if (resolved.driveFileId) {
       const metadata = await driveService.getAudioFileMetadata(resolved.driveFileId);
       if (metadata) return resolved;
@@ -1050,12 +1132,6 @@ function App() {
       resolved = {
         ...resolved,
         driveFileId: null,
-        isDownloaded: false,
-        isCached: false,
-        hasBlob: false,
-        blob: null,
-        cacheSizeBytes: 0,
-        cachedAt: null,
       };
     }
 
@@ -1093,11 +1169,20 @@ function App() {
     if (queueIfMissing) {
       const result = await queueSongForDownload(resolved);
       const status = result.job?.status || 'queued';
+      if (result.durationLimitExceeded) {
+        const message = result.message || durationLimitMessage(resolved, result.durationSeconds);
+        if (showToast) addToast(message);
+        return {
+          ...resolved,
+          downloadBlocked: true,
+          downloadPolicyMessage: message,
+        };
+      }
       if (showToast) {
         addToast(result.blocked
           ? `"${resolved.track}" was previously deleted. Use Download to restore it.`
           : result.queued
-          ? `Queued "${resolved.track}" for download`
+          ? `Queued "${resolved.track}" for Mac preparation`
           : `"${resolved.track}" is already ${status}`);
       }
       return null;
@@ -1125,14 +1210,18 @@ function App() {
       try {
         const resolved = await resolvePlayableSongRef.current(song, { queueIfMissing: true, showToast: false });
         if (cancelled || requestId !== playbackRequestRef.current) return;
+        if (resolved?.downloadBlocked) {
+          setPlayerErrorRef.current(resolved.downloadPolicyMessage || `"${song.track}" exceeds the 8-minute download limit.`);
+          return;
+        }
         if (resolved) {
-          await loadAndPlayRef.current(resolved, driveService.accessToken, {
+          await loadAndPlayRef.current(resolved, {
             autoplay: resumeOnRestoreRef.current,
             startAt: resumePositionRef.current,
           });
           return;
         }
-        setPlayerErrorRef.current(`"${song.track}" is queued for download.`);
+        setPlayerErrorRef.current(`"${song.track}" is queued for Mac preparation.`);
         if (queueRef.current.some((candidate, index) => index !== queueIndexRef.current && isPlayable(candidate))) {
           window.setTimeout(() => {
             if (!cancelled && requestId === playbackRequestRef.current) {
@@ -1216,7 +1305,7 @@ function App() {
     addToast(`Exported ${exportData.songs.length} songs and ${exportData.playbackEvents.length} playback events`);
   }, [addToast, allSongs, drivePlaybackEvents, embeddingJobs, importJobs, playbackEvents, playlists, safeLibraryData.downloadJobs, syncOutbox]);
 
-  // Streaming is the default. Full audio downloads only happen through the explicit offline button.
+  // Drive audio is streamed in small ranges; the browser never receives a full-track blob.
 
   const handlePlaySong = useCallback(async (song, songList) => {
     setActionError('');
@@ -1226,6 +1315,7 @@ function App() {
 
     try {
       const resolved = await resolvePlayableSong(sourceSongs[startIdx] || song, { queueIfMissing: true, showToast: true });
+      if (resolved?.downloadBlocked) return;
       if (resolved) {
         const updated = sourceSongs.map(item => item.songKey === selectedKey ? { ...item, ...resolved } : item);
         player.setQueueAndPlay(updated, startIdx);
@@ -1250,7 +1340,7 @@ function App() {
     }
   }, [addToast, allSongsByKey, jobBySongKey, player, resolvePlayableSong]);
 
-  const handleDownload = useCallback(async (song) => {
+  const handlePrepare = useCallback(async (song) => {
     const selectedKey = getSongKey(song);
     if (downloadingKeys.has(selectedKey)) return;
     if (!DRIVE_FOLDER_ID) {
@@ -1279,30 +1369,26 @@ function App() {
       }
 
       if (fileId) {
-        const blob = await driveService.downloadFileAsBlob(fileId);
-        await cacheSongBlob(localSong.songKey, blob, fileId, { explicit: true });
-        await enforceAudioCacheLimit(AUDIO_CACHE_LIMIT_BYTES);
-        // Artwork is an explicit-download dependency: store bytes for offline
-        // use, while ordinary browsing can continue using remote artwork URLs.
-        import('./services/artworkService.js')
-          .then(({ cacheSongArtwork }) => cacheSongArtwork(localSong))
-          .catch(error => console.debug('Offline artwork cache skipped:', error));
         if (deletedSongKeySet.has(localSong.songKey)) {
           await driveService.removeDeletedSong(DRIVE_FOLDER_ID, localSong);
           setDriveDeletedSongs(prev => prev.filter(item => item.songKey !== localSong.songKey));
         }
-        addToast(`"${localSong.track}" saved for offline`);
+        addToast(`"${localSong.track}" is ready to stream`);
       } else {
         const result = await queueSongForDownload(localSong, { allowRedownload: true });
-        setDriveDeletedSongs(prev => prev.filter(item => item.songKey !== localSong.songKey));
-        addToast(result.blocked
+        if (result.durationLimitExceeded) {
+          addToast(result.message || durationLimitMessage(localSong, result.durationSeconds));
+        } else {
+          setDriveDeletedSongs(prev => prev.filter(item => item.songKey !== localSong.songKey));
+          addToast(result.blocked
           ? `"${localSong.track}" is blocked by deleted history`
           : result.queued
-          ? `Queued "${localSong.track}" for download`
+          ? `Queued "${localSong.track}" for Mac preparation`
           : `"${localSong.track}" is already ${result.job?.status || 'queued'}`);
+        }
       }
     } catch (error) {
-      console.error('Download failed:', error);
+      console.error('Drive preparation request failed:', error);
       const message = errorMessage(error);
       setActionError(message);
       addToast(message);
@@ -1360,7 +1446,11 @@ function App() {
       await persistPlaylistIndex();
       if (!localSong.driveFileId && !driveSongKeySet.has(localSong.songKey)) {
         const result = await queueSongForDownload(localSong, { allowRedownload: deletedSongKeySet.has(localSong.songKey) });
-        if (result.queued) addToast(`Queued "${localSong.track}" for download`);
+        if (result.durationLimitExceeded) {
+          addToast(result.message || durationLimitMessage(localSong, result.durationSeconds));
+        } else if (result.queued) {
+          addToast(`Queued "${localSong.track}" for Mac preparation`);
+        }
       }
       setPlaylistPicker(null);
       addToast(`Added "${localSong.track}" to ${targetNames.length} playlist${targetNames.length === 1 ? '' : 's'}`);
@@ -1516,9 +1606,9 @@ function App() {
     }
   }, [addToast]);
 
-  const handleResetLocalCache = useCallback(async () => {
+  const handleResetLocalLibrary = useCallback(async () => {
     const confirmed = window.confirm(
-      'Reset the local music cache on this device? This removes downloaded offline songs and synced library rows from this browser, then reloads the app.'
+      'Reset local library metadata on this device? This removes synced library rows from this browser, then reloads the app.'
     );
     if (!confirmed) return;
 
@@ -1526,8 +1616,8 @@ function App() {
       await resetLocalDatabase();
       window.location.reload();
     } catch (error) {
-      console.error('Local cache reset failed:', error);
-      setActionError(`Local cache reset failed: ${errorMessage(error)}`);
+      console.error('Local library reset failed:', error);
+      setActionError(`Local library reset failed: ${errorMessage(error)}`);
     }
   }, []);
 
@@ -1542,7 +1632,7 @@ function App() {
     { id: VIEWS.EXPLORE, icon: Search, label: 'Explore', mobileLabel: 'Explore' },
     { id: VIEWS.LIBRARY, icon: Library, label: 'Ready', mobileLabel: 'Ready' },
     { id: VIEWS.DUPLICATES, icon: Copy, label: `Duplicates${duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}`, mobileLabel: 'Duplicates' },
-    { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Downloads', mobileLabel: 'Offline' },
+    { id: VIEWS.DOWNLOADS, icon: HardDriveDownload, label: 'Drive Tasks', mobileLabel: 'Tasks' },
     { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy', mobileLabel: 'Galaxy' },
   ];
   const mobilePrimaryNavItems = navItems.filter(item => item.id !== VIEWS.DUPLICATES);
@@ -1553,7 +1643,7 @@ function App() {
       key={song.songKey}
       song={{ ...song, isDeleted: deletedSongKeySet.has(song.songKey), isDuplicate: duplicateSongKeySet.has(song.songKey), status: playableStatus({ ...song, isDeleted: deletedSongKeySet.has(song.songKey) }) }}
       onPlay={(selected) => handlePlaySong(selected, list)}
-      onDownload={handleDownload}
+      onPrepare={handlePrepare}
       onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
       onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
       onAddToPlaylist={openPlaylistPicker}
@@ -1650,8 +1740,8 @@ function App() {
           syncStatus={bannerStatus}
           error={Boolean(bannerError)}
           onSync={syncLibrary}
-          actionLabel={!isAuthenticated ? 'Reconnect Drive' : localDbError ? 'Reset local cache' : ''}
-          onAction={!isAuthenticated ? login : localDbError ? handleResetLocalCache : undefined}
+          actionLabel={!isAuthenticated ? 'Reconnect Drive' : localDbError ? 'Reset local library' : ''}
+          onAction={!isAuthenticated ? login : localDbError ? handleResetLocalLibrary : undefined}
           actionDisabled={isAuthorizing}
         />
         <ImportStatusPanel jobs={importJobs} embeddingJobs={embeddingJobs} />
@@ -1768,7 +1858,7 @@ function App() {
         {view === VIEWS.DOWNLOADS && (
           <>
             <header className="main-view__header">
-              <h1 className="main-view__title">Downloads</h1>
+              <h1 className="main-view__title">Drive Tasks</h1>
             </header>
             <MacWorkerTasksPanel
               tasks={workerTasks}
@@ -2027,7 +2117,7 @@ function App() {
 
       {showQueue && (
         <Suspense fallback={<div className="queue-loading" role="status">Loading queue…</div>}>
-          <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handleDownload} />
+          <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handlePrepare} />
         </Suspense>
       )}
       {songInfo && (
@@ -2044,7 +2134,7 @@ function App() {
           onMarkDuplicate={duplicateSongKeySet.has(songInfo.songKey) ? undefined : handleMarkDuplicate}
           onRestoreDuplicate={duplicateSongKeySet.has(songInfo.songKey) ? handleRestoreDuplicate : undefined}
           onSave={handleSaveSongMetadata}
-          onDownload={handleDownload}
+          onPrepare={handlePrepare}
           isDownloading={downloadingKeys.has(songInfo.songKey)}
         />
       )}
@@ -2057,6 +2147,7 @@ function App() {
           onUseYoutubeLink={handleYoutubeReplacement}
           onSelectCandidate={handleSelectReviewCandidate}
           onRejectCandidate={handleRejectReviewCandidate}
+          onTrashRequest={handleTrashDownloadRequest}
           busy={reviewBusy}
         />
       )}
@@ -2067,7 +2158,7 @@ function App() {
         onAddToPlaylist={openPlaylistPicker}
         onDelete={handleDeleteReadySong}
         onReview={song => setReviewSong(allSongsByKey.get(song.songKey) || song)}
-        onDownload={handleDownload}
+        onPrepare={handlePrepare}
         onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
         onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
         onOpenEqualizer={() => setIsEqOpen(true)}

@@ -10,7 +10,7 @@ export function LoginScreen({ onLogin, error, busy = false, setupStatus = {} }) 
           <span className="login-logo__icon">♪</span>
         </div>
         <h1 className="login-title">Sisic Music</h1>
-        <p className="login-sub">Your music. Everywhere. Offline.</p>
+        <p className="login-sub">Your music. Everywhere. Streamed when you need it.</p>
         <button className="btn-primary login-btn" onClick={onLogin} disabled={busy}>
           {busy ? 'Connecting…' : 'Sign in with Google'}
         </button>
@@ -41,8 +41,8 @@ export function LoginScreen({ onLogin, error, busy = false, setupStatus = {} }) 
               Enable Drive API <ExternalLink size={13} />
             </a>
           </div>
-          <p className="setup-card__permissions"><strong>Drive permission:</strong> the current browser flow requests read-only access so it can find the existing Spotify export, plus app-managed file access for Sisic indexes and downloads. The active token stays in this browser tab's session storage, is cleared when the tab closes, and is never stored in localStorage.</p>
-          <p className="setup-card__automation"><strong>Automated:</strong> Google sign-in, Drive authorization, library sync, and offline downloads. <strong>One-time manual step:</strong> Google Cloud OAuth and the three build variables.</p>
+          <p className="setup-card__permissions"><strong>Drive permission:</strong> the current browser flow requests read-only access so it can find the existing Spotify export, plus app-managed file access for Sisic indexes and Mac-worker source preparation. The active token stays in this browser tab's session storage, is cleared when the tab closes, and is never stored in localStorage.</p>
+          <p className="setup-card__automation"><strong>Automated:</strong> Google sign-in, Drive authorization, library sync, and Mac-worker source preparation. <strong>One-time manual step:</strong> Google Cloud OAuth and the three build variables.</p>
           {missing.length > 0 && <p className="setup-card__missing">Missing from this build: {missing.join(', ')}</p>}
         </div>
         <p className="login-hint">Connect to your Google Drive music library</p>

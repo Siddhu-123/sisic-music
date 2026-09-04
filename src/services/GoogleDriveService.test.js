@@ -80,6 +80,8 @@ test('selectDownloadCandidate requeues the existing canonical job with the chose
   assert.equal(result.job.attempts, 0);
   assert.equal(result.job.sourceUrl, 'https://www.youtube.com/watch?v=new-result');
   assert.equal(result.job.sourceSelectionMode, 'reviewed-youtube-candidate');
+  assert.equal(result.job.durationSeconds, 200);
+  assert.equal(result.job.allowLongDownload, false);
   assert.deepEqual(result.job.reviewCandidates, []);
   assert.equal(result.job.replacementForFileId, 'old-audio');
   assert.deepEqual(feedback, [{
@@ -94,6 +96,34 @@ test('selectDownloadCandidate requeues the existing canonical job with the chose
     decision: 'accepted',
   }]);
   assert.equal(queue.jobs[0].sourceVideoId, 'new-result');
+});
+
+test('trashDownloadRequest cancels a review job without deleting the song', async () => {
+  const service = new GoogleDriveService();
+  const reviewJob = {
+    jobId: 'job-review',
+    songKey: 'artist::track',
+    artist: 'Artist',
+    track: 'Track',
+    status: 'needs-review',
+    reviewCandidates: [{ candidateId: 'long-result' }],
+  };
+  let queue = { schemaVersion: 1, revision: 1, storageMode: 'canonical', jobs: [reviewJob] };
+  service.readQueueIndex = async () => queue;
+  service.writeJsonIndex = async (_folderId, filename, body) => {
+    assert.equal(filename, 'sisic-queue.json');
+    queue = body;
+  };
+
+  const result = await service.trashDownloadRequest(
+    'folder-id',
+    { artist: 'Artist', track: 'Track', songKey: 'artist::track', downloadJob: reviewJob },
+  );
+
+  assert.equal(result.trashed, true);
+  assert.equal(queue.jobs[0].status, 'cancelled');
+  assert.equal(queue.jobs[0].reviewState, 'trashed');
+  assert.equal(queue.jobs[0].lastError, 'Download request trashed by user.');
 });
 
 test('recordSourceFeedback writes one shared feedback index', async () => {

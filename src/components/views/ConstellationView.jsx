@@ -90,11 +90,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
   const [webglReady, setWebglReady] = useState(true);
 
   const filteredSongs = useMemo(() => {
-    const filtered = filterMode === 'cached'
-      ? songs.filter(song => song.isCached || song.hasBlob)
-      : filterMode === 'downloaded'
-        ? songs.filter(song => song.isDownloaded)
-        : songs;
+    const filtered = filterMode === 'ready' ? songs.filter(song => song.driveFileId) : songs;
     if (filtered.length <= MAX_CLUSTER_SONGS) return filtered;
     const limited = filtered.slice(0, MAX_CLUSTER_SONGS);
     if (currentSong && !limited.some(song => song.songKey === currentSong.songKey)) limited[limited.length - 1] = currentSong;
@@ -255,7 +251,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
         <div className="constellation-controls">
           <div className="constellation-filters">
             <button className={`filter-chip ${filterMode === 'all' ? 'filter-chip--active' : ''}`} onClick={() => setFilterMode('all')}>All ({songs.length})</button>
-            <button className={`filter-chip ${filterMode === 'cached' ? 'filter-chip--active' : ''}`} onClick={() => setFilterMode('cached')}>Cached ({songs.filter(song => song.isCached || song.hasBlob).length})</button>
+            <button className={`filter-chip ${filterMode === 'ready' ? 'filter-chip--active' : ''}`} onClick={() => setFilterMode('ready')}>Ready ({songs.filter(song => song.driveFileId).length})</button>
           </div>
           <div className="constellation-zoom-controls">
             <button className="neumorphic-button neumorphic-button--icon" onClick={() => setZoom(value => Math.max(.6, value - .2))} aria-label="Zoom out">-</button>

@@ -250,6 +250,8 @@ select:focus-visible,
 .turntable__vinyl {
   background: transparent;
   box-shadow: none;
+  animation: none;
+  animation-play-state: paused;
 }
 
 .turntable--lifted .turntable__vinyl {
@@ -289,9 +291,9 @@ select:focus-visible,
   border-color: rgba(0, 0, 0, 0.72);
 }
 
+.turntable__vinyl--paused .turntable__vinyl-surface,
 .turntable__vinyl--braking .turntable__vinyl-surface {
-  animation: turntable-surface-brake 0.64s cubic-bezier(0.22, 0.74, 0.28, 1) forwards;
-  animation-play-state: running;
+  animation-play-state: paused;
 }
 
 .turntable--lifted .turntable__vinyl-surface {
@@ -386,11 +388,6 @@ select:focus-visible,
 @keyframes turntable-surface-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
-}
-
-@keyframes turntable-surface-brake {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(142deg); }
 }
 
 /* Cards and artwork ------------------------------------------------------ */

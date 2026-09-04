@@ -1,11 +1,20 @@
 const DEFAULT_CHUNK_BYTES = 256 * 1024;
-const MAX_RANGE_BYTES = 8 * 1024 * 1024;
-const APP_SHELL_CACHE = 'sisic-app-shell-v2';
+const MAX_RANGE_BYTES = 2 * 1024 * 1024;
+const MAX_FILE_METADATA_ENTRIES = 128;
 
 let driveAccessToken = '';
 let driveTokenVersion = '';
 const fileMetadataCache = new Map();
 const tokenWaiters = new Set();
+
+function rememberFileMetadata(fileId, metadata) {
+  fileMetadataCache.delete(fileId);
+  fileMetadataCache.set(fileId, metadata);
+  while (fileMetadataCache.size > MAX_FILE_METADATA_ENTRIES) {
+    fileMetadataCache.delete(fileMetadataCache.keys().next().value);
+  }
+  return metadata;
+}
 
 async function requestDriveToken() {
   if (driveAccessToken) return true;
@@ -36,47 +45,17 @@ async function notifyDriveAuthFailure(message) {
 }
 
 self.addEventListener('install', event => {
-  event.waitUntil((async () => {
-    self.skipWaiting();
-    await precacheAppShell();
-  })());
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const cacheNames = await caches.keys();
-    await Promise.all(cacheNames
-      .filter(name => name.startsWith('sisic-app-shell-') && name !== APP_SHELL_CACHE)
-      .map(name => caches.delete(name)));
+    await Promise.all(cacheNames.filter(name => name.startsWith('sisic-app-shell-')).map(name => caches.delete(name)));
+    fileMetadataCache.clear();
     await self.clients.claim();
   })());
 });
-
-async function precacheAppShell() {
-  const cache = await caches.open(APP_SHELL_CACHE);
-  const indexUrl = new URL('index.html', self.registration.scope);
-  try {
-    const response = await fetch(indexUrl, { cache: 'no-cache' });
-    if (!response.ok) return;
-    await cache.put(indexUrl, response.clone());
-    const html = await response.text();
-    const assetUrls = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
-      .map(match => match[1])
-      .filter(value => !value.startsWith('http') && !value.startsWith('//'))
-      .map(value => new URL(value, indexUrl).toString())
-      .filter(value => value.startsWith(self.location.origin));
-    await Promise.all(assetUrls.map(async assetUrl => {
-      try {
-        const asset = await fetch(assetUrl, { cache: 'no-cache' });
-        if (asset.ok) await cache.put(assetUrl, asset);
-      } catch {
-        // A single optional asset should not prevent offline launch.
-      }
-    }));
-  } catch {
-    // Runtime caching below can populate the shell on the next online visit.
-  }
-}
 
 function isTrustedMessage(event) {
   if (event.origin && event.origin !== self.location.origin) return false;
@@ -123,37 +102,8 @@ self.addEventListener('fetch', event => {
   const fileId = streamFileId(url);
   if (fileId) {
     event.respondWith(streamDriveFile(fileId, event.request));
-    return;
   }
-  if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
-  event.respondWith(handleAppRequest(event.request));
 });
-
-async function handleAppRequest(request) {
-  const cache = await caches.open(APP_SHELL_CACHE);
-  const isDocument = request.mode === 'navigate' || request.destination === 'document';
-  if (isDocument) {
-    try {
-      const response = await fetch(request);
-      if (response.ok) await cache.put(request, response.clone());
-      return response;
-    } catch {
-      return (await cache.match(request)) || (await cache.match(new URL('index.html', self.registration.scope))) || new Response('Sisic Music is not available offline yet.', { status: 503 });
-    }
-  }
-
-  const cached = await cache.match(request);
-  if (cached) return cached;
-  try {
-    const response = await fetch(request);
-    if (response.ok && ['script', 'style', 'image', 'font', 'manifest'].includes(request.destination)) {
-      await cache.put(request, response.clone());
-    }
-    return response;
-  } catch {
-    return cached || new Response('', { status: 504 });
-  }
-}
 
 async function streamDriveFile(fileId, request) {
   if (!driveAccessToken && !(await requestDriveToken())) {
@@ -178,23 +128,21 @@ async function streamDriveFile(fileId, request) {
       return streamError(message || `Drive stream failed: ${upstream.status}`, upstream.status, upstream.statusText);
     }
 
-    const upstreamBody = await upstream.arrayBuffer();
-    const body = sliceRangeBody(upstreamBody, upstream, start, end);
-    if (body.byteLength === 0) {
-      throw new Error(`Drive returned an empty range for bytes ${start}-${end}.`);
-    }
-    const actualEnd = start + body.byteLength - 1;
+    if (!upstream.body) throw new Error(`Drive returned an empty range for bytes ${start}-${end}.`);
+    const contentRange = upstream.headers.get('Content-Range');
+    const contentLength = upstream.headers.get('Content-Length')
+      || String(upstream.status === 206 ? end - start + 1 : metadata.size);
     const responseHeaders = new Headers({
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store',
-      'Content-Length': String(body.byteLength),
-      'Content-Range': `bytes ${start}-${actualEnd}/${metadata.size}`,
+      'Content-Length': contentLength,
       'Content-Type': metadata.mimeType || 'audio/mpeg',
     });
+    if (contentRange) responseHeaders.set('Content-Range', contentRange);
 
-    return new Response(body, {
-      status: 206,
-      statusText: 'Partial Content',
+    return new Response(upstream.body, {
+      status: upstream.status === 206 ? 206 : 200,
+      statusText: upstream.status === 206 ? 'Partial Content' : 'OK',
       headers: responseHeaders,
     });
   } catch (error) {
@@ -203,19 +151,9 @@ async function streamDriveFile(fileId, request) {
   }
 }
 
-function sliceRangeBody(buffer, response, requestedStart, requestedEnd) {
-  const bytes = new Uint8Array(buffer);
-  const requestedLength = requestedEnd - requestedStart + 1;
-  const contentRange = response.headers.get('Content-Range') || '';
-  const rangeMatch = /^bytes\s+(\d+)-(\d+)\//i.exec(contentRange);
-  const upstreamStart = rangeMatch ? Number(rangeMatch[1]) : (response.status === 200 ? 0 : requestedStart);
-  const offset = Math.max(0, requestedStart - upstreamStart);
-  return bytes.slice(offset, offset + requestedLength);
-}
-
 async function getFileMetadata(fileId) {
   const cached = fileMetadataCache.get(fileId);
-  if (cached) return cached;
+  if (cached) return rememberFileMetadata(fileId, cached);
 
   const response = await fetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=size,mimeType`,
@@ -256,8 +194,7 @@ async function getFileMetadata(fileId) {
     mimeType,
     size,
   };
-  fileMetadataCache.set(fileId, normalized);
-  return normalized;
+  return rememberFileMetadata(fileId, normalized);
 }
 
 function requestedRange(rangeHeader, fileSize) {

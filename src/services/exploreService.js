@@ -66,12 +66,8 @@ export function getSongMoods(song = {}) {
   return matchedLabels(song, MOOD_RULES, ['Discovery']);
 }
 
-export function isOfflineSong(song = {}) {
-  return Boolean(song.isDownloaded || song.isCached || song.hasBlob);
-}
-
 export function isStreamableSong(song = {}) {
-  return Boolean(song.driveFileId || isOfflineSong(song));
+  return Boolean(song.driveFileId);
 }
 
 export function rankedExploreSearch(query = '', songs = []) {
@@ -117,8 +113,6 @@ export function filterExploreSongs(songs = [], { genre = '', mood = '', availabi
     if (genre && !getSongGenres(song).some(value => normalizeText(value) === normalizeText(genre))) return false;
     if (mood && !getSongMoods(song).some(value => normalizeText(value) === normalizeText(mood))) return false;
     if (availability === 'ready' && !isStreamableSong(song)) return false;
-    if (availability === 'offline' && !isOfflineSong(song)) return false;
-    if (availability === 'not-downloaded' && isOfflineSong(song)) return false;
     return true;
   });
 }
@@ -172,14 +166,14 @@ export function buildExploreMixes(songs = [], {
   const topGenre = dominantFacet(ranked.slice(0, 30), getSongGenres);
   const moodSongs = topMood ? ranked.filter(song => getSongMoods(song).includes(topMood)) : [];
   const genreSongs = topGenre ? ranked.filter(song => getSongGenres(song).includes(topGenre)) : [];
-  const undownloaded = ranked.filter(song => !isOfflineSong(song));
+  const notReady = ranked.filter(song => !isStreamableSong(song));
   const suggestions = ranked.filter(song => (Number(song.playCount) || 0) === 0 || !isStreamableSong(song));
 
   const mixes = [
     { id: 'your-taste', title: 'Your taste', subtitle: 'Your strongest local matches', songs: ranked.slice(0, 12) },
     topMood ? { id: `mood-${normalizeText(topMood)}`, title: `${topMood} mode`, subtitle: 'Built from the way you listen', songs: moodSongs.slice(0, 12) } : null,
     topGenre ? { id: `genre-${normalizeText(topGenre)}`, title: `${topGenre} shelf`, subtitle: 'A focused library mix', songs: genreSongs.slice(0, 12) } : null,
-    undownloaded.length ? { id: 'not-downloaded', title: 'Not downloaded yet', subtitle: 'Saved in your library, ready when you are', songs: undownloaded.slice(0, 12) } : null,
+    notReady.length ? { id: 'not-ready', title: 'Not ready yet', subtitle: 'Queue the Mac worker to prepare these songs', songs: notReady.slice(0, 12) } : null,
   ].filter(mix => mix?.songs?.length);
 
   return {

@@ -1,10 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  cacheSongBlob,
-  enforceAudioCacheLimit,
-  getCachedSongAudio,
-} from '../db.js';
-import {
   dedupeQueue,
   insertAfter,
   insertAtEnd,
@@ -19,20 +14,10 @@ import { driveService } from '../services/GoogleDriveService.js';
 import { EQ_PRESETS } from '../services/audioGraph.js';
 import { VinylAudioEngine } from '../services/VinylAudioEngine.js';
 
-const MIN_CACHED_AUDIO_BYTES = 16 * 1024;
-const MAX_PREFETCH_BYTES = 50 * 1024 * 1024;
 const QUEUE_STORAGE_KEY = 'sisic:queue-state:v1';
 
-function hasUsableCachedAudio(song) {
-  return Boolean(
-    song.blob
-    && (song.isDownloaded || song.isCached || song.hasBlob)
-    && (!song.blob.size || song.blob.size >= MIN_CACHED_AUDIO_BYTES)
-  );
-}
-
 function isQueueReady(song) {
-  return Boolean(song?.driveFileId || song?.isDownloaded || song?.isCached || song?.hasBlob);
+  return Boolean(song?.driveFileId);
 }
 
 function smartRandomIndex(songs, currentIndex, playedInSession, failedSongKeys, avoidCurrent = false) {
@@ -92,6 +77,36 @@ function readPersistedQueueState() {
   }
 }
 
+async function waitForStreamWorker() {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return false;
+  if (navigator.serviceWorker.controller) return true;
+  try {
+    const registration = await new Promise(resolve => {
+      let timeout;
+      const finish = value => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      };
+      navigator.serviceWorker.ready.then(finish, () => finish(null));
+      timeout = window.setTimeout(() => finish(null), 2000);
+    });
+    if (navigator.serviceWorker.controller) return true;
+    if (!registration?.active) return false;
+    return await new Promise(resolve => {
+      let timeout;
+      const finish = () => {
+        window.clearTimeout(timeout);
+        navigator.serviceWorker.removeEventListener('controllerchange', finish);
+        resolve(Boolean(navigator.serviceWorker.controller));
+      };
+      timeout = window.setTimeout(finish, 2000);
+      navigator.serviceWorker.addEventListener('controllerchange', finish, { once: true });
+    });
+  } catch {
+    return false;
+  }
+}
+
 export function useAudioPlayer() {
   const [audioEngine] = useState(() => new VinylAudioEngine());
   const audioRef = useRef(audioEngine);
@@ -116,8 +131,6 @@ export function useAudioPlayer() {
   const [rpm, setRpmState] = useState(45);
   const [pitchModifier, setPitchModifierState] = useState(1);
   const [pitchRange, setPitchRangeState] = useState(0.08);
-  const prefetchedSongsRef = useRef(new Set());
-  const prefetchingSongsRef = useRef(new Set());
   const playedInSessionRef = useRef(new Set());
   const failedSongKeysRef = useRef(new Set());
   const originalQueueRef = useRef([]);
@@ -183,47 +196,40 @@ export function useAudioPlayer() {
     setError(message || '');
   }, []);
 
-  const loadAndPlay = useCallback(async (song, accessToken, options = {}) => {
+  const loadAndPlay = useCallback(async (song, options = {}) => {
     const { autoplay = true, startAt = 0 } = options;
     const requestId = ++loadRequestRef.current;
     const isLatestRequest = () => requestId === loadRequestRef.current;
     const audio = audioRef.current;
     setError('');
-    audio.pause({ immediate: true });
-
-    let audioBlob = null;
-    const cachedAudio = song.songKey
-      ? await getCachedSongAudio(song.songKey, song.driveFileId)
-      : null;
-    if (cachedAudio?.blob) {
-      audioBlob = cachedAudio.blob;
-    } else if (hasUsableCachedAudio(song) && !song.driveFileId) {
-      audioBlob = song.blob;
-    } else if (song.driveFileId && (accessToken || driveService.accessToken)) {
-      audioBlob = await driveService.downloadFileAsBlob(song.driveFileId);
-    }
-
-    if (!audioBlob) {
-      clearSource();
-      setCurrentSong(null);
-      setError(
-        song.driveFileId
-          ? 'Google Drive sign-in is required before this song can load.'
-          : `"${song.track}" is queued for download.`
-      );
-      return false;
-    }
+    audio.clear();
+    setIsPlaying(false);
+    setProgress(0);
+    setDuration(0);
     if (!isLatestRequest()) return false;
 
     try {
-      await audio.loadBlob(audioBlob);
+      if (song.driveFileId) {
+        if (!driveService.isAuthenticated) throw new Error('Google Drive sign-in is required before this song can load.');
+        if (!await waitForStreamWorker()) throw new Error('Drive streaming is not ready. Reload the app once, then try again.');
+        await audio.loadUrl(driveService.getAudioStreamUrl(song.driveFileId));
+      } else {
+        clearSource();
+        setCurrentSong(null);
+        setError(`"${song.track}" is queued for Mac preparation.`);
+        return false;
+      }
     } catch (error) {
       if (!isLatestRequest()) return false;
-      console.error('Audio decode error:', error);
-      setError(error instanceof Error ? error.message : 'The audio file could not be decoded.');
+      if (error?.name === 'AbortError') return false;
+      console.error('Audio stream error:', error);
+      setError(error instanceof Error ? error.message : 'The audio stream could not be loaded.');
       return false;
     }
-    setCurrentSong({ ...song, blob: audioBlob, hasBlob: true });
+    if (!isLatestRequest()) return false;
+    const playerSong = { ...song };
+    ['localFile', 'blob', 'isDownloaded', 'isCached', 'hasBlob', 'cacheSizeBytes', 'cachedAt'].forEach(field => delete playerSong[field]);
+    setCurrentSong(playerSong);
     audio.setVolume(volume);
     const restoreSeconds = Math.max(0, Number(startAt) || 0);
     if (restoreSeconds > 0) {
@@ -377,41 +383,6 @@ export function useAudioPlayer() {
     });
   }, [queue, queueIndex]);
 
-  const prefetchNextSong = useCallback(async () => {
-    const activeQueue = queueRef.current;
-    const activeIndex = queueIndexRef.current;
-    const current = activeQueue[activeIndex];
-    const currentKey = current?.songKey || '';
-    if (!currentKey || prefetchedSongsRef.current.has(currentKey) || prefetchingSongsRef.current.has(currentKey)) return;
-    const nextIdx = nextUnfailedIndex(activeQueue, activeIndex, failedSongKeysRef.current, false, repeatModeRef.current);
-    if (nextIdx < 0 || nextIdx >= activeQueue.length) return;
-    const nextSong = activeQueue[nextIdx];
-    if (!nextSong || !nextSong.driveFileId) return;
-
-    prefetchingSongsRef.current.add(currentKey);
-    try {
-      if (!driveService.isAuthenticated) return;
-      const cached = nextSong.songKey
-        ? await getCachedSongAudio(nextSong.songKey, nextSong.driveFileId)
-        : null;
-      if (cached || (hasUsableCachedAudio(nextSong) && !nextSong.driveFileId)) {
-        prefetchedSongsRef.current.add(currentKey);
-        return;
-      }
-      const metadata = await driveService.getAudioFileMetadata(nextSong.driveFileId);
-      const size = Number(nextSong.size || metadata?.size || 0);
-      if (!metadata || !size || size > MAX_PREFETCH_BYTES) return;
-      const blob = await driveService.downloadFileAsBlob(nextSong.driveFileId);
-      await cacheSongBlob(nextSong.songKey, blob, nextSong.driveFileId);
-      await enforceAudioCacheLimit();
-      prefetchedSongsRef.current.add(currentKey);
-    } catch (e) {
-      console.debug('Predictive prefetch non-fatal:', e);
-    } finally {
-      prefetchingSongsRef.current.delete(currentKey);
-    }
-  }, []);
-
   useEffect(() => {
     const audio = audioRef.current;
     const onPlay = () => {
@@ -458,9 +429,6 @@ export function useAudioPlayer() {
       if (audio.duration) {
         const pct = (audio.currentTime / audio.duration) * 100;
         setProgress(pct);
-        if (pct >= 70 && audio.duration >= 15 && currentSong?.songKey && !prefetchedSongsRef.current.has(currentSong.songKey)) {
-          prefetchNextSong();
-        }
       }
       if (Date.now() - lastPersistedAtRef.current > 1000) {
         lastPersistedAtRef.current = Date.now();
@@ -523,7 +491,7 @@ export function useAudioPlayer() {
       audio.removeEventListener('durationchange', onDurationChange);
       audio.removeEventListener('error', onError);
     };
-  }, [emitPlaybackEvent, loadAndPlay, persistQueueState, playNext, repeatMode, currentSong, prefetchNextSong]);
+  }, [emitPlaybackEvent, persistQueueState, playNext, repeatMode, currentSong]);
 
   const setEqPreset = useCallback((presetKey) => {
     audioRef.current.applyPreset(presetKey);
@@ -920,6 +888,5 @@ export function useAudioPlayer() {
     eqGains,
     setEqPreset,
     setBandGain,
-    audioGraph: audioEngine,
   };
 }

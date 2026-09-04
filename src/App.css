@@ -4017,10 +4017,6 @@ input:focus-visible {
   animation: turntable-vinyl-spin 1.333333s linear infinite;
 }
 
-.turntable__vinyl--braking {
-  animation: turntable-vinyl-brake .64s cubic-bezier(.22, .74, .28, 1) forwards;
-}
-
 .turntable__vinyl:active,
 .turntable--record .turntable__vinyl { cursor: grabbing; }
 .turntable--lifted .turntable__vinyl { box-shadow: 0 22px 34px rgba(24, 26, 32, 0.62), inset 0 0 0 1px rgba(255, 255, 255, 0.13), inset 0 0 18px rgba(0, 0, 0, 0.88); }
@@ -4300,11 +4296,6 @@ input:focus-visible {
 @keyframes turntable-vinyl-spin {
   from { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg)); }
   to { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(calc(var(--manual-record-angle, 0deg) + 360deg)); }
-}
-
-@keyframes turntable-vinyl-brake {
-  from { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg)); }
-  to { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(calc(var(--manual-record-angle, 0deg) + 142deg)); }
 }
 
 @media (max-width: 900px) {

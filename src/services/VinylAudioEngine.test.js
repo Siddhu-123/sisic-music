@@ -3,7 +3,6 @@ import test from 'node:test';
 import {
   exponentialInertiaVelocity,
   playbackRateFromAngularVelocity,
-  reverseSamples,
   vinylBrakeRateAtTime,
 } from './VinylAudioEngine.js';
 
@@ -13,11 +12,6 @@ test('varispeed uses signed angular velocity relative to platter speed', () => {
   assert.equal(playbackRateFromAngularVelocity(-nominal, nominal), -1);
   assert.equal(playbackRateFromAngularVelocity(nominal * 0.5, nominal, 1.08), 0.54);
   assert.equal(playbackRateFromAngularVelocity(nominal * 20, nominal), 8);
-});
-
-test('reverse buffer samples preserve channel order in reverse', () => {
-  const actual = [...reverseSamples(new Float32Array([0.1, -0.2, 0.8, 1]))];
-  [1, 0.8, -0.2, 0.1].forEach((expected, index) => assert.ok(Math.abs(actual[index] - expected) < 0.000001));
 });
 
 test('release inertia exponentially settles at motor speed', () => {

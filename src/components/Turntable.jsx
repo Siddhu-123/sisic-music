@@ -408,7 +408,7 @@ export function Turntable({
           <div className="turntable__platter-rim" aria-hidden="true" />
           <div
             ref={vinylRef}
-            className={`turntable__vinyl turntable__vinyl--motor ${isBraking ? 'turntable__vinyl--braking' : ''}`}
+            className={`turntable__vinyl turntable__vinyl--motor ${isBraking ? 'turntable__vinyl--braking' : ''} ${!motorIsRunning ? 'turntable__vinyl--paused' : ''}`}
             style={{
               '--manual-record-angle': `${manualRecordAngle}deg`,
               '--eject-x': `${recordOffset.x}px`,

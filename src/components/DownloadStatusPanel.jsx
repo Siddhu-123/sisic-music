@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Download, UploadCloud, Laptop } from 'lucide-react';
+import { UploadCloud, Laptop } from 'lucide-react';
 import { downloadStatusText } from './componentUtils.jsx';
 
 export function DownloadStatusPanel({
@@ -13,20 +13,20 @@ export function DownloadStatusPanel({
 }) {
   const [tab, setTab] = useState('queued');
   const tabs = [
-    { id: 'queued', label: 'Queued for download', songs: queuedSongs },
+    { id: 'queued', label: 'Queued for preparation', songs: queuedSongs },
     { id: 'manual', label: 'Manual source needed', songs: manualSongs },
     { id: 'notQueued', label: 'Not queued', songs: notQueuedSongs },
   ];
   const activeTab = tabs.find(item => item.id === tab) || tabs[0];
 
   return (
-    <section className="download-status-panel" aria-label="Download status">
+    <section className="download-status-panel" aria-label="Mac worker preparation status">
       <div className="download-status-panel__header">
         <div>
           <Laptop size={20} />
           <div>
             <h2>Library availability</h2>
-            <p>The Mac worker can try queued songs with yt-dlp. Failed or blocked songs need your own source file.</p>
+            <p>The Mac worker prepares Drive audio with yt-dlp. Failed or blocked songs need your own source file.</p>
           </div>
         </div>
         <button className="btn-primary download-status-panel__import" onClick={onImport}>
@@ -41,7 +41,7 @@ export function DownloadStatusPanel({
         <div><span>Not queued</span><strong>{notQueuedSongs.length.toLocaleString()}</strong></div>
       </div>
 
-      <div className="download-status-tabs" role="tablist" aria-label="Download groups">
+      <div className="download-status-tabs" role="tablist" aria-label="Mac worker task groups">
         {tabs.map(item => (
           <button
             key={item.id}

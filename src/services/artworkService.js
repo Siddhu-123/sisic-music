@@ -1,24 +1,17 @@
-import { db, getStoredSongArtwork, saveSongArtwork } from '../db.js';
 import { getSongKey } from '../songIdentity.js';
 
-const memoryArtCache = new Map();
+const ARTWORK_MEMORY_LIMIT = 128;
+const artworkMemory = new Map();
 const activeFetchPromises = new Map();
-const activeCachePromises = new Map();
 
-export function getArtworkUrlForSize(url = '', size = 300) {
-  if (!url || url.startsWith('data:') || url.startsWith('blob:')) return url;
-  const safeSize = Math.max(60, Math.round(Number(size) || 300));
-  return url.replace(/\/\d+x\d+bb\./i, `/${safeSize}x${safeSize}bb.`);
-}
-
-function storedArtworkUrl(stored) {
-  if (!stored?.imageData) return stored?.coverArtUrl || '';
-  try {
-    const blob = new Blob([stored.imageData], { type: stored.imageMimeType || 'image/jpeg' });
-    return URL.createObjectURL(blob);
-  } catch {
-    return stored.coverArtUrl || '';
+function rememberArtwork(songKey, artwork) {
+  if (!songKey || !artwork) return artwork;
+  artworkMemory.delete(songKey);
+  artworkMemory.set(songKey, artwork);
+  while (artworkMemory.size > ARTWORK_MEMORY_LIMIT) {
+    artworkMemory.delete(artworkMemory.keys().next().value);
   }
+  return artwork;
 }
 
 /**
@@ -155,44 +148,29 @@ export async function searchITunesArtwork({ artist = '', track = '', album = '' 
 }
 
 /**
- * Unified artwork getter. Checks memory cache -> IndexedDB -> iTunes API -> Procedural fallback.
+ * Unified artwork getter. It keeps only a small in-memory URL cache; artwork
+ * bytes are left to the browser and are never persisted by the app.
  */
 export async function getSongArtwork(song = {}) {
   const songKey = song.songKey || getSongKey(song);
   if (!songKey) return generateProceduralArtwork(song);
 
-  // 1. Memory cache
-  if (memoryArtCache.has(songKey)) {
-    return memoryArtCache.get(songKey);
+  if (artworkMemory.has(songKey)) {
+    const cached = artworkMemory.get(songKey);
+    rememberArtwork(songKey, cached);
+    return cached;
   }
 
-  // 2. IndexedDB, including image bytes cached by an explicit offline action.
-  const storedArtwork = await getStoredSongArtwork(songKey).catch(() => null);
-  if (storedArtwork?.coverArtUrl || storedArtwork?.imageData) {
-    const result = {
-      coverArtUrl: storedArtworkUrl(storedArtwork),
-      album: storedArtwork.album || song.album || '',
-      genre: storedArtwork.genre || '',
-      releaseYear: storedArtwork.releaseYear || null,
-      isProcedural: Boolean(storedArtwork.isProcedural),
-      isOfflineCached: Boolean(storedArtwork.imageData),
-    };
-    memoryArtCache.set(songKey, result);
-    return result;
-  }
-
-  // 3. Direct property on song object
+  // Prefer metadata already present on the song record.
   if (song.coverArtUrl && !song.coverArtUrl.startsWith('data:image/svg+xml')) {
     const result = {
       coverArtUrl: song.coverArtUrl,
       album: song.album || '',
       isProcedural: false,
     };
-    memoryArtCache.set(songKey, result);
-    return result;
+    return rememberArtwork(songKey, result);
   }
 
-  // 4. Prevent duplicate in-flight network requests
   if (activeFetchPromises.has(songKey)) {
     return activeFetchPromises.get(songKey);
   }
@@ -207,19 +185,7 @@ export async function getSongArtwork(song = {}) {
       });
 
       if (iTunesResult?.coverArtUrl) {
-        memoryArtCache.set(songKey, iTunesResult);
-        if (db?.songArt) {
-          await db.songArt.put({
-            songKey,
-            coverArtUrl: iTunesResult.coverArtUrl,
-            album: iTunesResult.album || song.album || '',
-            genre: iTunesResult.genre || '',
-            releaseYear: iTunesResult.releaseYear || null,
-            cachedAt: Date.now(),
-            isProcedural: false,
-          }).catch(() => {});
-        }
-        return iTunesResult;
+        return rememberArtwork(songKey, iTunesResult);
       }
     } catch (err) {
       console.debug('Error in artwork pipeline:', err);
@@ -229,46 +195,9 @@ export async function getSongArtwork(song = {}) {
 
     // Fallback: Deterministic procedural art
     const procedural = generateProceduralArtwork(song);
-    memoryArtCache.set(songKey, procedural);
-    return procedural;
+    return rememberArtwork(songKey, procedural);
   })();
 
   activeFetchPromises.set(songKey, fetchPromise);
   return fetchPromise;
-}
-
-/**
- * Stores artwork bytes only after an explicit offline/download action.
- * Browsing may still use the remote URL, but offline artwork never depends on it.
- */
-export async function cacheSongArtwork(song = {}) {
-  const songKey = song.songKey || getSongKey(song);
-  if (!songKey) return null;
-  if (activeCachePromises.has(songKey)) return activeCachePromises.get(songKey);
-
-  const promise = (async () => {
-    const artwork = await getSongArtwork(song);
-    if (!artwork?.coverArtUrl) return artwork;
-
-    if (artwork.isProcedural || artwork.coverArtUrl.startsWith('data:')) {
-      await saveSongArtwork(songKey, artwork);
-      return artwork;
-    }
-
-    const response = await fetch(artwork.coverArtUrl, { cache: 'force-cache' });
-    if (!response.ok) throw new Error(`Artwork download failed: ${response.status}`);
-    const blob = await response.blob();
-    const imageData = await blob.arrayBuffer();
-    await saveSongArtwork(songKey, {
-      ...artwork,
-      imageData,
-      imageMimeType: blob.type || 'image/jpeg',
-    });
-    const cached = { ...artwork, isOfflineCached: true };
-    memoryArtCache.set(songKey, cached);
-    return cached;
-  })().finally(() => activeCachePromises.delete(songKey));
-
-  activeCachePromises.set(songKey, promise);
-  return promise;
 }

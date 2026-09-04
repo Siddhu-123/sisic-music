@@ -8,7 +8,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus.js';
 export function SongCard({
   song,
   onPlay,
-  onDownload,
+  onPrepare,
   onAddToQueue,
   onPlayNext,
   onAddToPlaylist,
@@ -140,7 +140,7 @@ export function SongCard({
     onPlayNext && { label: 'Next', icon: SkipForward, action: onPlayNext },
     onAddToQueue && { label: 'Queue', icon: ListMusic, action: onAddToQueue },
     onToggleLike && { label: isLiked ? 'Unlike' : 'Like', icon: Heart, action: onToggleLike, fill: isLiked ? 'currentColor' : 'none' },
-    onDownload && { label: song.driveFileId ? 'Offline' : 'Download', icon: Download, action: onDownload, disabled: isDownloading },
+    onPrepare && { label: song.driveFileId ? 'Ready to stream' : 'Prepare on Drive', icon: Download, action: onPrepare, disabled: isDownloading },
     onAddToPlaylist && { label: 'Playlist', icon: Plus, action: onAddToPlaylist },
     onReview && { label: 'Review', icon: RefreshCw, action: onReview },
     onInfo && { label: 'Info', icon: Info, action: onInfo },
@@ -218,13 +218,13 @@ export function SongCard({
         </div>
         <button
           className="song-card__dl-btn"
-          onClick={event => { event.stopPropagation(); onDownload(song); }}
-          aria-label={song.isDownloaded ? 'Offline available' : 'Cache or request song'}
+          onClick={event => { event.stopPropagation(); onPrepare?.(song); }}
+          aria-label={song.driveFileId ? 'Ready to stream' : 'Prepare song on Drive'}
           disabled={isDownloading}
         >
           {isDownloading
             ? <div className="spinner" />
-            : song.isDownloaded || song.isCached || song.hasBlob
+            : song.driveFileId
               ? <CheckCircle2 size={18} color="var(--green)" />
               : <Download size={18} color="var(--text-muted)" />
           }

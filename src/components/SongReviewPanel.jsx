@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { CheckCircle2, ExternalLink, Link2, RefreshCw, ShieldAlert, ThumbsDown, ThumbsUp, X } from 'lucide-react';
+import { CheckCircle2, Clock3, ExternalLink, Link2, RefreshCw, ShieldAlert, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
+import { formatDurationSeconds, getKnownDurationSeconds, MAX_DOWNLOAD_DURATION_SECONDS } from '../services/downloadPolicy.js';
 
 function candidateUrl(candidate = {}) {
   const value = candidate.url || candidate.webpage_url || candidate.original_url || '';
@@ -40,15 +41,14 @@ function candidateThumbnail(candidate) {
 }
 
 function candidateDuration(value) {
-  if (!value) return '';
-  if (typeof value === 'string' && value.includes(':')) return value;
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) return '';
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
+  const seconds = getKnownDurationSeconds({ duration: value });
+  return seconds ? formatDurationSeconds(seconds) : '';
 }
 
 function candidateReason(candidate) {
+  if (candidate.durationLimitExceeded) {
+    return `This source is ${candidateDuration(candidate.duration)} long and exceeds the ${formatDurationSeconds(MAX_DOWNLOAD_DURATION_SECONDS)} limit. Select it only if you approve downloading it.`;
+  }
   if (candidate.selectionStatus === 'safety-filtered') {
     return 'The automatic safety filter flagged this result. Inspect it before selecting.';
   }
@@ -63,6 +63,7 @@ export function SongReviewPanel({
   onUseYoutubeLink,
   onSelectCandidate,
   onRejectCandidate,
+  onTrashRequest,
   busy = false,
 }) {
   const [youtubeUrl, setYoutubeUrl] = useState('');
@@ -74,6 +75,8 @@ export function SongReviewPanel({
     ? job.reviewCandidates
     : (Array.isArray(song.reviewCandidates) ? song.reviewCandidates : []);
   const visibleCandidates = candidates.filter(candidate => !rejectedIds.has(candidateKey(candidate)));
+  const songDuration = getKnownDurationSeconds(song);
+  const canTrashRequest = Boolean(onTrashRequest && job?.jobId && !['done', 'downloading', 'cancelled'].includes(job.status));
   const dialogRef = useDialogFocus(true, onClose, { canClose: !busy });
 
   const rejectCandidate = async candidate => {
@@ -108,6 +111,7 @@ export function SongReviewPanel({
           {song.sourceTitle && <div><dt>Selected title</dt><dd>{song.sourceTitle}</dd></div>}
           {song.sourceUploader && <div><dt>Uploader</dt><dd>{song.sourceUploader}</dd></div>}
           {song.sourceSelectionMode && <div><dt>Selection mode</dt><dd>{song.sourceSelectionMode}</dd></div>}
+          {songDuration && <div><dt>Duration</dt><dd>{formatDurationSeconds(songDuration)}{songDuration > MAX_DOWNLOAD_DURATION_SECONDS ? ' · over limit' : ''}</dd></div>}
           {sourceUrl && (
             <div><dt>Source URL</dt><dd><a href={sourceUrl} target="_blank" rel="noreferrer">Open source</a></dd></div>
           )}
@@ -133,6 +137,7 @@ export function SongReviewPanel({
                   const key = candidateKey(candidate);
                   const previewUrl = candidatePreviewUrl(candidate);
                   const thumbnail = candidateThumbnail(candidate);
+                  const isDurationFiltered = Boolean(candidate.durationLimitExceeded);
                   const isFiltered = candidate.selectionStatus === 'safety-filtered';
                   const score = Number(candidate.score);
                   return (
@@ -157,9 +162,9 @@ export function SongReviewPanel({
                         ) : (
                           <div className="song-review-candidate__no-art">YouTube</div>
                         )}
-                        <span className={`song-review-candidate__badge ${isFiltered ? 'song-review-candidate__badge--filtered' : ''}`}>
-                          {isFiltered ? <ShieldAlert size={13} /> : <CheckCircle2 size={13} />}
-                          {isFiltered ? 'Safety filtered' : 'Possible match'}
+                        <span className={`song-review-candidate__badge ${isFiltered || isDurationFiltered ? 'song-review-candidate__badge--filtered' : ''}`}>
+                          {isDurationFiltered ? <Clock3 size={13} /> : isFiltered ? <ShieldAlert size={13} /> : <CheckCircle2 size={13} />}
+                          {isDurationFiltered ? 'Over 8-minute limit' : isFiltered ? 'Safety filtered' : 'Possible match'}
                         </span>
                       </div>
                       <div className="song-review-candidate__body">
@@ -207,6 +212,12 @@ export function SongReviewPanel({
             <RefreshCw size={16} />
             <span>{busy ? 'Queueing...' : 'Search again for another source'}</span>
           </button>
+          {canTrashRequest && (
+            <button className="panel-action-btn" onClick={() => onTrashRequest(song)} disabled={busy}>
+              <Trash2 size={16} />
+              <span>Trash download request</span>
+            </button>
+          )}
         </div>
 
         <div className="song-review-panel__link-form">

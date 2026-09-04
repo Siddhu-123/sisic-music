@@ -8,6 +8,7 @@ import {
 } from '../songIdentity.js';
 import { cleanImportedFilename } from '../importIdentity.js';
 import { tokenExpiryFromResponse } from './driveAuth.js';
+import { getKnownDurationSeconds } from './downloadPolicy.js';
 
 // drive.file limits writes to files created/opened by Sisic. The read-only
 // scope remains necessary because a configured Spotify export may predate the
@@ -306,17 +307,21 @@ export class GoogleDriveService {
       safeSessionRemove(TOKEN_VERSION_STORAGE_KEY);
       if (storedToken) safeStorageSet(AUTH_HISTORY_STORAGE_KEY, 'true');
     }
-    this.jobCache = new Map();
     this.indexFileCache = new Map();
     this.songIndexCache = null;
-    this.queueIndexCache = null;
     this.authRequiredListeners = new Set();
     this.authRequired = false;
     this.tokenRequestPromise = null;
     this.tokenErrorCallback = null;
   }
 
+  clearVolatileCaches() {
+    this.indexFileCache.clear();
+    this.songIndexCache = null;
+  }
+
   _persistToken(token, expiry, tokenVersion = '') {
+    this.clearVolatileCaches();
     this.accessToken = token;
     this.tokenExpiry = expiry;
     this.tokenVersion = token ? (tokenVersion || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))) : '';
@@ -619,7 +624,6 @@ export class GoogleDriveService {
     const body = indexBody(key, Array.isArray(nextValues) ? nextValues : [], current);
     await this.writeJsonIndex(folderId, filename, body);
     if (filename === SONG_INDEX_FILENAME) this.songIndexCache = body;
-    if (filename === QUEUE_INDEX_FILENAME) this.queueIndexCache = body;
     return body;
   }
 
@@ -816,17 +820,15 @@ export class GoogleDriveService {
     const previous = current;
     const body = indexBody('jobs', jobs.map(normalizeQueueIndexJob).filter(Boolean), previous);
     await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
-    this.queueIndexCache = body;
     return body.jobs;
   }
 
   async readQueueIndex(folderId) {
     const body = await this.readJsonIndex(folderId, QUEUE_INDEX_FILENAME, indexBody('jobs', []));
-    this.queueIndexCache = {
+    return {
       ...body,
       jobs: Array.isArray(body.jobs) ? body.jobs : [],
     };
-    return this.queueIndexCache;
   }
 
   async upsertQueueIndexJob(folderId, job) {
@@ -837,7 +839,6 @@ export class GoogleDriveService {
     jobsById.set(normalized.jobId, normalized);
     const body = indexBody('jobs', [...jobsById.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))), current);
     await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
-    this.queueIndexCache = body;
     return body;
   }
 
@@ -859,7 +860,6 @@ export class GoogleDriveService {
     );
     if (current.storageMode === CANONICAL_QUEUE_STORAGE_MODE) body.storageMode = CANONICAL_QUEUE_STORAGE_MODE;
     await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
-    this.queueIndexCache = body;
     return updated;
   }
 
@@ -894,10 +894,12 @@ export class GoogleDriveService {
     return entry;
   }
 
-  async selectDownloadCandidate(folderId, songInput, candidate) {
+  async selectDownloadCandidate(folderId, songInput, candidate, options = {}) {
     const song = asSongRecord(songInput);
     const sourceUrl = candidateSourceUrl(candidate);
     if (!sourceUrl) throw new Error('The selected candidate has no YouTube URL.');
+    const { allowLongDownload = false } = options;
+    const candidateDurationSeconds = getKnownDurationSeconds(candidate);
     const existing = songInput?.downloadJob?.jobId
       ? songInput.downloadJob
       : await this.findDownloadJob(song, folderId);
@@ -907,6 +909,8 @@ export class GoogleDriveService {
         replaceExisting: Boolean(song.driveFileId),
         replacementForFileId: song.driveFileId || '',
         reviewAction: 'accepted-candidate',
+        allowLongDownload,
+        durationSeconds: candidateDurationSeconds,
       });
       await this.recordSourceFeedback(folderId, song, candidate, 'accepted');
       return result;
@@ -924,24 +928,28 @@ export class GoogleDriveService {
       sourceTitle: candidate.title || '',
       sourceUploader: candidate.uploader || candidate.channel || '',
       sourceDuration: candidate.duration || '',
+      durationSeconds: candidateDurationSeconds || existing.durationSeconds || null,
       sourceSelectionMode: 'reviewed-youtube-candidate',
       reviewState: 'accepted',
       reviewDecision: 'accepted',
       reviewDecisionAt: now,
       reviewCandidates: [],
       reviewAction: 'accepted-candidate',
+      durationLimitExceeded: false,
+      allowLongDownload: Boolean(allowLongDownload),
     });
     await this.recordSourceFeedback(folderId, song, candidate, 'accepted');
     return { queued: true, alreadyQueued: false, job: updated };
   }
 
-  async retryDownloadSearch(folderId, songInput) {
+  async retryDownloadSearch(folderId, songInput, options = {}) {
     const song = asSongRecord(songInput);
+    const { allowLongDownload = false } = options;
     const existing = songInput?.downloadJob?.jobId
       ? songInput.downloadJob
       : await this.findDownloadJob(song, folderId);
     if (!existing?.jobId) {
-      return await this.requestSongDownload(song, folderId, '', { allowRedownload: true });
+      return await this.requestSongDownload(song, folderId, '', { allowRedownload: true, allowLongDownload });
     }
     const updated = await this.updateQueueIndexJob(folderId, existing, {
       status: 'queued',
@@ -959,8 +967,38 @@ export class GoogleDriveService {
       reviewDecision: '',
       reviewDecisionAt: '',
       reviewCandidates: [],
+      durationLimitExceeded: false,
+      allowLongDownload: Boolean(allowLongDownload),
     });
     return { queued: true, alreadyQueued: false, job: updated };
+  }
+
+  async trashDownloadRequest(folderId, jobInput) {
+    const song = asSongRecord(jobInput || {});
+    const existing = jobInput?.downloadJob?.jobId
+      ? jobInput.downloadJob
+      : await this.findDownloadJob(song, folderId);
+    if (!existing?.jobId) {
+      return { trashed: false, alreadyTrashed: true, queued: false, job: null };
+    }
+    if (existing.status === 'downloading') {
+      throw new Error('This request is already active or uploaded and cannot be trashed here.');
+    }
+    if (existing.status === 'done' && existing.uploadedFileId) {
+      return { trashed: false, alreadyTrashed: true, queued: false, job: existing };
+    }
+    const updated = await this.updateQueueIndexJob(folderId, existing, {
+      status: 'cancelled',
+      lastError: 'Download request trashed by user.',
+      nextAttemptAt: '',
+      reviewState: 'trashed',
+      reviewDecision: 'trashed',
+      reviewDecisionAt: new Date().toISOString(),
+      reviewCandidates: [],
+      durationLimitExceeded: false,
+      cancelledAt: new Date().toISOString(),
+    });
+    return { trashed: true, alreadyTrashed: false, queued: false, job: updated };
   }
 
   async ensureDeletedIndex(folderId) {
@@ -1203,6 +1241,13 @@ export class GoogleDriveService {
     }
   }
 
+  getAudioStreamUrl(fileId) {
+    if (!fileId) return '';
+    const baseHref = typeof window === 'undefined' ? 'http://localhost/' : window.location.href;
+    const appBase = new URL(import.meta.env?.BASE_URL || './', baseHref);
+    return new URL(`stream/${encodeURIComponent(fileId)}`, appBase).toString();
+  }
+
   async findSongFile(songOrTitle, folderId, maybeArtist = '') {
     const song = typeof songOrTitle === 'object'
       ? asSongRecord(songOrTitle)
@@ -1229,23 +1274,6 @@ export class GoogleDriveService {
     return firstAudioFile(filenameMatches);
   }
 
-  async downloadFileAsBlob(fileId) {
-    const metadata = await this.getAudioFileMetadata(fileId);
-    if (!metadata) {
-      throw new Error('Drive file is not an audio file. It may be a download job JSON file.');
-    }
-    const resp = await this.driveGet(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-      'Drive audio download'
-    );
-    const blob = await resp.blob();
-    if (blob.type && !blob.type.startsWith('audio/') && blob.type !== 'application/octet-stream') {
-      throw new Error(`Drive file is not audio. Download returned ${blob.type}.`);
-    }
-    if (blob.type && blob.type.startsWith('audio/')) return blob;
-    return new Blob([await blob.arrayBuffer()], { type: metadata.mimeType || 'audio/mpeg' });
-  }
-
   async readJsonFile(fileId, label = 'Drive JSON file') {
     const resp = await this.driveGet(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, label);
     return await resp.json();
@@ -1257,19 +1285,10 @@ export class GoogleDriveService {
     const files = await this.driveList(q, JOB_FILE_FIELDS, 100);
     const jobs = [];
     for (const file of files) {
-      const cached = this.jobCache.get(file.id);
-      if (cached?.modifiedTime === file.modifiedTime) {
-        jobs.push(cached.job);
-        continue;
-      }
-
       try {
         const content = await this.readJsonFile(file.id, 'Drive job file');
         const job = normalizeJob(content, file);
-        if (job) {
-          this.jobCache.set(file.id, { modifiedTime: file.modifiedTime, job });
-          jobs.push(job);
-        }
+        if (job) jobs.push(job);
       } catch (error) {
         console.error('Failed to read Drive job file:', file.name, error);
       }
@@ -1331,7 +1350,6 @@ export class GoogleDriveService {
       );
       body.storageMode = CANONICAL_QUEUE_STORAGE_MODE;
       await this.writeJsonIndex(folderId, QUEUE_INDEX_FILENAME, body);
-      this.queueIndexCache = body;
       return normalized;
     }
 
@@ -1361,14 +1379,7 @@ export class GoogleDriveService {
       throw new Error(`Drive job create failed: ${resp.status} ${await resp.text()}`);
     }
     const file = await resp.json();
-    const normalized = normalizeJob(job, file);
-    if (normalized?.jobFileId) {
-      this.jobCache.set(normalized.jobFileId, {
-        modifiedTime: normalized.updatedAt,
-        job: normalized,
-      });
-    }
-    return normalized;
+    return normalizeJob(job, file);
   }
 
   async uploadImportSource(file, folderId, jobId) {
@@ -1424,6 +1435,7 @@ export class GoogleDriveService {
       sourceFileId: source.id,
       sourceFileName: file.name || '',
       sourceMimeType: file.type || 'audio/mpeg',
+      durationSeconds: getKnownDurationSeconds(song) || null,
       requestedBy: 'browser-import',
       allowRedownload: true,
     };
@@ -1449,6 +1461,8 @@ export class GoogleDriveService {
     const {
       auto = false,
       allowRedownload = false,
+      allowLongDownload = false,
+      durationSeconds = null,
       replaceExisting = false,
       replacementForFileId = '',
       reviewAction = '',
@@ -1504,6 +1518,9 @@ export class GoogleDriveService {
       updatedAt: now,
       uploadedFileId: '',
       sourceUrl,
+      durationSeconds: getKnownDurationSeconds({ ...song, durationSeconds }) || null,
+      durationLimitExceeded: false,
+      allowLongDownload: Boolean(allowLongDownload),
       qualityStatus: reviewAction === 'reject-video' ? 'pending-replacement' : '',
       reviewAction,
       replacementForFileId: replacementForFileId || (replaceExisting ? song.driveFileId || '' : ''),

@@ -117,8 +117,6 @@ export function ExploreView({
           {[
             ['all', 'All saved'],
             ['ready', 'Ready to play'],
-            ['offline', 'Offline'],
-            ['not-downloaded', 'Not downloaded'],
           ].map(([value, label]) => (
             <button key={value} type="button" className={availability === value ? 'explore-chip is-active' : 'explore-chip'} onClick={() => { setAvailability(value); setActiveMixId(''); }}>{label}</button>
           ))}

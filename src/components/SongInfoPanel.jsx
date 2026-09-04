@@ -4,7 +4,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus.js';
 import { statusDetails } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 
-export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue, onAddToPlaylist, onReview, onDelete, onMarkDuplicate, onRestoreDuplicate, onSave, onDownload, isDownloading = false }) {
+export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue, onAddToPlaylist, onReview, onDelete, onMarkDuplicate, onRestoreDuplicate, onSave, onPrepare, isDownloading = false }) {
   const dialogRef = useDialogFocus(true, onClose);
   const status = statusDetails(song);
   const [editing, setEditing] = useState(false);
@@ -66,7 +66,7 @@ export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue,
           <button className="panel-action-btn" onClick={() => onPlayNext?.(song)}><SkipForward size={16} /> Play next</button>
           <button className="panel-action-btn" onClick={() => onAddToQueue?.(song)}><ListMusic size={16} /> Queue</button>
           <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(song)}><Plus size={16} /> Playlist</button>
-          <button className="panel-action-btn" onClick={() => onDownload?.(song)} disabled={isDownloading}><Download size={16} /> Offline</button>
+          <button className="panel-action-btn" onClick={() => onPrepare?.(song)} disabled={isDownloading}><Download size={16} /> Prepare on Drive</button>
           <button className="panel-action-btn" onClick={() => onReview?.(song)}><RefreshCw size={16} /> Suggest source</button>
           {onMarkDuplicate && <button className="panel-action-btn panel-action-btn--danger" onClick={() => onMarkDuplicate(song)}><Copy size={16} /> Mark duplicate</button>}
           {onRestoreDuplicate && <button className="panel-action-btn" onClick={() => onRestoreDuplicate(song)}><FolderOpen size={16} /> Restore to Ready</button>}

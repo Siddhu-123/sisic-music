@@ -6,7 +6,7 @@ import { syncLibraryToDb, requestPersistentStorage } from '../db';
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
 export const DRIVE_FOLDER_ID = import.meta.env.VITE_DRIVE_FOLDER_ID?.trim() || '';
-const RECONNECT_MESSAGE = 'Drive connection paused. Reconnect to continue syncing; offline music stays available.';
+const RECONNECT_MESSAGE = 'Drive connection paused. Reconnect to continue syncing and streaming.';
 const DEV_UI_PREVIEW = import.meta.env.DEV && new URLSearchParams(window.location.search).has('ui-preview');
 
 const REQUIRED_CONFIG = {
