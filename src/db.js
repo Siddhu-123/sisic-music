@@ -198,6 +198,25 @@ db.version(10).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 10 });
 });
 
+// DJ metadata lives with the song record so it is available offline. Scores
+// are derived and cached separately because a score is invalidated whenever
+// either track's analysis changes.
+db.version(11).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, playCount, lastPlayedAt, fileIdentity, importStatus, syncStatus, embeddingStatus, coverArtUrl, bpm, musicalKey, djMetadataVersion',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songEmbeddings: '&songKey, updatedAt',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  playbackEvents: '&eventId, songKey, eventType, createdAt',
+  djTransitionScores: '&cacheKey, sourceSongKey, candidateSongKey, updatedAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 11 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -212,6 +231,7 @@ function normalizeSongInput(input = {}) {
   const song = asSongRecord(input);
   const durationSeconds = parseDurationSeconds(song.durationSeconds ?? song.duration)
     || parseDurationSeconds(Number(song.durationMs || 0) / 1000);
+  const bounded = (value, minimum, maximum) => value != null && value !== '' && Number.isFinite(Number(value)) && Number(value) >= minimum && Number(value) <= maximum ? Number(value) : null;
   return {
     songKey: song.songKey,
     track: song.track,
@@ -238,11 +258,26 @@ function normalizeSongInput(input = {}) {
     importStatus: song.importStatus || '',
     syncStatus: song.syncStatus || '',
     embeddingStatus: song.embeddingStatus || '',
+    bpm: bounded(song.bpm, 40, 240),
+    musicalKey: String(song.musicalKey || '').trim().slice(0, 16),
+    keyConfidence: bounded(song.keyConfidence, 0, 1),
+    energy: bounded(song.energy, 0, 1),
+    djAudioWindows: Array.isArray(song.djAudioWindows) ? song.djAudioWindows.slice(0, 120).filter(item => item && bounded(item.startSeconds, 0, 600) != null && bounded(item.energy, 0, 1) != null)
+      .map(item => ({ startSeconds: Number(item.startSeconds), energy: Number(item.energy) })) : [],
+    loudnessLufs: bounded(song.loudnessLufs, -80, 0),
+    djMetadataVersion: Math.max(0, Math.floor(Number(song.djMetadataVersion) || 0)),
+    djMetadataUpdatedAt: String(song.djMetadataUpdatedAt || ''),
+    djAnalysisStatus: String(song.djAnalysisStatus || ''),
   };
 }
 
 function bestSongMerge(previous, incoming) {
   if (!previous) return incoming;
+  const analysisFields = ['bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djAudioWindows', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus'];
+  const incomingAnalysisTime = Date.parse(incoming.djMetadataUpdatedAt) || 0;
+  const previousAnalysisTime = Date.parse(previous.djMetadataUpdatedAt) || 0;
+  const authoritativeAnalysis = incoming.djAnalysisStatus === 'ready' && incomingAnalysisTime >= previousAnalysisTime
+    ? incoming : previousAnalysisTime > incomingAnalysisTime ? previous : null;
   const previousWithoutLegacyAudio = Object.fromEntries(
     Object.entries(previous).filter(([key]) => !LEGACY_AUDIO_FIELDS.has(key)),
   );
@@ -272,6 +307,18 @@ function bestSongMerge(previous, incoming) {
     importStatus: incoming.importStatus || previous.importStatus || '',
     syncStatus: incoming.syncStatus || previous.syncStatus || '',
     embeddingStatus: incoming.embeddingStatus || previous.embeddingStatus || '',
+    bpm: incoming.bpm ?? previous.bpm ?? null,
+    musicalKey: incoming.musicalKey || previous.musicalKey || '',
+    keyConfidence: incoming.keyConfidence ?? previous.keyConfidence ?? null,
+    energy: incoming.energy ?? previous.energy ?? null,
+    djAudioWindows: incoming.djAudioWindows?.length ? incoming.djAudioWindows : previous.djAudioWindows || [],
+    loudnessLufs: incoming.loudnessLufs ?? previous.loudnessLufs ?? null,
+    djMetadataVersion: incoming.djMetadataVersion || previous.djMetadataVersion || 0,
+    djMetadataUpdatedAt: incoming.djMetadataUpdatedAt || previous.djMetadataUpdatedAt || '',
+    djAnalysisStatus: incoming.djAnalysisStatus || previous.djAnalysisStatus || '',
+    // A newer analysis can intentionally clear an uncertain key/BPM; an older
+    // index must never restore measurements from a replaced recording.
+    ...(authoritativeAnalysis ? Object.fromEntries(analysisFields.map(field => [field, authoritativeAnalysis[field]])) : {}),
   };
 }
 
@@ -538,6 +585,24 @@ export async function recordPlaybackEvent(event = {}) {
   const row = { eventId: event.id, ...event };
   await db.playbackEvents.put(row);
   return row;
+}
+
+export async function getDjTransitionScores(sourceSongKey) {
+  if (!sourceSongKey || !db?.djTransitionScores) return [];
+  return await db.djTransitionScores.where('sourceSongKey').equals(sourceSongKey).toArray();
+}
+
+export async function cacheDjTransitionScores(scores = []) {
+  if (!Array.isArray(scores) || !scores.length || !db?.djTransitionScores) return;
+  const updatedAt = new Date().toISOString();
+  const rows = scores
+    .filter(score => score?.cacheKey && score.sourceSongKey && score.candidateSongKey)
+    .map(score => ({ ...score, updatedAt }));
+  await db.transaction('rw', db.djTransitionScores, async () => {
+    await db.djTransitionScores.bulkPut(rows);
+    const excess = await db.djTransitionScores.count() - 2000;
+    if (excess > 0) await db.djTransitionScores.orderBy('updatedAt').limit(excess).delete();
+  });
 }
 
 export async function syncLibraryToDb(songs) {

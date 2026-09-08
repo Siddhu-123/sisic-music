@@ -777,6 +777,10 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
 .playback-settings summary::-webkit-details-marker { display: none; }
 .playback-settings__panel { position: absolute; right: 0; bottom: calc(100% + 20px); z-index: 30; width: min(300px, calc(100vw - 32px)); padding: 22px; border: 1px solid var(--border); border-radius: 20px; background: var(--bg); color: var(--text); box-shadow: var(--shadow-soft); display: grid; gap: 12px; }
 .playback-settings__panel label { display: flex; justify-content: space-between; gap: 16px; font-size: .85rem; }
+.playback-settings__panel .playback-settings__toggle { align-items: center; }
+.playback-settings__toggle span { display: grid; gap: 3px; }
+.playback-settings__toggle small { color: var(--text-muted); font-size: .72rem; line-height: 1.25; }
+.playback-settings__toggle input { width: 18px; height: 18px; accent-color: var(--green); }
 .playback-settings__panel label span, .playback-settings__panel p, .playback-settings__panel small { color: var(--text-muted); }
 .playback-settings__panel p { font-size: .78rem; margin: 0 0 8px; }
 .playback-settings__panel small { font-size: .72rem; line-height: 1.5; }

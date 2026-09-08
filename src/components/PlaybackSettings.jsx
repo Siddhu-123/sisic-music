@@ -14,6 +14,13 @@ export function PlaybackSettings({ player, onToggleQueue }) {
       <input id="crossfade" aria-label="Crossfade seconds" type="range" min="0" max="12" step="1"
         value={player.crossfadeSeconds} onChange={e => player.setCrossfade(Number(e.target.value))} />
       <p>Blend the end of a track into the next.</p>
+      <label className="playback-settings__toggle" htmlFor="dj-mode">
+        <span><strong>Adaptive DJ</strong><small>Predict skips and choose a smooth next recommendation.</small></span>
+        <input id="dj-mode" aria-label="Adaptive DJ mode" type="checkbox" checked={player.djModeEnabled} onChange={event => player.setDjModeEnabled(event.target.checked)} />
+      </label>
+      {player.djModeEnabled && <p>{player.djPlan
+        ? `Up next: ${player.djPlan.candidateTitle || 'DJ recommendation'}${player.djPlan.fallback ? ' · usual recommendation' : ' · smooth match'}`
+        : player.djPrediction?.samples >= 4 ? 'Listening for the right moment.' : 'Learning from your listening history.'}</p>}
       <label htmlFor="sleep-timer">Sleep timer <span>{sleepLabel}</span></label>
       <select id="sleep-timer" aria-label="Sleep timer" value={timer?.mode === 'track' ? 'track' : timer ? 'active' : 'off'} onChange={e => player.setSleepTimer(e.target.value)}>
         <option value="off">Off</option>

@@ -1,5 +1,6 @@
 import { VinylAudioEngine } from './VinylAudioEngine.js';
 import { EQ_PRESETS } from './audioGraph.js';
+import { rememberDjTransition } from './djModeService.js';
 import { dedupeQueue, insertAfter, insertAtEnd, queueItemKey, reorderQueue, restoreQueueState, serializeQueueState } from '../queueManager.js';
 
 export const QUEUE_STORAGE_KEY = 'sisic:queue-state:v1';
@@ -39,6 +40,8 @@ export class PlaybackController {
       resumeOnRestore: Boolean(saved?.isPlaying), resumePosition: saved?.positionSeconds || 0,
       volume: saved?.volume ?? 1, muted: saved?.muted || false, crossfadeSeconds: saved?.crossfadeSeconds || 0,
       sleepTimer: saved?.sleepTimer || null, sleepRemaining: 0,
+      djModeEnabled: Boolean(saved?.djModeEnabled), djPrediction: null, djPlan: null,
+      djHistory: saved?.djHistory || { candidateKeys: [], timingBuckets: [] },
       eqPreset: saved?.eqPreset || 'flat', eqGains: saved?.eqGains || [...EQ_PRESETS.flat.gains],
       rpm: 45, pitchModifier: 1, pitchRange: 0.08,
     };
@@ -58,6 +61,7 @@ export class PlaybackController {
     this.preloaded = null;
     this.preloadPending = null;
     this.smartNextKey = null;
+    this.djPlan = null;
     this.loading = false;
     this.transitioning = false;
     this.lastPersisted = 0;
@@ -84,6 +88,7 @@ export class PlaybackController {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
     if (!enabled) {
+      this.clearDjPlan({ persist: false });
       const resumePosition = this.loading ? this.state.resumePosition : this.audio?.currentTime || 0;
       const wasLoading = this.loading;
       this.desiredPlaying = false;
@@ -186,9 +191,10 @@ export class PlaybackController {
     this.invalidateSelection({ keepAudio });
     this.desiredPlaying = autoplay;
     this.smartNextKey = null;
+    if (!this.djPlan || keyOf(this.djPlan.candidate) !== keyOf(this.state.queue[index])) this.djPlan = null;
     this.update({ queueIndex: index, queueRevision: this.state.queueRevision + 1,
       resumePosition: resetPosition ? 0 : this.state.resumePosition, resumeOnRestore: autoplay,
-      currentSong: this.state.queue[index], currentSongKey: keyOf(this.state.queue[index]),
+      currentSong: this.state.queue[index], currentSongKey: keyOf(this.state.queue[index]), djPlan: this.djPlan ? this.state.djPlan : null, djPrediction: null,
       progress: 0, duration: 0, buffered: 0, isPlaying: false, isBuffering: true, error: '',
     });
     this.persist();
@@ -260,9 +266,12 @@ export class PlaybackController {
       this.transitioning = false;
       this.failed.delete(keyOf(song));
       this.played.add(keyOf(song));
+      const completedDjPlan = this.djPlan && keyOf(this.djPlan.candidate) === keyOf(song);
+      const djHistory = completedDjPlan ? rememberDjTransition(this.state.djHistory, keyOf(song), this.djPlan.transitionAtSeconds) : this.state.djHistory;
+      if (completedDjPlan) this.djPlan = null;
       this.update({ currentSong: this.loadedSong, currentSongKey: keyOf(song), duration: incoming.duration,
         progress: incoming.duration ? incoming.currentTime / incoming.duration * 100 : 0,
-        resumePosition: 0, isPlaying: !incoming.paused, isBuffering: Boolean(!incoming.paused && incoming.element?.readyState < 3),
+        resumePosition: 0, isPlaying: !incoming.paused, isBuffering: Boolean(!incoming.paused && incoming.element?.readyState < 3), djPlan: completedDjPlan ? null : this.state.djPlan, djHistory,
       });
       if (this.desiredPlaying) this.event('playback-start', song, { message: startAt ? 'Playback resumed from the saved position.' : 'Playback started.' });
       this.persist();
@@ -340,8 +349,8 @@ export class PlaybackController {
   preloadNext = () => {
     if (!this.active || this.loading || !this.loadedSong || this.retiring) return;
     const index = this.state.repeatMode === 'one' ? -1 : this.nextIndex();
-    const song = this.state.queue[index];
-    if (!song || index === this.state.queueIndex) { this.cancelPreload(); return; }
+    const song = this.djPlan?.candidate || this.state.queue[index];
+    if (!song || sameSource(song, this.loadedSong)) { this.cancelPreload(); return; }
     if (sameSource(song, this.preloadSong) && (this.preloadPending || this.preloaded)) return;
     this.cancelPreload();
     this.standby ||= this.makeAudio();
@@ -356,7 +365,15 @@ export class PlaybackController {
         if (!this.active || request !== this.preloadSequence) return;
         await standby.loadUrl(url);
         if (this.active && request === this.preloadSequence) this.preloaded = song;
-      } catch { /* Foreground playback owns retries and user-facing errors. */ }
+      } catch {
+        if (request === this.preloadSequence && sameSource(song, this.djPlan?.candidate)) {
+          this.update({ djHistory: { ...this.state.djHistory,
+            candidateKeys: [keyOf(song), ...this.state.djHistory.candidateKeys.filter(key => key !== keyOf(song))].slice(0, 6) } });
+          this.clearDjPlan({ persist: false });
+          this.persist();
+        }
+        // Normal queue failures remain owned by foreground playback.
+      }
       finally { if (request === this.preloadSequence) this.preloadPending = null; }
     })();
   };
@@ -373,17 +390,27 @@ export class PlaybackController {
       this.update({ duration, progress: duration ? bounded(this.audio.currentTime / duration * 100, 100) : 0, buffered: bounded(buffered, 100) });
       if (this.now() - this.lastPersisted > 5000) { this.lastPersisted = this.now(); this.persist(); }
       const remaining = (duration - this.audio.currentTime) / Math.max(0.0625, this.audio.targetMotorRate || 1);
-      if (duration > 0 && remaining > 0 && remaining <= Math.min(this.state.crossfadeSeconds, duration / 2)
+      const djDue = this.djPlan
+        && keyOf(this.djPlan.source) === keyOf(this.state.currentSong)
+        && this.audio.currentTime >= this.djPlan.transitionAtSeconds;
+      const requestedFade = djDue ? Math.min(this.djPlan.crossfadeSeconds, remaining) : remaining;
+      if (duration > 0 && remaining > 0 && (djDue || remaining <= Math.min(this.state.crossfadeSeconds, duration / 2))
         && this.preloaded && this.desiredPlaying && !this.loading && !this.transitioning && !this.audio.isScratching
         && !this.audio.needleLifted && !this.audio.element?.seeking && this.state.repeatMode !== 'one'
         && this.state.sleepTimer?.mode !== 'track' && this.audio.element?.readyState >= 3 && this.standby?.element?.readyState >= 3) {
-        const index = this.nextIndex();
+        let index = this.nextIndex();
+        if (djDue && sameSource(this.djPlan.candidate, this.preloaded)) {
+          const queue = insertAfter(this.state.queue, this.state.queueIndex, this.djPlan.candidate);
+          const queueIndex = queue.findIndex(song => keyOf(song) === this.state.currentSongKey);
+          this.update({ queue, queueIndex });
+          index = queueIndex + 1;
+        }
         const song = this.state.queue[index];
-        if (index >= 0 && sameSource(song, this.preloaded)) {
-          this.event('playback-complete', this.state.currentSong, { expectedFullPlay: true, message: 'Crossfaded into the next track.' });
+        if (index >= 0 && sameSource(song, this.preloaded) && (!djDue || keyOf(song) === keyOf(this.djPlan.candidate))) {
+          this.event(djDue ? 'dj-transition' : 'playback-complete', this.state.currentSong, { expectedFullPlay: !djDue, message: djDue ? 'Adaptive DJ crossfaded before a predicted skip.' : 'Crossfaded into the next track.' });
           this.select(index, { keepAudio: true, autoLoad: false });
           this.transitioning = true;
-          this.loadAndPlay(song, { crossfade: remaining });
+          this.loadAndPlay(song, { crossfade: requestedFade });
         }
       }
       return;
@@ -431,6 +458,7 @@ export class PlaybackController {
   pause = () => {
     this.desiredPlaying = false;
     this.finishFade();
+    this.clearDjPlan({ persist: false });
     this.pendingAudio?.pause({ immediate: true });
     this.audio?.pause({ immediate: true });
     this.event('playback-pause', undefined, { userInitiated: true });
@@ -441,10 +469,12 @@ export class PlaybackController {
   seek = pct => {
     if (!this.audio?.duration || !Number.isFinite(Number(pct))) return;
     this.finishFade();
+    this.clearDjPlan({ persist: false });
     const from = this.audio.currentTime;
     const to = bounded(pct, 100) / 100 * this.audio.duration;
     if (Math.abs(to - from) < 0.001) return;
     this.audio.seek(to);
+    this.update({ queueRevision: this.state.queueRevision + 1 });
     this.event('playback-seek', undefined, { userInitiated: true, fromPositionSeconds: from, toPositionSeconds: to, positionSeconds: to });
     this.preloadNext();
     this.persist();
@@ -487,11 +517,12 @@ export class PlaybackController {
     this.select(index);
   };
   editQueue(queue, originalQueue = queue) {
+    this.clearDjPlan({ persist: false });
     const currentKey = keyOf(this.state.queue[this.state.queueIndex]);
     const index = Math.max(0, queue.findIndex(song => keyOf(song) === currentKey));
     if (this.originalQueue.length) this.originalQueue = originalQueue;
     this.smartNextKey = null;
-    this.update({ queue, queueIndex: index });
+    this.update({ queue, queueIndex: index, queueRevision: this.state.queueRevision + 1 });
     this.preloadNext(); this.persist();
   }
   enqueueNext = song => {
@@ -537,12 +568,14 @@ export class PlaybackController {
     this.update({ queue: [], queueIndex: 0, queueRevision: this.state.queueRevision + 1 }); this.persist();
   };
   stop = () => {
+    this.clearDjPlan({ persist: false });
     this.event('playback-stop', undefined, { userInitiated: true });
     this.desiredPlaying = false; this.invalidateSelection(); this.cancelPreload(); this.loadedSong = null;
     this.update({ currentSong: null, currentSongKey: null, isPlaying: false, isBuffering: false,
       progress: 0, duration: 0, buffered: 0, resumePosition: 0, resumeOnRestore: false }); this.persist();
   };
   toggleShuffle = () => {
+    this.clearDjPlan({ persist: false });
     const mode = ['off', 'shuffle', 'smart'][(['off', 'shuffle', 'smart'].indexOf(this.state.shuffleMode) + 1) % 3];
     let queue = this.state.queue;
     const currentKey = keyOf(queue[this.state.queueIndex]);
@@ -559,6 +592,7 @@ export class PlaybackController {
     this.preloadNext(); this.persist();
   };
   toggleRepeat = () => {
+    this.clearDjPlan({ persist: false });
     const modes = ['off', 'one', 'all'];
     this.update({ repeatMode: modes[(modes.indexOf(this.state.repeatMode) + 1) % modes.length] });
     this.smartNextKey = null; this.preloadNext(); this.persist();
@@ -567,7 +601,46 @@ export class PlaybackController {
   toggleMute = () => { this.update({ muted: !this.state.muted }); this.applyVolume(); };
   applyVolume() { for (const audio of [this.audio, this.retiring]) audio?.setVolume(this.state.muted ? 0 : this.state.volume); this.persist(); }
   setCrossfade = value => { this.finishFade(); this.update({ crossfadeSeconds: bounded(value, 12) }); this.preloadNext(); this.persist(); };
+  setDjModeEnabled = enabled => {
+    const djModeEnabled = Boolean(enabled);
+    if (!djModeEnabled) this.clearDjPlan({ persist: false });
+    this.update({ djModeEnabled, djPrediction: null });
+    this.preloadNext();
+    this.persist();
+  };
+  setDjPrediction = prediction => this.update({ djPrediction: prediction ? { ...prediction } : null });
+  clearDjPlan = ({ persist = true } = {}) => {
+    if (!this.djPlan && !this.state.djPlan) return;
+    this.djPlan = null;
+    this.update({ djPlan: null, djPrediction: null });
+    this.cancelPreload();
+    this.preloadNext();
+    if (persist) this.persist();
+  };
+  planDjTransition = plan => {
+    const source = this.state.currentSong;
+    const candidate = plan?.candidate && cleanSong(plan.candidate);
+    if (!this.state.djModeEnabled || !source || !candidate || keyOf(source) === keyOf(candidate) || !this.desiredPlaying
+      || this.state.repeatMode === 'one' || this.state.sleepTimer?.mode === 'track' || !playable(candidate)
+      || (plan.sourceSongKey && plan.sourceSongKey !== keyOf(source)) || this.loading || this.transitioning) return false;
+    if (this.djPlan?.sourceSongKey === keyOf(source)) return false;
+    const currentIndex = this.state.queueIndex;
+    const current = this.state.queue[currentIndex];
+    if (!current || keyOf(current) !== keyOf(source)) return false;
+    const crossfadeSeconds = Math.max(2, Math.min(7, Number(plan.crossfadeSeconds) || 4));
+    const transitionAtSeconds = Number(plan.transitionAtSeconds);
+    if (!Number.isFinite(transitionAtSeconds) || transitionAtSeconds <= this.audio.currentTime || transitionAtSeconds > this.audio.duration - crossfadeSeconds) return false;
+    this.cancelPreload();
+    this.djPlan = { ...plan, source, candidate, sourceSongKey: keyOf(source), transitionAtSeconds, crossfadeSeconds };
+    this.update({ djPlan: {
+      candidateSongKey: keyOf(candidate), candidateTitle: candidate.track, transitionAtSeconds, crossfadeSeconds, probability: Number(plan.probability || 0), fallback: Boolean(plan.fallback),
+    } });
+    this.preloadNext();
+    this.persist();
+    return true;
+  };
   setSleepTimer = value => {
+    this.clearDjPlan({ persist: false });
     const sleepTimer = value === 'track' ? { mode: 'track' } : Number(value) > 0 ? { mode: 'time', deadline: this.now() + Number(value) * 60000 } : null;
     this.update({ sleepTimer }); this.checkSleep(); this.persist();
   };
@@ -598,6 +671,8 @@ export class PlaybackController {
   setPlayerError = message => this.update({ error: message || '', isBuffering: false });
   visibilityChanged = hidden => { this.audio?.handleVisibilityChange(hidden); this.retiring?.handleVisibilityChange(hidden); this.checkSleep(); this.persist(); };
   dispose = () => {
+    this.djPlan = null;
+    this.update({ djPlan: null, djPrediction: null });
     this.persist(); this.active = false; this.enabled = false; this.cancelLoad(); this.cancelPreload(); this.finishFade();
     this.audio?.dispose(); this.standby?.dispose(); this.audio = null; this.standby = null; this.loadedSong = null;
   };

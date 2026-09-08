@@ -192,6 +192,7 @@ function normalizeSongIndexEntry(file = {}, item = null) {
   const songKey = normalizedItem?.songKey
     || (isUnknownSongKey(existingSongKey) ? '' : existingSongKey)
     || getSongKey({ artist, track });
+  const numberOrNull = (value, minimum, maximum) => Number.isFinite(Number(value)) && Number(value) >= minimum && Number(value) <= maximum ? Number(value) : null;
   return {
     songKey,
     artist,
@@ -215,6 +216,15 @@ function normalizeSongIndexEntry(file = {}, item = null) {
     sourceSelectionMode: normalizedItem?.sourceSelectionMode || appProperties.sisicSourceSelectionMode || file.sourceSelectionMode || '',
     qualityStatus: normalizedItem?.qualityStatus || appProperties.sisicQualityStatus || file.qualityStatus || '',
     qualityReviewedAt: normalizedItem?.qualityReviewedAt || appProperties.sisicQualityReviewedAt || file.qualityReviewedAt || '',
+    bpm: numberOrNull(normalizedItem?.bpm ?? appProperties.sisicBpm ?? file.bpm, 40, 240),
+    musicalKey: String(normalizedItem?.musicalKey || appProperties.sisicMusicalKey || file.musicalKey || '').trim().slice(0, 16),
+    keyConfidence: numberOrNull(normalizedItem?.keyConfidence ?? appProperties.sisicKeyConfidence ?? file.keyConfidence, 0, 1),
+    energy: numberOrNull(normalizedItem?.energy ?? appProperties.sisicEnergy ?? file.energy, 0, 1),
+    loudnessLufs: numberOrNull(normalizedItem?.loudnessLufs ?? appProperties.sisicLoudnessLufs ?? file.loudnessLufs, -80, 0),
+    djMetadataVersion: Math.max(0, Math.floor(Number(normalizedItem?.djMetadataVersion ?? appProperties.sisicDjMetadataVersion ?? file.djMetadataVersion) || 0)),
+    djMetadataUpdatedAt: String(normalizedItem?.djMetadataUpdatedAt || appProperties.sisicDjMetadataUpdatedAt || file.djMetadataUpdatedAt || ''),
+    djAnalysisStatus: String(normalizedItem?.djAnalysisStatus || appProperties.sisicDjAnalysisStatus || file.djAnalysisStatus || ''),
+    djAudioWindows: normalizedItem?.djAudioWindows || file.djAudioWindows || [],
     updatedAt: new Date().toISOString(),
   };
 }
@@ -702,12 +712,14 @@ export class GoogleDriveService {
     const previousSongs = Array.isArray(previous.songs) ? previous.songs : [];
     const previousByKey = new Map(previousSongs.filter(item => item.songKey).map(item => [item.songKey, item]));
     const previousByFileId = new Map(previousSongs.filter(item => item.driveFileId).map(item => [item.driveFileId, item]));
-    const metadataFields = ['description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource', 'metadataUpdatedAt'];
+    const metadataFields = ['description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource', 'metadataUpdatedAt', 'bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus', 'djAudioWindows'];
     const songs = audioFiles.map(file => {
       const entry = normalizeSongIndexEntry(file);
       const previousEntry = previousByKey.get(entry.songKey) || previousByFileId.get(entry.driveFileId);
+      const newerAnalysis = (Date.parse(entry.djMetadataUpdatedAt) || 0) > (Date.parse(previousEntry?.djMetadataUpdatedAt) || 0);
       return previousEntry
-        ? { ...entry, ...Object.fromEntries(metadataFields.filter(field => Object.prototype.hasOwnProperty.call(previousEntry, field)).map(field => [field, previousEntry[field]])) }
+        ? { ...entry, ...Object.fromEntries(metadataFields.filter(field => Object.prototype.hasOwnProperty.call(previousEntry, field)
+          && (!newerAnalysis || !['bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus', 'djAudioWindows'].includes(field))).map(field => [field, previousEntry[field]])) }
         : entry;
     }).sort((a, b) => a.songKey.localeCompare(b.songKey));
     const body = indexBody('songs', songs, previous);
@@ -1188,13 +1200,10 @@ export class GoogleDriveService {
       createdAt: event.createdAt || new Date().toISOString(),
       createdBy: CLIENT_INSTANCE_ID,
     };
-    try {
-      await this.mutateJsonIndex(folderId, PLAYBACK_LOG_FILENAME, 'events', [], events => (
-        [logEntry, ...events].slice(0, MAX_PLAYBACK_LOGS)
-      ));
-    } catch (error) {
-      console.warn('Playback log write failed:', error);
-    }
+    // The caller owns the IndexedDB outbox retry; failed writes must reject.
+    await this.mutateJsonIndex(folderId, PLAYBACK_LOG_FILENAME, 'events', [], events => (
+      [logEntry, ...events.filter(item => item.id !== logEntry.id)].slice(0, MAX_PLAYBACK_LOGS)
+    ));
     return logEntry;
   }
 

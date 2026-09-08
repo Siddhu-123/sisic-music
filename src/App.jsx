@@ -32,6 +32,7 @@ import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
 import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
+import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import {
   formatDurationSeconds,
   getKnownDurationSeconds,
@@ -1169,6 +1170,8 @@ function App() {
   useEffect(() => {
     configurePlayback({ enabled: isAuthenticated, resolveSong: resolvePlayableSong });
   }, [configurePlayback, isAuthenticated, resolvePlayableSong]);
+
+  useAdaptiveDjMode(player, exploreLibrarySongs, librarySummary.playbackEvents, likedSongKeys);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;

@@ -87,6 +87,10 @@ export function restoreQueueState(raw) {
     const selectedIndex = queue.findIndex(song => queueItemKey(song) === selectedKey);
     const sleepTimer = parsed.sleepTimer?.mode === 'track' ? { mode: 'track' }
       : parsed.sleepTimer?.mode === 'time' && Number.isFinite(parsed.sleepTimer.deadline) ? { mode: 'time', deadline: parsed.sleepTimer.deadline } : null;
+    const uniqueStrings = (value, limit) => Array.isArray(value) ? [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))].slice(0, limit) : [];
+    const timingBuckets = Array.isArray(parsed.djHistory?.timingBuckets)
+      ? [...new Set(parsed.djHistory.timingBuckets.map(Number).filter(Number.isFinite).map(value => Math.max(0, Math.floor(value / 5) * 5)))].slice(0, 4)
+      : [];
     return {
       queue,
       originalQueue: dedupeQueue(parsed.originalQueue || []).map(song => queue.find(item => queueItemKey(item) === queueItemKey(song))).filter(Boolean),
@@ -98,6 +102,8 @@ export function restoreQueueState(raw) {
       crossfadeSeconds: Math.min(12, nonnegative(parsed.crossfadeSeconds)), sleepTimer,
       eqPreset: typeof parsed.eqPreset === 'string' ? parsed.eqPreset : 'flat',
       eqGains: Array.isArray(parsed.eqGains) && parsed.eqGains.length === 5 ? parsed.eqGains.map(gain => Math.max(-12, Math.min(12, Number(gain) || 0))) : [0, 0, 0, 0, 0],
+      djModeEnabled: Boolean(parsed.djModeEnabled),
+      djHistory: { candidateKeys: uniqueStrings(parsed.djHistory?.candidateKeys, 6), timingBuckets },
     };
   } catch { return null; }
 }

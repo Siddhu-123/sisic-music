@@ -37,12 +37,16 @@ test('queue persistence restores a safe bounded state', () => {
     repeatMode: 'all',
     positionSeconds: 12.5,
     isPlaying: true,
+    djModeEnabled: true,
+    djHistory: { candidateKeys: ['a', 'b'], timingBuckets: [15, 20] },
   }));
   assert.deepEqual(restored.queue.map(song => song.songKey), ['a', 'b', 'c']);
   assert.equal(restored.queueIndex, 2);
   assert.equal(restored.repeatMode, 'all');
   assert.equal(restored.positionSeconds, 12.5);
   assert.equal(restored.isPlaying, true);
+  assert.equal(restored.djModeEnabled, true);
+  assert.deepEqual(restored.djHistory, { candidateKeys: ['a', 'b'], timingBuckets: [15, 20] });
 });
 
 

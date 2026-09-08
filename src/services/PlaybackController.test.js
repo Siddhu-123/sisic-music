@@ -167,3 +167,46 @@ test('autoplay denial on a preloaded deck retains both engines for retry and dis
   assert.equal(c.state.isPlaying, false); assert.match(c.state.error, /Press play/);
   incoming.playGate = null; await c.play(); assert.equal(c.state.isPlaying, true);
 });
+
+test('DJ preloads without editing the queue, waits for media time through buffering, and records no false completion', async t => {
+  let now = 1000;
+  const { c } = fixture(t, { now: () => now });
+  c.setQueueAndPlay(songs); await settle(); c.setDjModeEnabled(true);
+  const events = [];
+  c.subscribe(() => { if (c.state.playbackEvent) events.push(c.state.playbackEvent.eventType); });
+  c.audio.currentTime = 10;
+  assert.equal(c.planDjTransition({ sourceSongKey: 'a', candidate: songs[2], transitionAtSeconds: 20, crossfadeSeconds: 4 }), true);
+  await settle();
+  assert.deepEqual(c.state.queue.map(song => song.songKey), ['a', 'b', 'c', 'd']);
+  assert.equal(c.preloaded.songKey, 'c');
+  now += 60000; c.audio.emit('timeupdate'); await settle();
+  assert.equal(c.state.currentSongKey, 'a');
+  c.audio.currentTime = 20; c.audio.emit('timeupdate'); await settle();
+  assert.equal(c.state.currentSongKey, 'c');
+  assert.ok(c.retiring);
+  assert.ok(events.includes('dj-transition'));
+  assert.ok(!events.includes('playback-complete'));
+  assert.deepEqual(c.state.djHistory.candidateKeys, ['c']);
+});
+
+test('DJ plans cancel on seek, queue edits, disable, and reject a stale source', async t => {
+  const { c } = fixture(t); c.setQueueAndPlay(songs); await settle(); c.setDjModeEnabled(true);
+  const plan = () => c.planDjTransition({ sourceSongKey: 'a', candidate: songs[2], transitionAtSeconds: 30, crossfadeSeconds: 4 });
+  assert.equal(c.planDjTransition({ sourceSongKey: 'other', candidate: songs[2], transitionAtSeconds: 30 }), false);
+  assert.ok(plan()); c.seek(10); assert.equal(c.state.djPlan, null); await settle();
+  assert.ok(plan()); c.reorderQueue(2, 3); assert.equal(c.state.djPlan, null); await settle();
+  assert.ok(plan()); c.setDjModeEnabled(false); assert.equal(c.state.djPlan, null); await settle();
+  assert.deepEqual(c.state.djHistory.candidateKeys, []);
+  assert.equal(c.preloaded.songKey, 'b');
+});
+
+test('failed DJ preload leaves current audio playing and restores ordinary preloading', async t => {
+  const { c } = fixture(t, { resolveUrl: async song => { if (song.songKey === 'c') throw Error('unavailable'); return song.driveFileId; } });
+  c.setQueueAndPlay(songs); await settle(); c.setDjModeEnabled(true);
+  c.planDjTransition({ candidate: songs[2], transitionAtSeconds: 30, crossfadeSeconds: 4 }); await settle();
+  assert.equal(c.state.currentSongKey, 'a');
+  assert.equal(c.state.isPlaying, true);
+  assert.equal(c.state.djPlan, null);
+  assert.equal(c.preloaded.songKey, 'b');
+  assert.ok(c.state.djHistory.candidateKeys.includes('c'));
+});

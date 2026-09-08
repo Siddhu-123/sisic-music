@@ -2,6 +2,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { escapeDriveQuery, GoogleDriveService, isAudioFileMetadata, SCOPES, SOURCE_FEEDBACK_FILENAME } from './GoogleDriveService.js';
 
+test('failed playback sync rejects for outbox retry and duplicate events are idempotent', async () => {
+  const service = new GoogleDriveService();
+  service.mutateJsonIndex = async () => { throw new Error('offline'); };
+  await assert.rejects(service.appendPlaybackLog('folder', { id: 'event-1' }), /offline/);
+  let records;
+  service.mutateJsonIndex = async (_folder, _file, _key, _defaults, mutate) => { records = mutate([{ id: 'event-1' }]); };
+  await service.appendPlaybackLog('folder', { id: 'event-1', eventType: 'user-skip' });
+  assert.equal(records.length, 1);
+});
+
+test('song-index rebuild keeps newer DJ analysis instead of stale cached metadata', async () => {
+  const service = new GoogleDriveService();
+  service.listAudioFiles = async () => [{ id: 'audio', name: 'Artist - Track.mp3', mimeType: 'audio/mpeg',
+    appProperties: { sisicSongKey: 'artist::track', sisicBpm: '121', sisicDjMetadataUpdatedAt: '2026-09-09T00:00:00Z' } }];
+  service.readJsonIndex = async () => ({ songs: [{ songKey: 'artist::track', driveFileId: 'audio', bpm: 90,
+    djMetadataUpdatedAt: '2026-09-08T00:00:00Z', genre: 'Jazz' }] });
+  service.writeJsonIndex = async () => {};
+  const result = await service.syncSongIndex('folder');
+  assert.equal(result.songs[0].bpm, 121);
+  assert.equal(result.songs[0].genre, 'Jazz');
+});
+
 test('isAudioFileMetadata rejects Sisic JSON records', () => {
   assert.equal(isAudioFileMetadata({ name: 'sisic-job-song.json', mimeType: 'application/json' }), false);
   assert.equal(isAudioFileMetadata({ name: 'Artist - Track.mp3', mimeType: 'audio/mpeg' }), true);
