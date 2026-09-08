@@ -1,11 +1,12 @@
 export const REPEAT_MODES = ['off', 'one', 'all'];
 
 export function queueItemKey(song = {}) {
-  return song.songKey || song.id || null;
+  return song?.songKey || song?.id || song?.driveFileId || null;
 }
 
 export function dedupeQueue(songs = [], { allowDuplicate = false } = {}) {
-  if (allowDuplicate) return [...songs].filter(Boolean);
+  if (!Array.isArray(songs)) return [];
+  if (allowDuplicate) return songs.filter(song => song && typeof song === 'object' && queueItemKey(song));
   const seen = new Set();
   return songs.filter(song => {
     const key = queueItemKey(song);
@@ -41,7 +42,7 @@ export function removeAt(queue = [], index = -1) {
 }
 
 export function reorderQueue(queue = [], fromIndex = -1, toIndex = -1) {
-  if (fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length) {
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length) {
     return [...queue];
   }
   const next = [...queue];
@@ -65,32 +66,38 @@ export function previousQueueIndex({ length, currentIndex, repeatMode = 'off' })
   return repeatMode === 'all' ? length - 1 : 0;
 }
 
+function nonnegative(value, fallback = 0) {
+  return Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : fallback;
+}
+
 export function serializeQueueState(state = {}) {
-  return JSON.stringify({
-    version: 1,
-    queue: dedupeQueue(state.queue || [], { allowDuplicate: true }),
-    queueIndex: Math.max(0, Number(state.queueIndex) || 0),
-    repeatMode: REPEAT_MODES.includes(state.repeatMode) ? state.repeatMode : 'off',
-    shuffleMode: state.shuffleMode || 'off',
-    positionSeconds: Math.max(0, Number(state.positionSeconds) || 0),
-    isPlaying: Boolean(state.isPlaying),
-    savedAt: new Date().toISOString(),
-  });
+  return JSON.stringify({ ...restoreQueueState(state), version: 1, savedAt: new Date().toISOString() });
 }
 
 export function restoreQueueState(raw) {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!parsed || !Array.isArray(parsed.queue)) return null;
+    const selectedKey = queueItemKey(parsed.queue[Math.floor(nonnegative(parsed.queueIndex))]);
+    const queue = dedupeQueue(parsed.queue).map(song => {
+      const result = { ...song };
+      for (const field of ['localFile', 'blob', 'isDownloaded', 'isCached', 'hasBlob', 'cacheSizeBytes', 'cachedAt']) delete result[field];
+      return result;
+    });
+    const selectedIndex = queue.findIndex(song => queueItemKey(song) === selectedKey);
+    const sleepTimer = parsed.sleepTimer?.mode === 'track' ? { mode: 'track' }
+      : parsed.sleepTimer?.mode === 'time' && Number.isFinite(parsed.sleepTimer.deadline) ? { mode: 'time', deadline: parsed.sleepTimer.deadline } : null;
     return {
-      queue: parsed.queue.filter(Boolean),
-      queueIndex: Math.min(Math.max(0, Number(parsed.queueIndex) || 0), Math.max(0, parsed.queue.length - 1)),
+      queue,
+      originalQueue: dedupeQueue(parsed.originalQueue || []).map(song => queue.find(item => queueItemKey(item) === queueItemKey(song))).filter(Boolean),
+      queueIndex: selectedIndex >= 0 ? selectedIndex : Math.min(Math.floor(nonnegative(parsed.queueIndex)), Math.max(0, queue.length - 1)),
       repeatMode: REPEAT_MODES.includes(parsed.repeatMode) ? parsed.repeatMode : 'off',
-      shuffleMode: parsed.shuffleMode || 'off',
-      positionSeconds: Math.max(0, Number(parsed.positionSeconds) || 0),
-      isPlaying: Boolean(parsed.isPlaying),
+      shuffleMode: ['off', 'shuffle', 'smart'].includes(parsed.shuffleMode) ? parsed.shuffleMode : 'off',
+      positionSeconds: nonnegative(parsed.positionSeconds), isPlaying: Boolean(queue.length && parsed.isPlaying),
+      volume: Math.min(1, nonnegative(parsed.volume, 1)), muted: Boolean(parsed.muted),
+      crossfadeSeconds: Math.min(12, nonnegative(parsed.crossfadeSeconds)), sleepTimer,
+      eqPreset: typeof parsed.eqPreset === 'string' ? parsed.eqPreset : 'flat',
+      eqGains: Array.isArray(parsed.eqGains) && parsed.eqGains.length === 5 ? parsed.eqGains.map(gain => Math.max(-12, Math.min(12, Number(gain) || 0))) : [0, 0, 0, 0, 0],
     };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }

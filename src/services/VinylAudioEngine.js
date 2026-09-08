@@ -1,4 +1,4 @@
-import { audioGraph } from './audioGraph.js';
+import { AudioGraphManager } from './audioGraph.js';
 
 export const VINYL_PITCH_LIMITS = {
   narrow: 0.08,
@@ -39,6 +39,11 @@ function abortError() {
 
 export class VinylAudioEngine {
   constructor() {
+    this.graph = new AudioGraphManager();
+    this.pendingLoadCancel = null;
+    this.playRequest = 0;
+    this.playRequested = false;
+    this.pendingSeek = null;
     this.element = typeof Audio === 'function' ? new Audio() : null;
     this.sourceRequest = 0;
     this.duration = 0;
@@ -70,7 +75,7 @@ export class VinylAudioEngine {
     this.handleNativeError = this.handleNativeError.bind(this);
 
     if (this.element) {
-      this.element.preload = 'metadata';
+      this.element.preload = 'auto';
       this.element.crossOrigin = 'anonymous';
       this.element.preservesPitch = false;
       this.element.mozPreservesPitch = false;
@@ -82,6 +87,9 @@ export class VinylAudioEngine {
       this.element.addEventListener('timeupdate', this.handleNativeTimeUpdate);
       this.element.addEventListener('ended', this.handleNativeEnded);
       this.element.addEventListener('error', this.handleNativeError);
+      for (const type of ['waiting', 'playing', 'seeking', 'seeked', 'progress', 'stalled']) {
+        this.element.addEventListener(type, () => this._emit(type));
+      }
     }
   }
 
@@ -122,7 +130,7 @@ export class VinylAudioEngine {
   }
 
   get currentGains() {
-    return [...audioGraph.currentGains];
+    return [...this.graph.currentGains];
   }
 
   getAttribute(attribute) {
@@ -131,7 +139,8 @@ export class VinylAudioEngine {
 
   ensureContext() {
     if (!this.element) return null;
-    const context = audioGraph.attachAudioElement(this.element);
+    // Keep ordinary playback on the native media path, including in the background.
+    const context = this.graph.attachAudioElement(this.element);
     this._applyOutputVolume();
     if (context?.state === 'suspended') context.resume().catch(() => {});
     return context;
@@ -140,9 +149,10 @@ export class VinylAudioEngine {
   _applyOutputVolume() {
     if (!this.element) return;
     const volume = this.needleLifted ? 0 : this.volume;
-    if (audioGraph.isAttachedTo(this.element)) {
+    this.element.muted = volume === 0;
+    if (this.graph.isAttachedTo(this.element)) {
       this.element.volume = 1;
-      audioGraph.setVolume(volume);
+      this.graph.setVolume(volume);
     } else {
       this.element.volume = volume;
     }
@@ -161,6 +171,7 @@ export class VinylAudioEngine {
 
   handleLoadedMetadata() {
     this._syncDuration();
+    if (this.pendingSeek != null) { const position = this.pendingSeek; this.pendingSeek = null; this.seek(position); }
     this._emit('durationchange');
     this._emit('timeupdate');
   }
@@ -171,6 +182,7 @@ export class VinylAudioEngine {
   }
 
   handleNativePlay() {
+    if (!this.playRequested && !this.isScratching) { this.element?.pause(); return; }
     if (this.isStopping) this._cancelBrake();
     if (this.isPlaying) return;
     this.isPlaying = true;
@@ -179,6 +191,7 @@ export class VinylAudioEngine {
   }
 
   handleNativePause() {
+    if (!this.element?.paused) return;
     if (this.nativePauseSuppressed || this.isStopping || this.isScratching || !this.isPlaying) return;
     this.isPlaying = false;
     this.currentRate = 0;
@@ -194,6 +207,9 @@ export class VinylAudioEngine {
   }
 
   handleNativeEnded() {
+    this.playRequested = false;
+    this._cancelRateRamp();
+    this._cancelBrake();
     this._syncDuration();
     this.position = this.duration || this._nativeTime();
     this.isPlaying = false;
@@ -208,6 +224,10 @@ export class VinylAudioEngine {
   }
 
   handleNativeError() {
+    if (!this.element?.error) return;
+    this.playRequested = false;
+    this._cancelRateRamp();
+    this._cancelBrake();
     this.isPlaying = false;
     this.isScratching = false;
     this.wasPlayingBeforeScratch = false;
@@ -223,6 +243,12 @@ export class VinylAudioEngine {
   }
 
   _releaseCurrentSource() {
+    this.playRequest += 1;
+    this.playRequested = false;
+    this.pendingLoadCancel?.();
+    this.pendingSeek = null;
+    this.needleLifted = false;
+    this.graph.setFade(1);
     this._stopScratchTicker();
     this._stopTicker();
     this._cancelBrake();
@@ -252,14 +278,13 @@ export class VinylAudioEngine {
     const requestId = ++this.sourceRequest;
     this._releaseCurrentSource();
     this.element.src = nextUrl;
-    this.element.load();
-
     await new Promise((resolve, reject) => {
       let settled = false;
       const finish = (callback, value) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (this.pendingLoadCancel === cancel) this.pendingLoadCancel = null;
         this.element.removeEventListener('loadedmetadata', ready);
         this.element.removeEventListener('canplay', ready);
         this.element.removeEventListener('error', failed);
@@ -273,11 +298,14 @@ export class VinylAudioEngine {
         this._syncDuration();
         finish(resolve, this);
       };
+      const cancel = () => finish(reject, abortError());
+      this.pendingLoadCancel = cancel;
       const failed = () => finish(reject, new Error('The audio stream could not be loaded.'));
       const timeout = setTimeout(() => finish(reject, new Error('The audio stream timed out.')), 15000);
       this.element.addEventListener('loadedmetadata', ready);
       this.element.addEventListener('canplay', ready);
       this.element.addEventListener('error', failed);
+      this.element.load();
       if (this.element.readyState >= 1) ready();
     }).catch(error => {
       if (requestId === this.sourceRequest) this._releaseCurrentSource();
@@ -451,18 +479,24 @@ export class VinylAudioEngine {
     this._syncDuration();
     this.position = Math.max(0, Math.min(this.duration || Number.MAX_SAFE_INTEGER, Number(seconds) || 0));
     this.scratchPosition = this.position;
+    if (this.element.readyState < 1) { this.pendingSeek = this.position; return; }
+    this.pendingSeek = null;
     try {
       this.element.currentTime = this.position;
     } catch {
-      // Metadata may not be available yet.
+      this.pendingSeek = this.position;
     }
     this._emit('timeupdate');
   }
 
   async play() {
     if (!this.element || !this.src) throw new Error('Load a track before pressing play.');
-    const context = this.ensureContext();
+    const request = ++this.playRequest;
+    const source = this.sourceRequest;
+    this.playRequested = true;
+    const context = this.graph.audioContext;
     if (context?.state === 'suspended') await context.resume();
+    if (request !== this.playRequest || source !== this.sourceRequest) throw abortError();
     this._cancelRateRamp();
     this._syncDuration();
     if (this.duration && this.position >= this.duration - 0.01) this.seek(0);
@@ -477,11 +511,15 @@ export class VinylAudioEngine {
     try {
       await this.element.play();
     } catch (error) {
-      this.isPlaying = false;
-      this._stopTicker();
+      if (request === this.playRequest) {
+        this.playRequested = false;
+        this.isPlaying = false;
+        this._stopTicker();
+      }
       throw error;
     }
 
+    if (request !== this.playRequest || source !== this.sourceRequest) throw abortError();
     if (!this.isPlaying) {
       this.isPlaying = true;
       this._startTicker();
@@ -489,8 +527,10 @@ export class VinylAudioEngine {
     }
   }
 
-  pause({ immediate = false } = {}) {
-    if (!this.isPlaying) return;
+  pause({ immediate = true } = {}) {
+    this.playRequest += 1;
+    this.playRequested = false;
+    if (!this.isPlaying) { this.element?.pause(); return; }
     if (this.isStopping) {
       if (immediate) this._finishPause();
       return;
@@ -589,7 +629,10 @@ export class VinylAudioEngine {
         this.scratchPosition = this.position;
       }
       this._emit('timeupdate');
-      if ((this.currentRate < 0 && this.position <= 0) || (this.currentRate > 0 && this.duration && this.position >= this.duration)) {
+      if (this.currentRate < 0 && this.position <= 0) {
+        this.currentRate = 0;
+        this.element.pause();
+      } else if (this.currentRate > 0 && this.duration && this.position >= this.duration) {
         this.isPlaying = false;
         this.isScratching = false;
         this.wasPlayingBeforeScratch = false;
@@ -598,6 +641,7 @@ export class VinylAudioEngine {
         this.element.pause();
         this.nativePauseSuppressed = false;
         this._stopScratchTicker();
+        this._stopTicker();
         this._emit('ended');
       }
     }, 50);
@@ -627,19 +671,21 @@ export class VinylAudioEngine {
   }
 
   applyPreset(presetKey) {
-    audioGraph.applyPreset(presetKey);
+    if (presetKey !== 'flat') this.ensureContext();
+    this.graph.applyPreset(presetKey);
   }
 
   setBandGain(index, gain) {
-    audioGraph.setBandGain(index, gain);
+    this.ensureContext();
+    this.graph.setBandGain(index, gain);
   }
 
   getFrequencyData() {
-    return audioGraph.isAttachedTo(this.element) ? audioGraph.getFrequencyData() : new Uint8Array(32);
+    return this.graph.isAttachedTo(this.element) ? this.graph.getFrequencyData() : new Uint8Array(32);
   }
 
   getWaveformData() {
-    return audioGraph.isAttachedTo(this.element) ? audioGraph.getWaveformData() : new Uint8Array(32);
+    return this.graph.isAttachedTo(this.element) ? this.graph.getWaveformData() : new Uint8Array(32);
   }
 
   setNeedleLifted(lifted) {
@@ -647,12 +693,27 @@ export class VinylAudioEngine {
     this._applyOutputVolume();
   }
 
+  setFade(value, seconds = 0) {
+    return this.graph.setFade(value, seconds);
+  }
+
+  handleVisibilityChange(hidden) {
+    if (hidden) {
+      if (this.isStopping) this._finishPause();
+      if (this.isScratching) this.endScratch();
+      this._cancelRateRamp();
+      if (this.isPlaying) this._nativePlaybackRate(this.targetMotorRate);
+      this.setNeedleLifted(false);
+    } else if (this.isPlaying && this.graph.audioContext?.state === 'suspended') {
+      this.graph.audioContext.resume().catch(() => {});
+    }
+  }
+
   dispose() {
     this.sourceRequest += 1;
     this._releaseCurrentSource();
-    audioGraph.dispose();
+    this.graph.dispose();
     this.listeners.clear();
-    // Keep the lightweight native element reusable because React StrictMode
-    // may run an effect cleanup followed by setup without remounting state.
+    this.element = null;
   }
 }

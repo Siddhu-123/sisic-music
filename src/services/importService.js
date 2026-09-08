@@ -28,9 +28,9 @@ async function readAudioMetadata(file) {
   const fallback = parseAudioFilename(file.name);
   if (typeof Audio === 'undefined' || typeof URL === 'undefined') return { ...fallback, durationSeconds: null };
   const url = URL.createObjectURL(file);
+  const audio = new Audio();
   try {
     const metadata = await new Promise(resolve => {
-      const audio = new Audio();
       const timeout = window.setTimeout(() => resolve(null), 4000);
       audio.preload = 'metadata';
       audio.onloadedmetadata = () => {
@@ -45,6 +45,11 @@ async function readAudioMetadata(file) {
     });
     return { ...fallback, ...(metadata || {}) };
   } finally {
+    audio.onloadedmetadata = null;
+    audio.onerror = null;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
     URL.revokeObjectURL(url);
   }
 }

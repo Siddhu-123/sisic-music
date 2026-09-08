@@ -73,7 +73,12 @@ function createPointProgram(gl) {
   gl.attachShader(program, vertex);
   gl.attachShader(program, fragment);
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error('WebGL point program failed to link.');
+  gl.deleteShader(vertex);
+  gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    gl.deleteProgram(program);
+    throw new Error('WebGL point program failed to link.');
+  }
   return program;
 }
 
@@ -82,6 +87,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
   const wrapperRef = useRef(null);
   const rotationRef = useRef({ x: 0.36, y: 0.55 });
   const dragRef = useRef(null);
+  const redrawRef = useRef(() => {});
   const movedRef = useRef(false);
   const [hoveredSong, setHoveredSong] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
@@ -144,7 +150,13 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       gl.clearColor(0.025, 0.03, 0.065, 1);
       let frame;
-      const render = () => {
+      let previousTime;
+      const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+      const render = (time = performance.now()) => {
+        window.cancelAnimationFrame(frame);
+        if (document.hidden) { previousTime = undefined; return; }
+        if (!dragRef.current && !motion.matches && previousTime !== undefined) rotationRef.current.y += Math.min(50, time - previousTime) * 0.000084;
+        previousTime = time;
         const width = canvas.width;
         const height = canvas.height;
         gl.viewport(0, 0, width, height);
@@ -155,11 +167,17 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
         gl.uniform1f(uniforms.zoom, zoom);
         gl.uniform1f(uniforms.aspect, width / Math.max(1, height));
         gl.drawArrays(gl.POINTS, 0, points.length);
-        if (!dragRef.current) rotationRef.current.y += 0.0014;
-        frame = window.requestAnimationFrame(render);
+        if (!motion.matches) frame = window.requestAnimationFrame(render);
       };
+      const refresh = () => { previousTime = undefined; render(); };
+      redrawRef.current = refresh;
+      document.addEventListener('visibilitychange', refresh);
+      motion.addEventListener('change', refresh);
       render();
       return () => {
+        redrawRef.current = () => {};
+        document.removeEventListener('visibilitychange', refresh);
+        motion.removeEventListener('change', refresh);
         window.cancelAnimationFrame(frame);
         gl.deleteBuffer(positionBuffer);
         gl.deleteBuffer(colorBuffer);
@@ -168,8 +186,8 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       };
     } catch (error) {
       console.warn('3D constellation unavailable:', error);
-      window.setTimeout(() => setWebglReady(false), 0);
-      return undefined;
+      const timer = window.setTimeout(() => setWebglReady(false), 0);
+      return () => window.clearTimeout(timer);
     }
   }, [currentSong?.songKey, points, zoom]);
 
@@ -182,6 +200,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
       canvas.width = Math.max(320, Math.floor(rect.width * pixelRatio));
       canvas.height = Math.max(380, Math.floor((rect.height || 520) * pixelRatio));
+      redrawRef.current();
     };
     updateSize();
     window.addEventListener('resize', updateSize);
@@ -222,6 +241,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       rotationRef.current.y += dx * 0.008;
       rotationRef.current.x = Math.max(-1.2, Math.min(1.2, rotationRef.current.x + dy * 0.008));
       dragRef.current = { x: event.clientX, y: event.clientY };
+      redrawRef.current();
     } else {
       findHovered(event);
     }
@@ -265,7 +285,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
         {clusterSummary.map(([clusterId, count]) => <span key={clusterId}><i style={{ background: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length] }} />Cluster {clusterId + 1} · {count}</span>)}
         {filteredSongs.length < songs.length && <small>Showing the first {filteredSongs.length.toLocaleString()} songs for a smooth map.</small>}
       </div>
-      <div className="constellation-canvas-wrapper" ref={wrapperRef} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => { dragRef.current = null; setHoveredSong(null); }} onClick={handleClick}>
+      <div className="constellation-canvas-wrapper" ref={wrapperRef} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { dragRef.current = null; movedRef.current = true; }} onLostPointerCapture={() => { dragRef.current = null; }} onPointerLeave={() => { dragRef.current = null; setHoveredSong(null); }} onClick={handleClick}>
         <canvas ref={canvasRef} className="constellation-canvas" aria-label="3D music cluster map" />
         {!webglReady && <div className="constellation-fallback">3D rendering is unavailable in this browser. Your library is still available in Ready and Search.</div>}
         {hoveredSong && (

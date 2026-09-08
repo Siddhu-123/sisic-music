@@ -1,3 +1,4 @@
+import { ProgressSlider } from './ProgressSlider.jsx';
 import { useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Download, Shuffle, Repeat, ListMusic, Plus, Trash2, ChevronDown, Info, RefreshCw, Sliders, Sparkles } from 'lucide-react';
 import { Turntable } from './Turntable.jsx';
@@ -94,6 +95,7 @@ export function ExpandedPlayer({
         <div className="expanded-player__layout">
           <div className="expanded-player__art-container">
             <Turntable
+              key={currentSong.songKey || currentSong.id}
               currentSong={currentSong}
               artwork={<AsyncArtworkImage song={currentSong} alt={`${currentSong.track} cover`} className="turntable__art" fallbackSize={28} size={400} priority />}
               isPlaying={isPlaying}
@@ -143,19 +145,7 @@ export function ExpandedPlayer({
             <div className="expanded-player__controls-area">
             <div className="expanded-progress">
             <span className="time-label">{formatTime((displayedProgress / 100) * duration)}</span>
-            <input
-              type="range"
-              className="progress-bar"
-              min={0}
-              max={100}
-              step={0.1}
-              value={displayedProgress}
-              onChange={event => {
-                setProgressPreview(null);
-                seek(Number(event.target.value));
-              }}
-              aria-label="Playback position"
-            />
+            <ProgressSlider key={currentSong.songKey || currentSong.id} player={player} progress={displayedProgress} />
             <span className="time-label">{formatTime(duration)}</span>
           </div>
 
@@ -173,7 +163,7 @@ export function ExpandedPlayer({
             <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
               <SkipBack size={26} />
             </button>
-            <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play'}>
+            <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={player.isPlayRequested ? 'Pause' : 'Play'}>
               {isPlaying ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" />}
             </button>
             <button className="icon-btn" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">

@@ -44,3 +44,16 @@ test('queue persistence restores a safe bounded state', () => {
   assert.equal(restored.positionSeconds, 12.5);
   assert.equal(restored.isPlaying, true);
 });
+
+
+test('corrupt queue entries preserve the selected identity and discard transient audio in both orders', () => {
+  const restored = restoreQueueState({ queue: [null, { songKey: 'a', blob: 'large' }, { songKey: 'a' }, { songKey: 'b' }],
+    queueIndex: 3, originalQueue: [{ songKey: 'a', localFile: 'large' }, { songKey: 'missing' }],
+    positionSeconds: 'bad', crossfadeSeconds: 100, volume: 5, repeatMode: 'invalid' });
+  assert.equal(restored.queue[restored.queueIndex].songKey, 'b');
+  assert.deepEqual(restored.originalQueue, [{ songKey: 'a' }]);
+  assert.equal(restored.positionSeconds, 0); assert.equal(restored.volume, 1);
+  assert.equal(restored.crossfadeSeconds, 12); assert.equal(restored.repeatMode, 'off');
+  assert.equal(restoreQueueState('{oops'), null);
+  assert.deepEqual(reorderQueue(songs, 0.5, 2), songs);
+});

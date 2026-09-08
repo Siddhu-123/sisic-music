@@ -398,35 +398,57 @@ export async function enqueueEmbeddingJob(songInput) {
 export async function enqueueSyncOutbox(input = {}) {
   const entityKey = input.entityKey || input.songKey || '';
   if (!entityKey) return null;
-  const existing = await db.syncOutbox
-    .where('entityType').equals(input.entityType || 'song')
-    .filter(item => item.entityKey === entityKey && ['queued', 'processing'].includes(item.status))
-    .first();
-  if (existing) return existing;
-  const now = jobTimestamp();
-  const operation = {
-    schemaVersion: 1,
-    opId: crypto.randomUUID(),
-    entityType: input.entityType || 'song',
-    entityKey,
-    payload: input.payload || {},
-    status: 'queued',
-    attempts: 0,
-    error: input.error || '',
-    nextAttemptAt: input.nextAttemptAt || '',
-    createdAt: now,
-    updatedAt: now,
-  };
-  await db.syncOutbox.put(operation);
-  return operation;
+  return db.transaction('rw', db.syncOutbox, async () => {
+    const existing = await db.syncOutbox
+      .where('entityType').equals(input.entityType || 'song')
+      .filter(item => item.entityKey === entityKey && item.status === 'queued')
+      .first();
+    if (existing) {
+      const updated = { ...existing, payload: { ...existing.payload, ...input.payload, ...(input.entityType === 'song-metadata' ? { updates: { ...existing.payload?.updates, ...input.payload?.updates } } : {}) }, updatedAt: jobTimestamp() };
+      await db.syncOutbox.put(updated);
+      return updated;
+    }
+    const now = jobTimestamp();
+    const operation = {
+      schemaVersion: 1,
+      opId: crypto.randomUUID(),
+      entityType: input.entityType || 'song',
+      entityKey,
+      payload: input.payload || {},
+      status: 'queued',
+      attempts: 0,
+      error: input.error || '',
+      nextAttemptAt: input.nextAttemptAt || '',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await db.syncOutbox.put(operation);
+    return operation;
+  });
 }
 
-export async function updateSyncOutbox(opId, updates = {}) {
-  const existing = await db.syncOutbox.get(opId);
-  if (!existing) return null;
-  const next = { ...existing, ...updates, updatedAt: jobTimestamp() };
-  await db.syncOutbox.put(next);
-  return next;
+export async function claimSyncOutbox(opId, now = Date.now()) {
+  return db.transaction('rw', db.syncOutbox, async () => {
+    const operation = await db.syncOutbox.get(opId);
+    if (!operation || !['queued', 'processing'].includes(operation.status)) return null;
+    if (operation.status === 'processing' && Number(operation.leaseUntil) > now) return null;
+    const busy = await db.syncOutbox.where('entityType').equals(operation.entityType)
+      .filter(item => item.opId !== opId && item.entityKey === operation.entityKey && item.status === 'processing' && Number(item.leaseUntil) > now).first();
+    if (busy) return null;
+    const claimed = { ...operation, status: 'processing', claimId: crypto.randomUUID(), leaseUntil: now + 120000, updatedAt: jobTimestamp() };
+    await db.syncOutbox.put(claimed);
+    return claimed;
+  });
+}
+
+export async function updateSyncOutbox(opId, updates = {}, claimId = null) {
+  return db.transaction('rw', db.syncOutbox, async () => {
+    const existing = await db.syncOutbox.get(opId);
+    if (!existing || (claimId && existing.claimId !== claimId)) return null;
+    const next = { ...existing, ...updates, updatedAt: jobTimestamp() };
+    await db.syncOutbox.put(next);
+    return next;
+  });
 }
 
 export async function updateSongPipelineStatus(songKey, updates = {}) {
@@ -471,8 +493,6 @@ export async function removeSongFromPlaylist(songKeyOrSong, playlistKey) {
   const songKey = typeof songKeyOrSong === 'string' ? songKeyOrSong : getSongKey(songKeyOrSong);
   if (!songKey || !playlistKey) return false;
   await db.playlistSongs.delete([playlistKey, songKey]);
-  const remaining = await db.playlistSongs.where('playlistKey').equals(playlistKey).count();
-  if (remaining === 0) await db.playlists.delete(playlistKey);
   return true;
 }
 
@@ -494,11 +514,22 @@ export async function clearSongPlayable(songKeyOrSong) {
 
 export async function touchSongPlayed(songKey) {
   if (!songKey) return;
-  const song = await db.songs.where('songKey').equals(songKey).first();
-  if (!song) return;
-  await db.songs.update(song.id, {
-    playCount: (song.playCount || 0) + 1,
-    lastPlayedAt: Date.now(),
+  await db.songs.where('songKey').equals(songKey).modify(song => {
+    song.playCount = (song.playCount || 0) + 1;
+    song.lastPlayedAt = Date.now();
+  });
+}
+
+export async function createPlaylist(name) {
+  const cleanName = String(name || '').trim().slice(0, 120);
+  if (!cleanName) throw new Error('Enter a playlist name.');
+  const playlistKey = getPlaylistKey(cleanName);
+  return db.transaction('rw', db.playlists, async () => {
+    const existing = await db.playlists.get(playlistKey);
+    if (existing) return existing;
+    const playlist = { playlistKey, name: cleanName, source: 'sisic', updatedAt: new Date().toISOString() };
+    await db.playlists.put(playlist);
+    return playlist;
   });
 }
 
@@ -685,7 +716,6 @@ export async function getLibrarySnapshot() {
 
     const playlists = playlistsRaw
       .map(pl => ({ ...pl, count: countsByPlaylist.get(pl.playlistKey) || 0 }))
-      .filter(pl => pl.count > 0)
       .sort((a, b) => a.name.localeCompare(b.name));
 
     return {

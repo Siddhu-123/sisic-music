@@ -28,7 +28,11 @@ function loadGoogleIdentityServices() {
     script.src = 'https://accounts.google.com/gsi/client';
     script.dataset.googleIdentityServices = 'true';
     script.addEventListener('load', resolve, { once: true });
-    script.addEventListener('error', () => reject(new Error('Google sign-in could not load. Check your connection and try again.')), { once: true });
+    script.addEventListener('error', () => {
+      googleIdentityScriptPromise = null;
+      script.remove();
+      reject(new Error('Google sign-in could not load. Check your connection and try again.'));
+    }, { once: true });
     if (!existing) document.head.appendChild(script);
   });
   return googleIdentityScriptPromise;
@@ -234,8 +238,7 @@ export function useAuth() {
 
   useEffect(() => {
     if (isAuthenticated && !hasSyncedOnMount.current && !isSyncing) {
-      hasSyncedOnMount.current = true;
-      const cancel = scheduleIdle(() => syncLibrary(), 1800);
+      const cancel = scheduleIdle(() => { hasSyncedOnMount.current = true; syncLibrary(); }, 1800);
       return cancel;
     }
     return undefined;

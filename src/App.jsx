@@ -1,10 +1,12 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal, Plus } from 'lucide-react';
 import {
   addSongToPlaylist,
+  createPlaylist,
   clearSongPlayable,
   enqueueSyncOutbox,
+  claimSyncOutbox,
   getLibrarySnapshot,
   getPlaylistSnapshotForDrive,
   markSongPlayable,
@@ -309,34 +311,11 @@ function App() {
     };
   }, [isMobileMoreOpen]);
 
-  const playbackRequestRef = useRef(0);
+  const songClickRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
   const playbackSessionRef = useRef({ id: '', lastTimestamp: 0, sequence: 0 });
   const autoQueuedSongKeysRef = useRef(new Set());
-  const activeQueueSongRef = useRef(null);
-  const queueRef = useRef([]);
-  const resolvePlayableSongRef = useRef(null);
-  const loadAndPlayRef = useRef(null);
-  const playNextRef = useRef(null);
-  const setPlayerErrorRef = useRef(null);
-  const {
-    currentSongKey,
-    isPlaying,
-    loadAndPlay,
-    playNext,
-    playbackEvent,
-    queue,
-    queueIndex,
-    queueRevision,
-    resumeOnRestore,
-    resumePosition,
-    setPlayerError,
-  } = player;
-  const activeQueueSong = queue[queueIndex] || null;
-  const activeQueueSongKey = `${activeQueueSong?.songKey || activeQueueSong?.id || ''}:${activeQueueSong?.driveFileId || ''}`;
-  const queueIndexRef = useRef(queueIndex);
-  const resumeOnRestoreRef = useRef(resumeOnRestore);
-  const resumePositionRef = useRef(resumePosition);
+  const { currentSongKey, isPlaying, playbackEvent, configurePlayback } = player;
 
   useEffect(() => {
     if (![VIEWS.EXPLORE, VIEWS.DOWNLOADS].includes(view) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
@@ -375,13 +354,6 @@ function App() {
     };
   }, [catalogue.length, view]);
 
-  useEffect(() => {
-    queueRef.current = queue;
-    queueIndexRef.current = queueIndex;
-    activeQueueSongRef.current = activeQueueSong;
-    resumeOnRestoreRef.current = resumeOnRestore;
-    resumePositionRef.current = resumePosition;
-  }, [activeQueueSong, queue, queueIndex, resumeOnRestore, resumePosition]);
 
   const libraryData = useLiveQuery(getLibrarySnapshot, [], EMPTY_LIBRARY);
   const safeLibraryData = libraryData || EMPTY_LIBRARY;
@@ -458,8 +430,8 @@ function App() {
   useEffect(() => {
     if (!isAuthenticated) return undefined;
     const retryTimes = syncOutbox
-      .filter(item => item.status === 'queued' && item.nextAttemptAt)
-      .map(item => Date.parse(item.nextAttemptAt))
+      .filter(item => (item.status === 'queued' && item.nextAttemptAt) || item.status === 'processing')
+      .map(item => item.status === 'processing' ? Number(item.leaseUntil) || Date.now() : Date.parse(item.nextAttemptAt))
       .filter(Number.isFinite);
     if (!retryTimes.length) return undefined;
     const delay = Math.max(1000, Math.min(...retryTimes) - Date.now());
@@ -470,14 +442,16 @@ function App() {
   useEffect(() => {
     if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) return undefined;
     const pending = syncOutbox
-      .filter(item => item.status === 'queued' && isSyncRetryReady(item))
+      .filter(item => (item.status === 'queued' && isSyncRetryReady(item)) || (item.status === 'processing' && !(Number(item.leaseUntil) > Date.now())))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
       .slice(0, 3);
     if (!pending.length) return undefined;
     let cancelled = false;
     const flushSyncOutbox = async () => {
-      for (const operation of pending) {
+      for (const candidate of pending) {
         if (cancelled) return;
-        await updateSyncOutbox(operation.opId, { status: 'processing' });
+        const operation = await claimSyncOutbox(candidate.opId);
+        if (!operation) continue;
         try {
           if (operation.entityType === 'playback-event') {
             await driveService.appendPlaybackLog(DRIVE_FOLDER_ID, operation.payload);
@@ -498,7 +472,7 @@ function App() {
               return [...byKey.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
             });
           }
-          await updateSyncOutbox(operation.opId, { status: 'done', error: '' });
+          await updateSyncOutbox(operation.opId, { status: 'done', error: '', leaseUntil: 0 }, operation.claimId);
           if (['song', 'song-metadata'].includes(operation.entityType)) {
             await updateSongPipelineStatus(operation.entityKey, { syncStatus: 'done' });
           }
@@ -509,7 +483,8 @@ function App() {
             attempts,
             error: errorMessage(error),
             nextAttemptAt: new Date(Date.now() + syncRetryDelayMs(attempts)).toISOString(),
-          });
+            leaseUntil: 0,
+          }, operation.claimId);
           if (['song', 'song-metadata'].includes(operation.entityType)) {
             await updateSongPipelineStatus(operation.entityKey, { syncStatus: 'queued' });
           }
@@ -1192,55 +1167,8 @@ function App() {
   }, [addToast, ensureLocalSong, jobBySongKey, queueSongForDownload]);
 
   useEffect(() => {
-    resolvePlayableSongRef.current = resolvePlayableSong;
-    loadAndPlayRef.current = loadAndPlay;
-    playNextRef.current = playNext;
-    setPlayerErrorRef.current = setPlayerError;
-  }, [loadAndPlay, playNext, resolvePlayableSong, setPlayerError]);
-
-  useEffect(() => {
-    if (!isAuthenticated || !activeQueueSongKey) return undefined;
-    const song = activeQueueSongRef.current;
-    if (!song) return undefined;
-
-    const requestId = ++playbackRequestRef.current;
-    let cancelled = false;
-
-    const playSong = async () => {
-      try {
-        const resolved = await resolvePlayableSongRef.current(song, { queueIfMissing: true, showToast: false });
-        if (cancelled || requestId !== playbackRequestRef.current) return;
-        if (resolved?.downloadBlocked) {
-          setPlayerErrorRef.current(resolved.downloadPolicyMessage || `"${song.track}" exceeds the 8-minute download limit.`);
-          return;
-        }
-        if (resolved) {
-          await loadAndPlayRef.current(resolved, {
-            autoplay: resumeOnRestoreRef.current,
-            startAt: resumePositionRef.current,
-          });
-          return;
-        }
-        setPlayerErrorRef.current(`"${song.track}" is queued for Mac preparation.`);
-        if (queueRef.current.some((candidate, index) => index !== queueIndexRef.current && isPlayable(candidate))) {
-          window.setTimeout(() => {
-            if (!cancelled && requestId === playbackRequestRef.current) {
-              playNextRef.current({ avoidCurrent: true, stopOnBlocked: true });
-            }
-          }, 250);
-        }
-      } catch (error) {
-        if (cancelled || requestId !== playbackRequestRef.current) return;
-        console.error('Playback preparation failed:', error);
-        setPlayerErrorRef.current(errorMessage(error));
-      }
-    };
-
-    playSong();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeQueueSongKey, isAuthenticated, queueRevision]);
+    configurePlayback({ enabled: isAuthenticated, resolveSong: resolvePlayableSong });
+  }, [configurePlayback, isAuthenticated, resolvePlayableSong]);
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -1305,9 +1233,10 @@ function App() {
     addToast(`Exported ${exportData.songs.length} songs and ${exportData.playbackEvents.length} playback events`);
   }, [addToast, allSongs, drivePlaybackEvents, embeddingJobs, importJobs, playbackEvents, playlists, safeLibraryData.downloadJobs, syncOutbox]);
 
-  // Drive audio is streamed in small ranges; the browser never receives a full-track blob.
+  // Drive audio uses native streaming; no whole-track JavaScript audio buffer is created.
 
   const handlePlaySong = useCallback(async (song, songList) => {
+    const request = ++songClickRequestRef.current;
     setActionError('');
     const selectedKey = getSongKey(song);
     const sourceSongs = (songList || [song]).map(asSongRecord).map(item => mergeJob(allSongsByKey.get(item.songKey) || item, jobBySongKey));
@@ -1315,7 +1244,7 @@ function App() {
 
     try {
       const resolved = await resolvePlayableSong(sourceSongs[startIdx] || song, { queueIfMissing: true, showToast: true });
-      if (resolved?.downloadBlocked) return;
+      if (request !== songClickRequestRef.current || resolved?.downloadBlocked) return;
       if (resolved) {
         const updated = sourceSongs.map(item => item.songKey === selectedKey ? { ...item, ...resolved } : item);
         player.setQueueAndPlay(updated, startIdx);
@@ -1333,6 +1262,7 @@ function App() {
         player.setQueueAndPlay(playable, 0);
       }
     } catch (error) {
+      if (request !== songClickRequestRef.current) return;
       console.error('Play failed:', error);
       const message = errorMessage(error);
       setActionError(message);
@@ -1425,7 +1355,20 @@ function App() {
   }, [playlistQuery, visiblePlaylists]);
 
   const handlePlaylistPickerConfirm = useCallback(async () => {
-    if (!playlistPicker?.song) return;
+    if (!playlistPicker || playlistPicker.busy) return;
+    if (!playlistPicker.song) {
+      setPlaylistPicker(prev => ({ ...prev, busy: true }));
+      try {
+        const playlist = await createPlaylist(playlistPicker.newPlaylistName);
+        await persistPlaylistIndex();
+        setPlaylistPicker(null); setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY);
+        addToast(`Created "${playlist.name}"`);
+      } catch (error) {
+        addToast(errorMessage(error));
+        setPlaylistPicker(prev => prev ? { ...prev, busy: false } : prev);
+      }
+      return;
+    }
     const selectedNames = visiblePlaylists
       .filter(playlist => playlistPicker.selectedKeys.includes(playlist.playlistKey))
       .map(playlist => playlist.name);
@@ -1657,6 +1600,7 @@ function App() {
       onRestoreDuplicate={view === VIEWS.DUPLICATES ? handleRestoreDuplicate : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
       isCurrentSong={player.currentSongKey === song.songKey}
+      isPlaying={player.isPlaying}
       isDownloading={downloadingKeys.has(song.songKey)}
     />
   );
@@ -1716,9 +1660,9 @@ function App() {
           onChange={handleImportInput}
         />
 
-        {visiblePlaylists.length > 0 && (
           <div className="sidebar__playlists">
             <div className="sidebar__section-label">Playlists</div>
+            <button className="panel-action-btn" onClick={() => openPlaylistPicker(null)} aria-label="Create playlist"><Plus size={14} /> New playlist</button>
             <div className="sidebar__playlist-list">
               {visiblePlaylists.map(playlist => (
                 <button
@@ -1731,7 +1675,6 @@ function App() {
               ))}
             </div>
           </div>
-        )}
       </aside>
 
       <main className="main-view" onDragOver={event => event.preventDefault()} onDrop={handleDrop}>
@@ -1907,7 +1850,7 @@ function App() {
             </header>
 
             {(() => {
-              const filtered = searchQuery.length >= 2
+              const filtered = searchQuery.trim().length >= 1
                 ? librarySongs.filter(song => {
                     const q = searchQuery.toLowerCase();
                     return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
@@ -1958,7 +1901,7 @@ function App() {
               </div>
             </header>
             {(() => {
-              const filtered = searchQuery.length >= 2
+              const filtered = searchQuery.trim().length >= 1
                 ? duplicateSongs.filter(song => {
                     const q = searchQuery.toLowerCase();
                     return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
@@ -2046,17 +1989,17 @@ function App() {
 
       {playlistPicker && (
         <div className="modal-backdrop" role="presentation" onClick={() => !playlistPicker.busy && setPlaylistPicker(null)}>
-          <section ref={playlistDialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-label="Choose playlist" tabIndex={-1} onClick={event => event.stopPropagation()}>
+          <section ref={playlistDialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-label={playlistPicker.song ? 'Choose playlist' : 'Create playlist'} tabIndex={-1} onClick={event => event.stopPropagation()}>
             <div className="panel-header">
               <div>
                 <span className="playlist-picker__eyebrow">Organize your library</span>
-                <h2>Add to playlist</h2>
+                <h2>{playlistPicker.song ? 'Add to playlist' : 'Create playlist'}</h2>
               </div>
               <button data-dialog-autofocus className="icon-btn" onClick={() => setPlaylistPicker(null)} aria-label="Close playlist picker" disabled={playlistPicker.busy}>
                 <X size={18} />
               </button>
             </div>
-            <div className="playlist-picker__song">
+            {playlistPicker.song && <><div className="playlist-picker__song">
               <AsyncArtworkImage song={playlistPicker.song} className="playlist-picker__song-art" fallbackSize={18} size={100} sizes="52px" />
               <div>
                 <strong>{playlistPicker.song.track}</strong>
@@ -2100,7 +2043,10 @@ function App() {
               ))}
               {pickerPlaylists.length === 0 && <p className="playlist-picker__empty">No matching playlists. Create one below.</p>}
             </div>
+            </>}
             <input
+              maxLength={120}
+              aria-label="New playlist name"
               className="playlist-picker__new"
               type="text"
               placeholder="Create a new playlist"
@@ -2229,6 +2175,7 @@ function App() {
           </button>
           {isMobileMoreOpen && (
             <div id="mobile-more-menu" className="mobile-nav__more-menu" role="menu" aria-label="More navigation options">
+              <button type="button" role="menuitem" onClick={() => { openPlaylistPicker(null); setIsMobileMoreOpen(false); }}><Plus size={18} />Create playlist</button>
               <button type="button" role="menuitem" onClick={() => { setView(VIEWS.DUPLICATES); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); setIsMobileMoreOpen(false); }}>
                 <Copy size={18} />
                 Duplicates{duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}

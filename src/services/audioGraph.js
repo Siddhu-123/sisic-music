@@ -10,11 +10,12 @@ export const EQ_PRESETS = {
   rock: { name: 'Rock', gains: [5, 2, -1, 2, 5] },
 };
 
-class AudioGraphManager {
+export class AudioGraphManager {
   constructor() {
     this.audioContext = null;
     this.sourceNode = null;
     this.masterGainNode = null;
+    this.fadeGainNode = null;
     this.filterNodes = [];
     this.analyserNode = null;
     this.attachedElement = null;
@@ -74,14 +75,16 @@ class AudioGraphManager {
         return filter;
       });
 
-      // Chain: Source -> EQ Filter 0 -> 1 -> 2 -> 3 -> 4 -> Master Gain -> Analyser -> Destination
+      // Source -> EQ -> volume -> crossfade -> analyser -> output.
       let currentNode = this.sourceNode;
       for (const filter of this.filterNodes) {
         currentNode.connect(filter);
         currentNode = filter;
       }
       currentNode.connect(this.masterGainNode);
-      this.masterGainNode.connect(this.analyserNode);
+      this.fadeGainNode = ctx.createGain();
+      this.masterGainNode.connect(this.fadeGainNode);
+      this.fadeGainNode.connect(this.analyserNode);
       this.analyserNode.connect(ctx.destination);
       this.attachedElement = audioElement;
 
@@ -91,10 +94,12 @@ class AudioGraphManager {
       this.sourceNode?.disconnect?.();
       this.filterNodes.forEach(node => node?.disconnect?.());
       this.masterGainNode?.disconnect?.();
+      this.fadeGainNode?.disconnect?.();
       this.analyserNode?.disconnect?.();
       this.sourceNode = null;
       this.filterNodes = [];
       this.masterGainNode = null;
+      this.fadeGainNode = null;
       this.analyserNode = null;
       this.attachedElement = null;
       return null;
@@ -109,10 +114,12 @@ class AudioGraphManager {
     this.sourceNode?.disconnect?.();
     this.filterNodes.forEach(node => node?.disconnect?.());
     this.masterGainNode?.disconnect?.();
+    this.fadeGainNode?.disconnect?.();
     this.analyserNode?.disconnect?.();
     this.sourceNode = null;
     this.filterNodes = [];
     this.masterGainNode = null;
+    this.fadeGainNode = null;
     this.analyserNode = null;
     this.attachedElement = null;
   }
@@ -120,12 +127,25 @@ class AudioGraphManager {
   setVolume(volume) {
     const clamped = Math.max(0, Math.min(1, Number(volume) || 0));
     if (this.masterGainNode && this.audioContext) {
-      this.masterGainNode.gain.setValueAtTime(clamped, this.audioContext.currentTime);
+      const gain = this.masterGainNode.gain;
+      gain.cancelScheduledValues(this.audioContext.currentTime);
+      gain.setTargetAtTime(clamped, this.audioContext.currentTime, 0.015);
     }
   }
 
+  setFade(value, seconds = 0) {
+    if (!this.fadeGainNode || !this.audioContext) return false;
+    const gain = this.fadeGainNode.gain;
+    const now = this.audioContext.currentTime;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(gain.value, now);
+    if (seconds > 0) gain.linearRampToValueAtTime(value, now + seconds);
+    else gain.setValueAtTime(value, now);
+    return true;
+  }
+
   setBandGain(bandIndex, gainDb) {
-    if (bandIndex < 0 || bandIndex >= this.filterNodes.length) return;
+    if (!Number.isInteger(bandIndex) || bandIndex < 0 || bandIndex >= EQ_FREQUENCIES.length) return;
     const clampedGain = Math.max(-12, Math.min(12, Number(gainDb) || 0));
     this.currentGains[bandIndex] = clampedGain;
     this.currentPreset = 'custom';

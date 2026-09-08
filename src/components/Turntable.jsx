@@ -171,7 +171,7 @@ export function Turntable({
           || state.isBraking
           || (state.dragMode === 'inertia' && motorInertiaRef.current)
           || Math.abs(motorVelocityRef.current) > 0.1);
-      if (needsFrame) motorFrameRef.current = window.requestAnimationFrame(tick);
+      if (needsFrame && (!reducedMotionRef.current || motorInertiaRef.current)) motorFrameRef.current = window.requestAnimationFrame(tick);
     };
 
     motorFrameRef.current = window.requestAnimationFrame(tick);
@@ -200,11 +200,15 @@ export function Turntable({
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const updatePreference = () => { reducedMotionRef.current = mediaQuery.matches; };
+    const updatePreference = () => {
+      reducedMotionRef.current = mediaQuery.matches;
+      if (mediaQuery.matches) cancelMotorFrame();
+      else startMotorFrame();
+    };
     updatePreference();
     mediaQuery.addEventListener?.('change', updatePreference);
     return () => mediaQuery.removeEventListener?.('change', updatePreference);
-  }, []);
+  }, [cancelMotorFrame, startMotorFrame]);
 
   useEffect(() => {
     motorStateRef.current = {
@@ -224,6 +228,7 @@ export function Turntable({
       return;
     }
 
+    if (!isPlaying && !isBraking && !motorInertiaRef.current && dragMode !== 'record') motorVelocityRef.current = 0;
     const needsFrame = hasCurrentSong
       && dragMode !== 'record'
       && (isPlaying || isBraking || (dragMode === 'inertia' && motorInertiaRef.current) || Math.abs(motorVelocityRef.current) > 0.1);
@@ -235,7 +240,34 @@ export function Turntable({
     if (activeSongId) writeRecordRotation(0);
   }, [activeSongId, writeRecordRotation]);
 
-  useEffect(() => () => cancelMotorFrame(), [cancelMotorFrame]);
+  useEffect(() => {
+    const resetInteraction = () => {
+      interactionRef.current = null;
+      motorInertiaRef.current = null;
+      window.clearTimeout(longPressRef.current);
+      window.clearTimeout(releasedTonearmResetRef.current);
+      onScratchEnd?.();
+      onNeedleLift?.(false);
+      onProgressPreview?.(null);
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        resetInteraction();
+        cancelMotorFrame();
+        setDragMode(null);
+        setNeedleLifted(false);
+        setPreviewProgress(null);
+        setTonearmDragAngle(null);
+        setRecordOffset({ x: 0, y: 0 });
+      } else startMotorFrame();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      resetInteraction();
+      cancelMotorFrame();
+    };
+  }, [activeSongId, cancelMotorFrame, onNeedleLift, onProgressPreview, onScratchEnd, startMotorFrame]);
 
   const updatePreviewProgress = nextProgress => {
     const boundedProgress = nextProgress == null ? null : clamp(nextProgress, 0, 100);
@@ -345,7 +377,7 @@ export function Turntable({
       return;
     }
 
-    const distance = Math.hypot(event.clientX - (interaction.centerX), event.clientY - (interaction.centerY));
+    const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
     if (!interaction.moved && distance < 8) return;
     if (!interaction.moved) {
       interaction.moved = true;
@@ -471,7 +503,15 @@ export function Turntable({
     setDragMode(null);
     setLifted(false);
     onSeek?.(target);
-    if (interaction.wasPlaying && target < 99.8) window.requestAnimationFrame(() => onTogglePlay?.());
+
+  };
+
+  const cancelPointer = event => {
+    if (interactionRef.current?.pointerId !== event.pointerId) return;
+    interactionRef.current = null;
+    clearLongPress(); cancelInertia(); clearRecordDragPreview();
+    updatePreviewProgress(null); setTonearmDragAngle(null); setDragMode(null); setLifted(false);
+    onScratchEnd?.();
   };
 
   const handleDrop = event => {
@@ -550,7 +590,7 @@ export function Turntable({
             onPointerDown={beginRecordPointer}
             onPointerMove={moveRecordPointer}
             onPointerUp={finishRecordPointer}
-            onPointerCancel={finishRecordPointer}
+            onPointerCancel={cancelPointer} onLostPointerCapture={cancelPointer}
             onKeyDown={handleVinylKeyDown}
           >
             <div className="turntable__vinyl-surface" aria-hidden="true">
@@ -573,7 +613,7 @@ export function Turntable({
           onPointerDown={beginTonearmPointer}
           onPointerMove={moveTonearmPointer}
           onPointerUp={finishTonearmPointer}
-          onPointerCancel={finishTonearmPointer}
+          onPointerCancel={cancelPointer} onLostPointerCapture={cancelPointer}
           onKeyDown={handleTonearmKeyDown}
         >
           <span className="turntable__gimbal" />

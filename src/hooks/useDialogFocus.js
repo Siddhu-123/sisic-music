@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 
+const activeDialogs = [];
+
 const FOCUSABLE_SELECTOR = [
   'button:not([disabled])',
   'a[href]',
@@ -23,10 +25,12 @@ export function useDialogFocus(active, onClose, { canClose = true } = {}) {
     if (!active) return undefined;
     const previousFocus = document.activeElement;
     const dialog = dialogRef.current;
-    const focusable = () => [...(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || [])];
+    activeDialogs.push(dialog);
+    const focusable = () => [...(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || [])].filter(item => item.getClientRects().length > 0);
     (dialog?.querySelector('[data-dialog-autofocus]') || focusable()[0] || dialog)?.focus?.();
 
     const handleKeyDown = event => {
+      if (event.defaultPrevented || activeDialogs.at(-1) !== dialog) return;
       if (event.key === 'Escape' && canCloseRef.current) {
         event.preventDefault();
         onCloseRef.current?.();
@@ -53,7 +57,10 @@ export function useDialogFocus(active, onClose, { canClose = true } = {}) {
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
-      previousFocus?.focus?.();
+      const wasTop = activeDialogs.at(-1) === dialog;
+      const index = activeDialogs.lastIndexOf(dialog);
+      if (index >= 0) activeDialogs.splice(index, 1);
+      if (wasTop && previousFocus?.isConnected) previousFocus.focus?.();
     };
   }, [active]);
 

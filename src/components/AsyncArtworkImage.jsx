@@ -7,7 +7,9 @@ function resizeArtworkUrl(url = '', size = 300) {
 }
 
 export function AsyncArtworkImage({ song, className = '', fallbackSize = 24, alt = '', size = 300, sizes, priority = false }) {
-  const [fetchedArtUrl, setFetchedArtUrl] = useState('');
+  const [fetchedArt, setFetchedArt] = useState(null);
+  const [failedUrl, setFailedUrl] = useState('');
+  const songKey = `${song?.songKey || song?.id || ''}:${song?.coverArtUrl || ''}`;
 
   useEffect(() => {
     let active = true;
@@ -15,19 +17,20 @@ export function AsyncArtworkImage({ song, className = '', fallbackSize = 24, alt
     import('../services/artworkService.js')
       .then(({ getSongArtwork }) => getSongArtwork(song))
       .then(res => {
-        if (active && res?.coverArtUrl) setFetchedArtUrl(res.coverArtUrl);
+        if (active && res?.coverArtUrl) setFetchedArt({ key: songKey, url: res.coverArtUrl });
       })
       .catch(() => {});
     return () => { active = false; };
-  }, [song]);
+  }, [song, songKey]);
 
-  const artUrl = resizeArtworkUrl(fetchedArtUrl || song?.coverArtUrl, size);
+  const artUrl = resizeArtworkUrl((fetchedArt?.key === songKey ? fetchedArt.url : '') || song?.coverArtUrl, size);
   const hue = song?.track ? song.track.charCodeAt(0) % 360 : 200;
 
-  if (artUrl) {
+  if (artUrl && failedUrl !== artUrl) {
     return (
       <img
         src={artUrl}
+        onError={() => setFailedUrl(artUrl)}
         alt={alt || `${song?.track || 'Song'} cover`}
         className={className}
         width={size}
