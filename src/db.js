@@ -365,7 +365,7 @@ export async function getStorageEstimate() {
 
 export async function upsertSongToDb(input, playlistName = '') {
   const incoming = normalizeSongInput(input);
-  return await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, async () => {
+  const result = await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, async () => {
     const previous = await db.songs.where('songKey').equals(incoming.songKey).first();
     const merged = bestSongMerge(previous, incoming);
     if (previous) {
@@ -378,6 +378,10 @@ export async function upsertSongToDb(input, playlistName = '') {
     }
     return await db.songs.where('songKey').equals(incoming.songKey).first();
   });
+  if (input.vector && Array.isArray(input.vector) && db.songEmbeddings) {
+    await saveSongEmbedding(incoming.songKey, input);
+  }
+  return result;
 }
 
 function jobTimestamp() {
@@ -462,7 +466,7 @@ export async function enqueueSyncOutbox(input = {}) {
       entityType: input.entityType || 'song',
       entityKey,
       payload: input.payload || {},
-      status: 'queued',
+      status: input.status || 'queued',
       attempts: 0,
       error: input.error || '',
       nextAttemptAt: input.nextAttemptAt || '',
@@ -571,12 +575,64 @@ export async function createPlaylist(name) {
   const cleanName = String(name || '').trim().slice(0, 120);
   if (!cleanName) throw new Error('Enter a playlist name.');
   const playlistKey = getPlaylistKey(cleanName);
-  return db.transaction('rw', db.playlists, async () => {
+  return db.transaction('rw', db.playlists, db.syncOutbox, async () => {
+    const tombstones = await db.syncOutbox
+      .where('entityType')
+      .equals('playlist-delete')
+      .filter(op => op.entityKey === playlistKey)
+      .toArray();
+    for (const op of tombstones) {
+      await db.syncOutbox.delete(op.opId);
+    }
     const existing = await db.playlists.get(playlistKey);
     if (existing) return existing;
     const playlist = { playlistKey, name: cleanName, source: 'sisic', updatedAt: new Date().toISOString() };
     await db.playlists.put(playlist);
     return playlist;
+  });
+}
+
+export async function deletePlaylist(playlistKey) {
+  if (!playlistKey) return null;
+  return await db.transaction('rw', db.playlists, db.playlistSongs, async () => {
+    const existing = await db.playlists.get(playlistKey);
+    if (!existing) return null;
+    const songs = await db.playlistSongs.where('playlistKey').equals(playlistKey).toArray();
+    await db.playlistSongs.where('playlistKey').equals(playlistKey).delete();
+    await db.playlists.delete(playlistKey);
+    return {
+      playlist: existing,
+      songKeys: songs.map(s => s.songKey),
+      deletedCount: songs.length,
+    };
+  });
+}
+
+export async function restorePlaylist(playlist, songKeys = []) {
+  if (!playlist?.playlistKey) return false;
+  return await db.transaction('rw', db.playlists, db.playlistSongs, db.syncOutbox, async () => {
+    const tombstones = await db.syncOutbox
+      .where('entityType')
+      .equals('playlist-delete')
+      .filter(op => op.entityKey === playlist.playlistKey)
+      .toArray();
+    for (const op of tombstones) {
+      await db.syncOutbox.delete(op.opId);
+    }
+    await db.playlists.put({
+      ...playlist,
+      updatedAt: new Date().toISOString(),
+    });
+    for (const songKey of songKeys) {
+      if (!songKey) continue;
+      await db.playlistSongs.put({
+        playlistKey: playlist.playlistKey,
+        songKey,
+        playlistName: playlist.name,
+        addedAt: Date.now(),
+      });
+    }
+    return true;
   });
 }
 
@@ -606,7 +662,7 @@ export async function cacheDjTransitionScores(scores = []) {
 }
 
 export async function syncLibraryToDb(songs) {
-  return await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, db.metadata, async () => {
+  const syncResult = await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, db.metadata, async () => {
     let added = 0;
     let updated = 0;
     let playlistLinks = 0;
@@ -631,15 +687,32 @@ export async function syncLibraryToDb(songs) {
     await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
     return { added, updated, playlistLinks, totalSongs: await db.songs.count() };
   });
+
+  if (db.songEmbeddings) {
+    for (const raw of songs) {
+      if (raw.vector && Array.isArray(raw.vector)) {
+        await saveSongEmbedding(raw.songKey || normalizeSongInput(raw).songKey, raw);
+      }
+    }
+  }
+
+  return syncResult;
 }
 
 export async function syncPlaylistIndexToDb(playlists = []) {
   if (!Array.isArray(playlists) || playlists.length === 0) return;
+  const pendingDeletes = await db.syncOutbox
+    .where('entityType')
+    .equals('playlist-delete')
+    .toArray()
+    .catch(() => []);
+  const deletedKeys = new Set(pendingDeletes.map(op => op.entityKey));
+
   await db.transaction('rw', db.playlists, db.playlistSongs, async () => {
     for (const playlist of playlists) {
       const name = String(playlist.name || '').trim();
       const playlistKey = playlist.playlistKey || getPlaylistKey(name);
-      if (!playlistKey || !name || !Array.isArray(playlist.songKeys)) continue;
+      if (!playlistKey || !name || !Array.isArray(playlist.songKeys) || deletedKeys.has(playlistKey)) continue;
       await db.playlists.put({
         playlistKey,
         name,
@@ -661,6 +734,15 @@ export async function syncPlaylistIndexToDb(playlists = []) {
 
 export async function getPlaylistSnapshotForDrive({ excludePlaylistKeys = [] } = {}) {
   const excluded = new Set(excludePlaylistKeys);
+  const pendingDeletes = await db.syncOutbox
+    .where('entityType')
+    .equals('playlist-delete')
+    .toArray()
+    .catch(() => []);
+  for (const op of pendingDeletes) {
+    if (op.entityKey) excluded.add(op.entityKey);
+  }
+
   const [playlistsRaw, links] = await Promise.all([
     db.playlists.toArray(),
     db.playlistSongs.toArray(),
@@ -771,9 +853,13 @@ export async function getLibrarySnapshot() {
         playlists: playlistNames,
         playlistName: playlistNames[0] || '',
         downloadJob: jobsBySong.get(song.songKey) || null,
-        ...(embedding?.vector?.length === 64 ? {
+        ...(embedding?.vector?.length ? {
           vector: embedding.vector,
           embeddingProvider: embedding.provider || '',
+          embeddingModel: embedding.model || (embedding.vectorType === 'learned-audio' ? 'unknown-audio-model' : 'metadata-ngram-v1'),
+          embeddingModelVersion: embedding.modelVersion || '1.0.0',
+          embeddingDimensions: embedding.dimensions || embedding.vector.length,
+          vectorType: embedding.vectorType || 'metadata',
           embeddingUpdatedAt: embedding.updatedAt || '',
         } : {}),
       };
@@ -806,12 +892,20 @@ export async function resetLocalDatabase() {
 
 export async function saveSongEmbedding(songKey, embeddingData = {}) {
   if (!songKey || !db?.songEmbeddings) return;
+  const vector = embeddingData.vector || [];
+  const dimensions = Number(embeddingData.dimensions || embeddingData.embeddingDimensions || vector.length);
+  const rawModel = embeddingData.model || embeddingData.embeddingModel;
+  const isLearned = (embeddingData.vectorType === 'learned-audio' || embeddingData.embeddingType === 'learned-audio') && Boolean(rawModel);
+  const vectorType = isLearned ? 'learned-audio' : (embeddingData.vectorType || embeddingData.embeddingType || 'metadata');
   await db.songEmbeddings.put({
     songKey,
-    vector: embeddingData.vector || [],
-    dimensions: embeddingData.vector?.length || 0,
+    vector,
+    dimensions,
+    vectorType,
+    model: rawModel || (vectorType === 'learned-audio' ? 'unknown-audio-model' : 'metadata-ngram-v1'),
+    modelVersion: embeddingData.modelVersion || embeddingData.embeddingModelVersion || '1.0.0',
     tags: embeddingData.tags || [],
-    provider: embeddingData.provider || 'sisic-client',
+    provider: embeddingData.provider || embeddingData.embeddingProvider || (isLearned ? 'local-mac-worker' : 'sisic-client'),
     updatedAt: new Date().toISOString(),
   });
 }

@@ -1,9 +1,10 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal, Plus } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal, Plus, Trash2 } from 'lucide-react';
 import {
   addSongToPlaylist,
   createPlaylist,
+  deletePlaylist,
   clearSongPlayable,
   enqueueSyncOutbox,
   claimSyncOutbox,
@@ -20,18 +21,22 @@ import {
   updateSongMetadataInDb,
   updateSyncOutbox,
   upsertSongToDb,
+  db,
 } from './db.js';
 import { driveService } from './services/GoogleDriveService.js';
 import { useAudioPlayer } from './hooks/useAudioPlayer.js';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
 import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, MacWorkerTasksPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
+import { VirtualSongGrid } from './components/VirtualSongGrid.jsx';
 import { ExploreView } from './components/ExploreView.jsx';
+import { DeletePlaylistModal } from './components/DeletePlaylistModal.jsx';
+import { ThemeToggle } from './components/ThemeToggle.jsx';
 import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
-import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
+import { buildUpNextRecommendations, enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import {
   formatDurationSeconds,
@@ -49,9 +54,17 @@ const TasteProfileModal = lazy(() => import('./components/TasteProfileModal.jsx'
 
 const VIEWS = { HOME: 'home', EXPLORE: 'explore', LIBRARY: 'library', DUPLICATES: 'duplicates', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
-const PAGE_SIZE = 50;
 const AUTO_QUEUE_LIMIT = 10;
 const LISTENING_HISTORY_KEY = 'listening history';
+
+function isDeletablePlaylist(playlist) {
+  if (!playlist || !playlist.playlistKey) return false;
+  const key = playlist.playlistKey;
+  const norm = normalizeText(playlist.name || '');
+  if (key === LISTENING_HISTORY_KEY) return false;
+  if (key === 'liked songs' || norm === 'liked songs') return false;
+  return true;
+}
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown browser storage error.');
@@ -263,13 +276,63 @@ function App() {
   const player = useAudioPlayer();
   const { toasts, addToast } = useToast();
 
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem('sisic_theme');
+      if (saved === 'dark' || saved === 'light') return saved;
+      if (typeof document !== 'undefined') {
+        const docTheme = document.documentElement.getAttribute('data-theme');
+        if (docTheme === 'dark' || docTheme === 'light') return docTheme;
+      }
+      if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        return 'dark';
+      }
+    } catch (e) {
+      console.warn('Unable to read initial theme:', e);
+    }
+    return 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#12141a' : '#e7e8ec');
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(prev => {
+      const next = prev === 'dark' ? 'light' : 'dark';
+      try {
+        localStorage.setItem('sisic_theme', next);
+      } catch (e) {
+        console.warn('Unable to persist theme:', e);
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('sisic_theme')) return undefined;
+      const media = window.matchMedia('(prefers-color-scheme: dark)');
+      const handleChange = e => {
+        const next = e.matches ? 'dark' : 'light';
+        setTheme(next);
+      };
+      media.addEventListener('change', handleChange);
+      return () => media.removeEventListener('change', handleChange);
+    } catch (e) {
+      console.warn('Theme preference listener unavailable:', e);
+      return undefined;
+    }
+  }, []);
+
   const [view, setView] = useState(VIEWS.HOME);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPlaylistKey, setSelectedPlaylistKey] = useState(null);
   const [downloadingKeys, setDownloadingKeys] = useState(new Set());
   const [actionError, setActionError] = useState('');
   const [showQueue, setShowQueue] = useState(false);
-  const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
   const [catalogue, setCatalogue] = useState([]);
   const [catalogueLoading, setCatalogueLoading] = useState(false);
   const [driveIndexSongs, setDriveIndexSongs] = useState([]);
@@ -280,6 +343,8 @@ function App() {
   const [showStoragePanel, setShowStoragePanel] = useState(false);
   const [playlistPicker, setPlaylistPicker] = useState(null);
   const [playlistQuery, setPlaylistQuery] = useState('');
+  const [playlistToDelete, setPlaylistToDelete] = useState(null);
+  const [isDeletingPlaylist, setIsDeletingPlaylist] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [songInfo, setSongInfo] = useState(null);
   const [reviewSong, setReviewSong] = useState(null);
@@ -462,6 +527,11 @@ function App() {
               operation.payload.song || { songKey: operation.entityKey },
               operation.payload.updates || {},
             );
+          } else if (operation.entityType === 'playlist-delete') {
+            const playlistsForDrive = await getPlaylistSnapshotForDrive({
+              excludePlaylistKeys: [LISTENING_HISTORY_KEY, operation.entityKey],
+            });
+            await driveService.writePlaylistIndex(DRIVE_FOLDER_ID, playlistsForDrive);
           } else {
             await driveService.mutateJsonIndex(DRIVE_FOLDER_ID, 'sisic-imports.json', 'imports', [], imports => {
               const byKey = new Map(imports.filter(item => item.entityKey).map(item => [item.entityKey, item]));
@@ -1167,9 +1237,29 @@ function App() {
     return null;
   }, [addToast, ensureLocalSong, jobBySongKey, queueSongForDownload]);
 
+  const handleGetRecommendations = useCallback(async ({ currentSong, manualQueue = [], signal }) => {
+    return await buildUpNextRecommendations({
+      currentSong,
+      librarySongs: exploreLibrarySongs,
+      playbackEvents: librarySummary.playbackEvents,
+      likedSongKeys,
+      recentlyPlayedKeys: Array.from(countedPlaybackRef.current || []),
+      manualQueue,
+      limit: 6,
+      signal,
+      getEmbedding: async (key) => {
+        try { return await db.songEmbeddings.get(key); } catch { return null; }
+      },
+    });
+  }, [exploreLibrarySongs, librarySummary.playbackEvents, likedSongKeys]);
+
   useEffect(() => {
-    configurePlayback({ enabled: isAuthenticated, resolveSong: resolvePlayableSong });
-  }, [configurePlayback, isAuthenticated, resolvePlayableSong]);
+    configurePlayback({
+      enabled: isAuthenticated,
+      resolveSong: resolvePlayableSong,
+      getRecommendations: handleGetRecommendations,
+    });
+  }, [configurePlayback, handleGetRecommendations, isAuthenticated, resolvePlayableSong]);
 
   useAdaptiveDjMode(player, exploreLibrarySongs, librarySummary.playbackEvents, likedSongKeys);
 
@@ -1238,11 +1328,14 @@ function App() {
 
   // Drive audio uses native streaming; no whole-track JavaScript audio buffer is created.
 
-  const handlePlaySong = useCallback(async (song, songList) => {
+  const handlePlaySong = useCallback(async (song, songList, options = {}) => {
     const request = ++songClickRequestRef.current;
     setActionError('');
     const selectedKey = getSongKey(song);
-    const sourceSongs = (songList || [song]).map(asSongRecord).map(item => mergeJob(allSongsByKey.get(item.songKey) || item, jobBySongKey));
+    const isSearch = Boolean(options.isSearch || (searchQuery.trim().length >= 1 && (!selectedPlaylistKey || view === VIEWS.LIBRARY || view === VIEWS.DUPLICATES)));
+    const sourceSongs = (isSearch ? [song] : (songList || [song]))
+      .map(asSongRecord)
+      .map(item => mergeJob(allSongsByKey.get(item.songKey) || item, jobBySongKey));
     const startIdx = Math.max(0, sourceSongs.findIndex(item => item.songKey === selectedKey));
 
     try {
@@ -1250,7 +1343,7 @@ function App() {
       if (request !== songClickRequestRef.current || resolved?.downloadBlocked) return;
       if (resolved) {
         const updated = sourceSongs.map(item => item.songKey === selectedKey ? { ...item, ...resolved } : item);
-        player.setQueueAndPlay(updated, startIdx);
+        player.setQueueAndPlay(updated, startIdx, { isSearch });
         return;
       }
 
@@ -1262,7 +1355,7 @@ function App() {
 
       const playable = sourceSongs.filter(isPlayable);
       if (playable.length > 0) {
-        player.setQueueAndPlay(playable, 0);
+        player.setQueueAndPlay(playable, 0, { isSearch });
       }
     } catch (error) {
       if (request !== songClickRequestRef.current) return;
@@ -1271,7 +1364,7 @@ function App() {
       setActionError(message);
       addToast(message);
     }
-  }, [addToast, allSongsByKey, jobBySongKey, player, resolvePlayableSong]);
+  }, [addToast, allSongsByKey, jobBySongKey, player, resolvePlayableSong, searchQuery, selectedPlaylistKey, view]);
 
   const handlePrepare = useCallback(async (song) => {
     const selectedKey = getSongKey(song);
@@ -1432,6 +1525,71 @@ function App() {
     }
   }, [addToast, ensureLocalSong, likedPlaylist, persistPlaylistIndex]);
 
+  const handleDeletePlaylist = useCallback(async (playlist) => {
+    if (!playlist || !isDeletablePlaylist(playlist)) {
+      addToast('This playlist cannot be deleted.');
+      return;
+    }
+    if (isDeletingPlaylist) return;
+    setIsDeletingPlaylist(true);
+    try {
+      const deleted = await deletePlaylist(playlist.playlistKey);
+      if (!deleted) {
+        addToast(`Playlist "${playlist.name}" not found.`);
+        setPlaylistToDelete(null);
+        return;
+      }
+
+      let queuedForDrive = false;
+      if (DRIVE_FOLDER_ID && driveService.isAuthenticated) {
+        try {
+          const playlistsForDrive = await getPlaylistSnapshotForDrive({
+            excludePlaylistKeys: [LISTENING_HISTORY_KEY, playlist.playlistKey],
+          });
+          await driveService.writePlaylistIndex(DRIVE_FOLDER_ID, playlistsForDrive);
+          await enqueueSyncOutbox({
+            entityType: 'playlist-delete',
+            entityKey: playlist.playlistKey,
+            payload: { playlistKey: playlist.playlistKey, name: playlist.name },
+            status: 'done',
+          });
+        } catch (error) {
+          console.warn('Drive playlist deletion queued for retry:', error);
+          queuedForDrive = true;
+          await enqueueSyncOutbox({
+            entityType: 'playlist-delete',
+            entityKey: playlist.playlistKey,
+            payload: { playlistKey: playlist.playlistKey, name: playlist.name },
+            error: errorMessage(error),
+          });
+        }
+      } else if (DRIVE_FOLDER_ID) {
+        queuedForDrive = true;
+        await enqueueSyncOutbox({
+          entityType: 'playlist-delete',
+          entityKey: playlist.playlistKey,
+          payload: { playlistKey: playlist.playlistKey, name: playlist.name },
+        });
+      }
+
+      if (selectedPlaylistKey === playlist.playlistKey) {
+        setSelectedPlaylistKey(null);
+        setView(VIEWS.LIBRARY);
+      }
+
+      addToast(queuedForDrive
+        ? `Deleted "${playlist.name}" locally · Drive update queued`
+        : `Deleted playlist "${playlist.name}"`);
+
+      setPlaylistToDelete(null);
+    } catch (error) {
+      console.error('Failed to delete playlist:', error);
+      addToast(errorMessage(error));
+    } finally {
+      setIsDeletingPlaylist(false);
+    }
+  }, [addToast, isDeletingPlaylist, selectedPlaylistKey]);
+
   const handleDeleteReadySong = useCallback(async (song) => {
     if (!DRIVE_FOLDER_ID) {
       setActionError('Missing required config: VITE_DRIVE_FOLDER_ID.');
@@ -1584,11 +1742,11 @@ function App() {
   const mobilePrimaryNavItems = navItems.filter(item => item.id !== VIEWS.DUPLICATES);
   const mobileMoreActive = view === VIEWS.DUPLICATES || isTasteProfileOpen || isEqOpen;
 
-  const renderSongCard = (song, list) => (
+  const renderSongCard = (song, list, options = {}) => (
     <SongCard
       key={song.songKey}
       song={{ ...song, isDeleted: deletedSongKeySet.has(song.songKey), isDuplicate: duplicateSongKeySet.has(song.songKey), status: playableStatus({ ...song, isDeleted: deletedSongKeySet.has(song.songKey) }) }}
-      onPlay={(selected) => handlePlaySong(selected, list)}
+      onPlay={(selected) => handlePlaySong(selected, list, options)}
       onPrepare={handlePrepare}
       onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
       onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
@@ -1611,21 +1769,24 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <button
-          type="button"
-          className="sidebar__logo"
-          onClick={() => { setView(VIEWS.HOME); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); }}
-          aria-label="Go to Sisic Music home"
-        >
-          <span>♪</span> Sisic Music
-        </button>
+        <div className="sidebar__top-row">
+          <button
+            type="button"
+            className="sidebar__logo"
+            onClick={() => { setView(VIEWS.HOME); setSelectedPlaylistKey(null); setSearchQuery(''); }}
+            aria-label="Go to Sisic Music home"
+          >
+            <span>♪</span> Sisic Music
+          </button>
+          <ThemeToggle theme={theme} onToggle={toggleTheme} />
+        </div>
 
         <nav className="sidebar__nav" aria-label="Main navigation">
           {navItems.map(item => (
             <button
               key={item.id}
               className={`sidebar__nav-item ${view === item.id ? 'sidebar__nav-item--active' : ''}`}
-              onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); }}
+              onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); }}
               aria-current={view === item.id ? 'page' : undefined}
             >
               <item.icon size={20} />
@@ -1668,13 +1829,28 @@ function App() {
             <button className="panel-action-btn" onClick={() => openPlaylistPicker(null)} aria-label="Create playlist"><Plus size={14} /> New playlist</button>
             <div className="sidebar__playlist-list">
               {visiblePlaylists.map(playlist => (
-                <button
-                  key={playlist.playlistKey}
-                  className={`playlist-item ${selectedPlaylistKey === playlist.playlistKey ? 'playlist-item--active' : ''}`}
-                  onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); setPageLimit(PAGE_SIZE); }}
-                >
-                  {playlist.name}
-                </button>
+                <div key={playlist.playlistKey} className="sidebar__playlist-row">
+                  <button
+                    className={`playlist-item ${selectedPlaylistKey === playlist.playlistKey ? 'playlist-item--active' : ''}`}
+                    onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); }}
+                  >
+                    <span className="sidebar__playlist-name">{playlist.name}</span>
+                  </button>
+                  {isDeletablePlaylist(playlist) && (
+                    <button
+                      type="button"
+                      className="sidebar__playlist-delete-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPlaylistToDelete(playlist);
+                      }}
+                      title={`Delete "${playlist.name}"`}
+                      aria-label={`Delete "${playlist.name}" playlist`}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           </div>
@@ -1735,7 +1911,7 @@ function App() {
                       <button
                         key={playlist.playlistKey}
                         className="playlist-card"
-                        onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); setPageLimit(PAGE_SIZE); }}
+                        onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); }}
                       >
                         <div
                           className="playlist-card__art"
@@ -1839,7 +2015,21 @@ function App() {
         {view === VIEWS.LIBRARY && (
           <>
             <header className="main-view__header">
-              <h1 className="main-view__title">{selectedPlaylist?.name || 'Ready'}</h1>
+              <div className="main-view__title-row">
+                <h1 className="main-view__title">{selectedPlaylist?.name || 'Ready'}</h1>
+                {selectedPlaylist && isDeletablePlaylist(selectedPlaylist) && (
+                  <button
+                    type="button"
+                    className="playlist-header-delete-btn"
+                    onClick={() => setPlaylistToDelete(selectedPlaylist)}
+                    title={`Delete playlist "${selectedPlaylist.name}"`}
+                    aria-label={`Delete playlist "${selectedPlaylist.name}"`}
+                  >
+                    <Trash2 size={16} />
+                    <span>Delete playlist</span>
+                  </button>
+                )}
+              </div>
               <div className="search-box">
                 <Search size={18} className="search-box__icon" />
                 <input
@@ -1859,10 +2049,8 @@ function App() {
                     return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
                   })
                 : librarySongs;
-              const shown = filtered.slice(0, pageLimit);
-              const hasMore = pageLimit < filtered.length;
 
-              return shown.length === 0 ? (
+              return filtered.length === 0 ? (
                 <div className="empty-state">
                   <Music2 size={48} color="var(--text-muted)" />
                   <h3>No songs</h3>
@@ -1871,14 +2059,10 @@ function App() {
               ) : (
                 <>
                   <div className="library-count">{filtered.length} songs</div>
-                  <div className="songs-grid">
-                    {shown.map(song => renderSongCard(song, filtered))}
-                  </div>
-                  {hasMore && (
-                    <button className="load-more-btn" onClick={() => setPageLimit(limit => limit + PAGE_SIZE)}>
-                      Show more ({filtered.length - pageLimit} remaining)
-                    </button>
-                  )}
+                  <VirtualSongGrid
+                    songs={filtered}
+                    renderSong={song => renderSongCard(song, searchQuery.trim() ? null : filtered, { isSearch: Boolean(searchQuery.trim()) })}
+                  />
                 </>
               );
             })()}
@@ -1910,9 +2094,7 @@ function App() {
                     return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
                   })
                 : duplicateSongs;
-              const shown = filtered.slice(0, pageLimit);
-              const hasMore = pageLimit < filtered.length;
-              return shown.length === 0 ? (
+              return filtered.length === 0 ? (
                 <div className="empty-state">
                   <Copy size={48} color="var(--text-muted)" />
                   <h3>No duplicates</h3>
@@ -1921,14 +2103,10 @@ function App() {
               ) : (
                 <>
                   <div className="library-count">{filtered.length} songs</div>
-                  <div className="songs-grid">
-                    {shown.map(song => renderSongCard(song, filtered))}
-                  </div>
-                  {hasMore && (
-                    <button className="load-more-btn" onClick={() => setPageLimit(limit => limit + PAGE_SIZE)}>
-                      Show more ({filtered.length - pageLimit} remaining)
-                    </button>
-                  )}
+                  <VirtualSongGrid
+                    songs={filtered}
+                    renderSong={song => renderSongCard(song, searchQuery.trim() ? null : filtered, { isSearch: Boolean(searchQuery.trim()) })}
+                  />
                 </>
               );
             })()}
@@ -2135,7 +2313,7 @@ function App() {
             onClose={() => setRecommendationTarget(null)}
             targetSong={recommendationTarget}
             librarySongs={allSongs}
-            onPlaySong={song => handlePlaySong(song, allSongs)}
+            onPlaySong={song => handlePlaySong(song, [song], { isSearch: true })}
             onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
           />
         </Suspense>
@@ -2152,12 +2330,22 @@ function App() {
         </Suspense>
       )}
 
+      {playlistToDelete && (
+        <DeletePlaylistModal
+          isOpen={Boolean(playlistToDelete)}
+          playlist={playlistToDelete}
+          onClose={() => { if (!isDeletingPlaylist) setPlaylistToDelete(null); }}
+          onConfirm={handleDeletePlaylist}
+          isDeleting={isDeletingPlaylist}
+        />
+      )}
+
       <nav className="mobile-nav" aria-label="Mobile navigation">
         {mobilePrimaryNavItems.map(item => (
           <button
             key={item.id}
             className={`mobile-nav__btn ${view === item.id ? 'mobile-nav__btn--active' : ''}`}
-            onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); setIsMobileMoreOpen(false); }}
+            onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); setIsMobileMoreOpen(false); }}
             aria-current={view === item.id ? 'page' : undefined}
           >
             <item.icon size={22} />
@@ -2179,7 +2367,7 @@ function App() {
           {isMobileMoreOpen && (
             <div id="mobile-more-menu" className="mobile-nav__more-menu" role="menu" aria-label="More navigation options">
               <button type="button" role="menuitem" onClick={() => { openPlaylistPicker(null); setIsMobileMoreOpen(false); }}><Plus size={18} />Create playlist</button>
-              <button type="button" role="menuitem" onClick={() => { setView(VIEWS.DUPLICATES); setSelectedPlaylistKey(null); setSearchQuery(''); setPageLimit(PAGE_SIZE); setIsMobileMoreOpen(false); }}>
+              <button type="button" role="menuitem" onClick={() => { setView(VIEWS.DUPLICATES); setSelectedPlaylistKey(null); setSearchQuery(''); setIsMobileMoreOpen(false); }}>
                 <Copy size={18} />
                 Duplicates{duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}
               </button>
@@ -2191,6 +2379,10 @@ function App() {
                 <Sliders size={18} />
                 Equalizer
               </button>
+              <div className="mobile-more-theme-row">
+                <span>Theme</span>
+                <ThemeToggle theme={theme} onToggle={toggleTheme} />
+              </div>
             </div>
           )}
         </div>

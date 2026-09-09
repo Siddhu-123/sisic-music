@@ -6,6 +6,18 @@ import { db, upsertSongToDb, getPlaylistSnapshotForDrive } from '../../src/db.js
 import '../../src/index.css';
 
 if (!import.meta.env.DEV) throw new Error('The fixture only runs in the development server.');
+(() => {
+  try {
+    const saved = localStorage.getItem('sisic_theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = saved || (prefersDark ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#12141a' : '#e7e8ec');
+  } catch (e) {
+    console.warn('Initial theme application failed:', e);
+  }
+})();
 // Keep this fixture entirely local, even when the checkout has production configuration.
 const localFetch = window.fetch.bind(window);
 window.fetch = (input, options) => {

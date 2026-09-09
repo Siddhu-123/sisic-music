@@ -5,6 +5,19 @@ import './index.css';
 import App from './App.jsx';
 import { getDriveAppBaseUrl, getDriveStreamWorkerUrl } from './services/driveStream.js';
 
+(() => {
+  try {
+    const saved = localStorage.getItem('sisic_theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = saved || (prefersDark ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#12141a' : '#e7e8ec');
+  } catch (e) {
+    console.warn('Initial theme application failed:', e);
+  }
+})();
+
 if ('serviceWorker' in navigator) {
   const appBase = getDriveAppBaseUrl(import.meta.env.BASE_URL || './', window.location.href);
   const workerUrl = getDriveStreamWorkerUrl(import.meta.env.BASE_URL || './', window.location.href);

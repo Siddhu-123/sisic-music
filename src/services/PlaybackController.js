@@ -25,15 +25,19 @@ const shuffle = songs => {
 // One synchronous owner for transport intent, async requests and queue identity.
 // React observes snapshots; no queue mutation waits for an effect to update a ref.
 export class PlaybackController {
-  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now } = {}) {
+  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, getRecommendations } = {}) {
     this.resolveUrl = resolveUrl;
     this.createAudio = createAudio;
     this.storage = storage;
     this.now = now;
+    this.getRecommendations = getRecommendations || null;
+    this.recommendationSequence = 0;
+    this.recommendationAbort = null;
     let saved;
     try { saved = restoreQueueState(storage?.getItem(QUEUE_STORAGE_KEY)); } catch { /* storage may be disabled */ }
     this.state = {
       currentSong: null, currentSongKey: null, queue: saved?.queue || [], queueIndex: saved?.queueIndex || 0,
+      manualQueue: saved?.manualQueue || [],
       queueRevision: 0, isPlaying: false, isSpinningDown: false, isBuffering: false,
       progress: 0, duration: 0, buffered: 0, error: '', playbackEvent: null,
       shuffleMode: saved?.shuffleMode || 'off', repeatMode: saved?.repeatMode || 'off',
@@ -82,8 +86,9 @@ export class PlaybackController {
     this.audioRef.current = this.audio;
     this.checkSleep();
   };
-  configurePlayback = ({ enabled, resolveSong }) => {
+  configurePlayback = ({ enabled, resolveSong, getRecommendations }) => {
     this.resolveSong = resolveSong || this.resolveSong;
+    if (getRecommendations !== undefined) this.getRecommendations = getRecommendations;
     const shouldRestore = enabled && !this.enabled;
     if (enabled === this.enabled) return;
     this.enabled = enabled;
@@ -192,13 +197,20 @@ export class PlaybackController {
     this.desiredPlaying = autoplay;
     this.smartNextKey = null;
     if (!this.djPlan || keyOf(this.djPlan.candidate) !== keyOf(this.state.queue[index])) this.djPlan = null;
+    const currentSong = this.state.queue[index];
+    const currentKey = keyOf(currentSong);
+    const manualQueue = (this.state.manualQueue || []).filter(item => keyOf(item) !== currentKey);
     this.update({ queueIndex: index, queueRevision: this.state.queueRevision + 1,
       resumePosition: resetPosition ? 0 : this.state.resumePosition, resumeOnRestore: autoplay,
-      currentSong: this.state.queue[index], currentSongKey: keyOf(this.state.queue[index]), djPlan: this.djPlan ? this.state.djPlan : null, djPrediction: null,
+      manualQueue,
+      currentSong, currentSongKey: currentKey, djPlan: this.djPlan ? this.state.djPlan : null, djPrediction: null,
       progress: 0, duration: 0, buffered: 0, isPlaying: false, isBuffering: true, error: '',
     });
     this.persist();
     if (autoLoad) this.prepareSelection();
+    if (this.state.queue.length - index - 1 < 3) {
+      this.fetchRecommendations(currentSong);
+    }
     return true;
   }
   loadAndPlay = async (song, { autoplay = true, startAt = 0, signal, crossfade = 0 } = {}) => {
@@ -502,19 +514,51 @@ export class PlaybackController {
     this.seek(0);
     return true;
   };
-  setQueueAndPlay = (songs, startIndex = 0) => {
-    const selectedKey = keyOf(songs?.[startIndex]);
-    let queue = dedupeQueue(songs).map(cleanSong);
-    if (!queue.length) { this.clearQueue(); return; }
+  setQueueAndPlay = (songs, startIndex = 0, options = {}) => {
+    const isSearch = Boolean(options?.isSearch);
+    const preserveManual = options?.preserveManualQueue !== false;
+    const selectedSong = songs?.[startIndex] || songs?.[0];
+    const selectedKey = keyOf(selectedSong);
+    if (!selectedKey) { this.clearQueue(); return; }
+
+    // Preserve unplayed manual queue tracks
+    const unplayedManual = preserveManual
+      ? (this.state.manualQueue || []).filter(item => keyOf(item) !== selectedKey).map(cleanSong)
+      : [];
+    const manualQueue = unplayedManual;
+
     this.failed.clear(); this.played.clear(); this.originalQueue = [];
-    let index = Math.max(0, queue.findIndex(song => keyOf(song) === selectedKey));
-    if (this.state.shuffleMode === 'shuffle') {
-      this.originalQueue = [...queue];
-      queue = [queue[index], ...shuffle(queue.filter((_, i) => i !== index))];
+    let queue;
+    let index = 0;
+
+    if (isSearch) {
+      // ONLY the selected track starts; the rest of that search batch must not enter the queue.
+      // Preserved manual queue has priority immediately after selected track.
+      queue = dedupeQueue([cleanSong(selectedSong), ...manualQueue]);
+      index = 0;
+    } else {
+      // Explicit playlist/album context:
+      const rawQueue = dedupeQueue(songs).map(cleanSong);
+      const startInRaw = Math.max(0, rawQueue.findIndex(s => keyOf(s) === selectedKey));
+      const head = rawQueue[startInRaw] || cleanSong(selectedSong);
+      let contextUpcoming;
+
+      if (this.state.shuffleMode === 'shuffle') {
+        this.originalQueue = [...rawQueue];
+        const remaining = rawQueue.filter((_, i) => i !== startInRaw);
+        contextUpcoming = shuffle(remaining);
+      } else {
+        contextUpcoming = rawQueue.slice(startInRaw + 1);
+      }
+
+      // Manual queue priority: manual queue comes before context tracks!
+      queue = dedupeQueue([head, ...manualQueue, ...contextUpcoming]);
       index = 0;
     }
-    this.update({ queue });
+
+    this.update({ queue, manualQueue });
     this.select(index);
+    this.fetchRecommendations(queue[index]);
   };
   editQueue(queue, originalQueue = queue) {
     this.clearDjPlan({ persist: false });
@@ -527,18 +571,59 @@ export class PlaybackController {
   }
   enqueueNext = song => {
     if (!keyOf(song)) return false;
-    if (!this.state.queue.length) { this.setQueueAndPlay([song]); return true; }
-    if (keyOf(song) === keyOf(this.state.queue[this.state.queueIndex])) return false;
-    this.failed.delete(keyOf(song));
-    this.editQueue(insertAfter(this.state.queue, this.state.queueIndex, cleanSong(song)), insertAtEnd(this.originalQueue, cleanSong(song)));
+    const cleaned = cleanSong(song);
+    const key = keyOf(cleaned);
+    if (!this.state.queue.length) {
+      this.update({ manualQueue: [cleaned] });
+      this.setQueueAndPlay([cleaned]);
+      return true;
+    }
+    if (key === keyOf(this.state.queue[this.state.queueIndex])) return false;
+    this.failed.delete(key);
+
+    const manualQueue = [cleaned, ...(this.state.manualQueue || []).filter(item => keyOf(item) !== key)];
+    const filteredQueue = this.state.queue.filter((item, idx) => idx <= this.state.queueIndex || keyOf(item) !== key);
+    const nextQueue = insertAfter(filteredQueue, this.state.queueIndex, cleaned);
+
+    this.update({ manualQueue });
+    this.editQueue(nextQueue, insertAtEnd(this.originalQueue, cleaned));
     return true;
   };
   addToQueue = song => {
     if (!keyOf(song)) return false;
-    if (!this.state.queue.length) { this.setQueueAndPlay([song]); return true; }
-    if (keyOf(song) === keyOf(this.state.queue[this.state.queueIndex])) return false;
-    this.failed.delete(keyOf(song));
-    this.editQueue(insertAtEnd(this.state.queue, cleanSong(song)), insertAtEnd(this.originalQueue, cleanSong(song)));
+    const cleaned = cleanSong(song);
+    const key = keyOf(cleaned);
+    if (!this.state.queue.length) {
+      this.update({ manualQueue: [cleaned] });
+      this.setQueueAndPlay([cleaned]);
+      return true;
+    }
+    if (key === keyOf(this.state.queue[this.state.queueIndex])) return false;
+    this.failed.delete(key);
+
+    const manualQueue = [...(this.state.manualQueue || []).filter(item => keyOf(item) !== key), cleaned];
+    const currentQueue = this.state.queue;
+    const currentIndex = this.state.queueIndex;
+    const manualKeys = new Set(manualQueue.map(keyOf));
+
+    // Filter out previous occurrences of key after currentIndex
+    const filteredQueue = currentQueue.filter((item, idx) => idx <= currentIndex || keyOf(item) !== key);
+
+    // Find insertion position: after the last existing manual queue song after currentIndex
+    let insertPos = currentIndex;
+    for (let i = currentIndex + 1; i < filteredQueue.length; i++) {
+      if (manualKeys.has(keyOf(filteredQueue[i]))) {
+        insertPos = i;
+      } else {
+        break;
+      }
+    }
+
+    const nextQueue = [...filteredQueue];
+    nextQueue.splice(insertPos + 1, 0, cleaned);
+
+    this.update({ manualQueue });
+    this.editQueue(nextQueue, insertAtEnd(this.originalQueue, cleaned));
     return true;
   };
   removeFromQueue = index => {
@@ -546,9 +631,11 @@ export class PlaybackController {
     const key = keyOf(this.state.queue[index]);
     const queue = this.state.queue.filter((_, i) => i !== index);
     const original = this.originalQueue.filter(song => keyOf(song) !== key);
+    const manualQueue = (this.state.manualQueue || []).filter(song => keyOf(song) !== key);
     const removedCurrent = index === this.state.queueIndex;
     if (!queue.length) { this.clearQueue(); return true; }
     const autoplay = this.desiredPlaying;
+    this.update({ manualQueue });
     this.editQueue(queue, original);
     if (removedCurrent) this.select(Math.min(index, queue.length - 1), { autoplay });
     return true;
@@ -565,7 +652,51 @@ export class PlaybackController {
   };
   clearQueue = () => {
     this.stop(); this.cancelPreload(); this.originalQueue = []; this.failed.clear(); this.played.clear();
-    this.update({ queue: [], queueIndex: 0, queueRevision: this.state.queueRevision + 1 }); this.persist();
+    this.recommendationAbort?.abort();
+    this.update({ queue: [], manualQueue: [], queueIndex: 0, queueRevision: this.state.queueRevision + 1 }); this.persist();
+  };
+  fetchRecommendations = async (currentSong = this.state.currentSong) => {
+    if (!this.active || !this.getRecommendations || !currentSong) return;
+    const songKey = keyOf(currentSong);
+    if (!songKey) return;
+
+    const seq = ++this.recommendationSequence;
+    this.recommendationAbort?.abort();
+    const abort = new AbortController();
+    this.recommendationAbort = abort;
+
+    try {
+      const recommendations = await this.getRecommendations({
+        currentSong,
+        manualQueue: this.state.manualQueue || [],
+        signal: abort.signal,
+      });
+
+      // Stale response guard: check if sequence matches, current song hasn't changed, and controller is still active
+      if (!this.active || seq !== this.recommendationSequence || abort.signal.aborted) return;
+      if (keyOf(this.state.currentSong) !== songKey) return;
+      if (!Array.isArray(recommendations) || recommendations.length === 0) return;
+
+      const currentQueue = this.state.queue;
+      const existingKeys = new Set(currentQueue.map(keyOf));
+      const cleanRecs = dedupeQueue(recommendations)
+        .map(cleanSong)
+        .filter(rec => !existingKeys.has(keyOf(rec)));
+
+      if (!cleanRecs.length || seq !== this.recommendationSequence || abort.signal.aborted) return;
+      if (keyOf(this.state.currentSong) !== songKey) return;
+
+      // Append cleanRecs to queue (after any manual queue and context tracks)
+      const newQueue = [...this.state.queue, ...cleanRecs];
+      this.update({ queue: newQueue, queueRevision: this.state.queueRevision + 1 });
+      this.preloadNext();
+      this.persist();
+    } catch (error) {
+      if (seq !== this.recommendationSequence || abort.signal.aborted) return;
+      console.warn('Up Next recommendation fetch failed:', error);
+    } finally {
+      if (this.recommendationAbort === abort) this.recommendationAbort = null;
+    }
   };
   stop = () => {
     this.clearDjPlan({ persist: false });
@@ -672,6 +803,7 @@ export class PlaybackController {
   visibilityChanged = hidden => { this.audio?.handleVisibilityChange(hidden); this.retiring?.handleVisibilityChange(hidden); this.checkSleep(); this.persist(); };
   dispose = () => {
     this.djPlan = null;
+    this.recommendationAbort?.abort();
     this.update({ djPlan: null, djPrediction: null });
     this.persist(); this.active = false; this.enabled = false; this.cancelLoad(); this.cancelPreload(); this.finishFade();
     this.audio?.dispose(); this.standby?.dispose(); this.audio = null; this.standby = null; this.loadedSong = null;

@@ -1,6 +1,6 @@
 import { ProgressSlider } from './ProgressSlider.jsx';
 import { useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Download, Shuffle, Repeat, ListMusic, Plus, Trash2, ChevronDown, Info, RefreshCw, Sliders, Sparkles } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Download, Shuffle, Repeat, Repeat1, ListMusic, Plus, Trash2, ChevronDown, Info, RefreshCw, Sliders, Sparkles, LoaderCircle } from 'lucide-react';
 import { Turntable } from './Turntable.jsx';
 import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
@@ -25,6 +25,7 @@ export function ExpandedPlayer({
     currentSong,
     isPlaying,
     isSpinningDown,
+    isBuffering,
     progress,
     duration,
     shuffleMode,
@@ -95,11 +96,11 @@ export function ExpandedPlayer({
         <div className="expanded-player__layout">
           <div className="expanded-player__art-container">
             <Turntable
-              key={currentSong.songKey || currentSong.id}
               currentSong={currentSong}
               artwork={<AsyncArtworkImage song={currentSong} alt={`${currentSong.track} cover`} className="turntable__art" fallbackSize={28} size={400} priority />}
               isPlaying={isPlaying}
               isBraking={isSpinningDown}
+              isBuffering={isBuffering}
               progress={displayedProgress}
               duration={duration}
               rpm={rpm}
@@ -158,13 +159,19 @@ export function ExpandedPlayer({
               <Shuffle size={20} />
             </button>
             <button className={`icon-btn ${repeatMode !== 'off' ? 'icon-btn--active' : ''}`} onClick={toggleRepeat} aria-label={`Repeat: ${repeatMode}`}>
-              <Repeat size={20} />
+              {repeatMode === 'one' ? <Repeat1 size={20} /> : <Repeat size={20} />}
             </button>
             <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
               <SkipBack size={26} />
             </button>
             <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={player.isPlayRequested ? 'Pause' : 'Play'}>
-              {isPlaying ? <Pause size={26} fill="currentColor" /> : <Play size={26} fill="currentColor" />}
+              {player.isBuffering && player.isPlayRequested ? (
+                <LoaderCircle className="spin" size={26} />
+              ) : isPlaying ? (
+                <Pause size={26} fill="currentColor" />
+              ) : (
+                <Play size={26} fill="currentColor" />
+              )}
             </button>
             <button className="icon-btn" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">
               <SkipForward size={26} />
@@ -177,7 +184,7 @@ export function ExpandedPlayer({
                 <button className="panel-action-btn" onClick={() => onOpenSongInfo?.(currentSong)}><Info size={16} /> Info</button>
                 <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(currentSong)}><Plus size={16} /> Playlist</button>
                 <button className="panel-action-btn" onClick={() => onPlayNext?.(currentSong)}><SkipForward size={16} /> Play next</button>
-                <button className="panel-action-btn" onClick={() => onAddToQueue?.(currentSong)}><ListMusic size={16} /> Queue</button>
+                <button className="panel-action-btn" onClick={() => onAddToQueue?.(currentSong)}><ListMusic size={16} /> Add to queue</button>
                 <button className="panel-action-btn" onClick={() => onPrepare?.(currentSong)}><Download size={16} /> Prepare on Drive</button>
                 <button className="panel-action-btn" onClick={() => onReview?.(currentSong)}><RefreshCw size={16} /> Review</button>
                 <button className="panel-action-btn panel-action-btn--danger" onClick={() => onDelete?.(currentSong)}><Trash2 size={16} /> Delete</button>

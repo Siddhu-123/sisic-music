@@ -9,3 +9,4 @@ export { SyncBanner } from './SyncBanner.jsx';
 export { ImportStatusPanel } from './ImportStatusPanel.jsx';
 export { MacWorkerTasksPanel } from './MacWorkerTasksPanel.jsx';
 export { DownloadStatusPanel } from './DownloadStatusPanel.jsx';
+export { VirtualSongGrid } from './VirtualSongGrid.jsx';

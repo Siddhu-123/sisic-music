@@ -233,22 +233,46 @@ function contextMatchScore(source = {}, target = {}) {
 }
 
 function addWeightedVector(accumulator, vector, weight) {
-  if (!vector || !weight) return;
-  for (let index = 0; index < EMBEDDING_DIMENSIONS; index++) accumulator[index] += vector[index] * weight;
+  if (!vector || !weight || !accumulator) return;
+  const len = Math.min(accumulator.length, vector.length);
+  for (let index = 0; index < len; index++) accumulator[index] += vector[index] * weight;
 }
 
 export function buildContextualTasteProfile(songs = [], playbackEvents = [], options = {}) {
   const sessions = sessionizePlaybackEvents(playbackEvents, options);
   const songByKey = new Map(songs.map(song => [song.songKey || getSongKey(song), song]));
-  const positiveAccumulator = new Float32Array(EMBEDDING_DIMENSIONS);
-  const negativeAccumulator = new Float32Array(EMBEDDING_DIMENSIONS);
-  const recentAccumulator = new Float32Array(EMBEDDING_DIMENSIONS);
+
+  const targetSpace = options.targetSpace || 'metadata';
+  const targetModel = options.targetModel || null;
+  const targetDimensions = Number(options.targetDimensions) || EMBEDDING_DIMENSIONS;
+
+  const spaceMeta = {
+    vectorType: targetSpace,
+    model: targetModel || (targetSpace === 'learned-audio' ? 'unknown-audio-model' : 'sisic-metadata-heuristics'),
+    dimensions: targetDimensions,
+  };
+
+  const positiveAccumulator = new Float32Array(targetDimensions);
+  const negativeAccumulator = new Float32Array(targetDimensions);
+  const recentAccumulator = new Float32Array(targetDimensions);
   const lastPlayedAtByKey = new Map();
   const now = timestampValue(options.now, Date.now());
   const halfLifeDays = Math.max(1, finiteNumber(options.recencyHalfLifeDays, 30));
   const currentContext = options.currentContext || getPlaybackContext(now, options.userAgent || '');
   let positiveSignalCount = 0;
   let negativeSignalCount = 0;
+
+  function getCompatibleVector(song) {
+    if (!song) return null;
+    const meta = resolveEmbeddingMetadata(song);
+    if (meta && areVectorSpacesCompatible(spaceMeta, meta)) {
+      return meta.vector;
+    }
+    if (targetSpace === 'metadata' && targetDimensions === EMBEDDING_DIMENSIONS) {
+      return getSongVector(song);
+    }
+    return null;
+  }
 
   sessions.forEach((session, sessionIndex) => {
     const ageDays = Math.max(0, (now - session.endedAt) / DAY_MS);
@@ -258,20 +282,20 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     session.tracks.forEach(track => {
       const song = songByKey.get(track.songKey);
       if (!song) return;
-      const vector = getSongVector(song);
+      const vector = getCompatibleVector(song);
       const positiveWeight = track.status === 'skipped' ? 0 : Math.min(1.6, track.positiveWeight);
       const negativeWeight = Math.min(1.4, track.negativeWeight);
       if (positiveWeight > 0) {
-        addWeightedVector(positiveAccumulator, vector, positiveWeight * sessionWeight);
+        if (vector) addWeightedVector(positiveAccumulator, vector, positiveWeight * sessionWeight);
         positiveSignalCount += 1;
         lastPlayedAtByKey.set(track.songKey, Math.max(lastPlayedAtByKey.get(track.songKey) || 0, track.lastEventAt));
       }
       if (negativeWeight > 0) {
-        addWeightedVector(negativeAccumulator, vector, negativeWeight * sessionWeight);
+        if (vector) addWeightedVector(negativeAccumulator, vector, negativeWeight * sessionWeight);
         negativeSignalCount += 1;
       }
 
-      if (sessionIndex === sessions.length - 1 && track.status !== 'skipped') {
+      if (sessionIndex === sessions.length - 1 && track.status !== 'skipped' && vector) {
         const orderWeight = 0.65 + ((session.tracks.indexOf(track) + 1) / Math.max(1, session.tracks.length)) * 0.35;
         addWeightedVector(recentAccumulator, vector, Math.max(0.2, positiveWeight) * orderWeight);
       }
@@ -291,6 +315,8 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     currentContext,
     recentSongKeys: recentSession?.trackKeys || [],
     lastPlayedAtByKey,
+    targetSpace,
+    spaceMeta,
   };
 }
 
@@ -314,11 +340,22 @@ export function rankContextualSongs(songs = [], options = {}) {
   const scored = songs
     .map(song => {
       const key = song.songKey || getSongKey(song);
-      const vector = getSongVector(song);
+      let vector = null;
+      if (profile?.spaceMeta) {
+        const meta = resolveEmbeddingMetadata(song);
+        if (meta && areVectorSpacesCompatible(profile.spaceMeta, meta)) {
+          vector = meta.vector;
+        } else if (profile.spaceMeta.vectorType === 'metadata') {
+          vector = getSongVector(song);
+        }
+      } else {
+        vector = getSongVector(song);
+      }
+
       const plays = Math.max(finiteNumber(song.playCount), playCountFor(playCountByKey, key));
-      const tasteAffinity = profile?.vector ? cosineSimilarity(profile.vector, vector) : 0;
-      const sequenceAffinity = profile?.recentVector ? cosineSimilarity(profile.recentVector, vector) : 0;
-      const skipAffinity = profile?.negativeVector ? cosineSimilarity(profile.negativeVector, vector) : 0;
+      const tasteAffinity = (profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0;
+      const sequenceAffinity = (profile?.recentVector && vector) ? cosineSimilarity(profile.recentVector, vector) : 0;
+      const skipAffinity = (profile?.negativeVector && vector) ? cosineSimilarity(profile.negativeVector, vector) : 0;
       const likedBoost = likedSongKeys.has(key) ? 0.22 : 0;
       const popularityBoost = Math.min(0.14, Math.log1p(plays) * 0.045);
       const discoveryBoost = plays === 0 ? (profile?.hasSignal ? 0.035 : 0.05) : 0;
@@ -410,4 +447,291 @@ export function enrichPlaybackEvent(event = {}, sessionState = {}, options = {})
   };
   if (event.eventType === 'user-skip') enriched.skipReason = event.skipReason || event.message || 'user-skip';
   return enriched;
+}
+
+export function resolveEmbeddingMetadata(item) {
+  if (!item) return null;
+  const vector = item.vector;
+  if (!vector || (!Array.isArray(vector) && !ArrayBuffer.isView(vector))) return null;
+
+  const rawVectorType = item.vectorType || item.embeddingType;
+  const rawModel = item.model || item.embeddingModel;
+  const isExplicitLearnedAudio = rawVectorType === 'learned-audio' && Boolean(rawModel);
+
+  const vectorType = isExplicitLearnedAudio ? 'learned-audio' : 'metadata';
+  const model = isExplicitLearnedAudio ? String(rawModel) : (rawModel || 'sisic-metadata-heuristics');
+  const modelVersion = String(item.modelVersion || item.embeddingModelVersion || '1.0.0');
+  const dimensions = Number(item.dimensions || item.embeddingDimensions || vector.length);
+  const provider = String(item.provider || item.embeddingProvider || (isExplicitLearnedAudio ? 'registered-audio-provider' : 'sisic-client'));
+
+  return {
+    vector,
+    vectorType,
+    model,
+    modelVersion,
+    dimensions,
+    provider,
+  };
+}
+
+export function areVectorSpacesCompatible(metaA, metaB) {
+  if (!metaA || !metaB) return false;
+  if (metaA.vectorType !== metaB.vectorType) return false;
+  if (metaA.dimensions !== metaB.dimensions) return false;
+  if (metaA.vectorType === 'learned-audio') {
+    return metaA.model === metaB.model;
+  }
+  return true;
+}
+
+export function isLearnedAudioProvider(provider = '') {
+  const p = String(provider || '').toLowerCase();
+  return p.includes('audio-learned') || p.includes('onnx') || p.includes('m2v') || p.includes('musicnn');
+}
+
+export function validateAndNormalizeVector(vector, expectedDimensions = EMBEDDING_DIMENSIONS) {
+  if (!vector || (!Array.isArray(vector) && !ArrayBuffer.isView(vector))) return null;
+  const length = vector.length;
+  if (length === 0) return null;
+  if (expectedDimensions != null && length !== expectedDimensions) return null;
+  let sumSq = 0;
+  for (let i = 0; i < length; i++) {
+    const val = Number(vector[i]);
+    if (!Number.isFinite(val)) return null;
+    sumSq += val * val;
+  }
+  const norm = Math.sqrt(sumSq);
+  if (norm === 0) return null;
+  if (Math.abs(norm - 1.0) < 1e-4) {
+    return Array.isArray(vector) ? vector : Array.from(vector);
+  }
+  const normalized = new Float32Array(length);
+  for (let i = 0; i < length; i++) {
+    normalized[i] = vector[i] / norm;
+  }
+  return Array.from(normalized);
+}
+
+/**
+ * Builds Up Next recommendations using taste embeddings (metadata or learned audio) when available,
+ * with strict space separation (never mixing metadata and audio vectors) and honest fallback
+ * to contextual playback signals when absent or incompatible.
+ */
+export async function buildUpNextRecommendations({
+  currentSong,
+  librarySongs = [],
+  playbackEvents = [],
+  likedSongKeys = [],
+  recentlyPlayedKeys = [],
+  manualQueue = [],
+  limit = 5,
+  signal,
+  getEmbedding,
+} = {}) {
+  if (!currentSong || !Array.isArray(librarySongs) || librarySongs.length === 0) return [];
+  const currentKey = currentSong.songKey || getSongKey(currentSong);
+  if (!currentKey) return [];
+
+  // 1. Build exclusion sets: current track, recent history, manual queue
+  const recentKeys = new Set(recentlyPlayedKeys);
+  recentKeys.add(currentKey);
+  const manualKeys = new Set((manualQueue || []).map(s => s?.songKey || getSongKey(s)).filter(Boolean));
+
+  const hasDriveFiles = librarySongs.some(s => s?.driveFileId);
+  const seenCandidateKeys = new Set();
+  const candidates = [];
+
+  for (const song of librarySongs) {
+    if (!song) continue;
+    const key = song.songKey || getSongKey(song);
+    if (!key || seenCandidateKeys.has(key)) continue;
+    if (recentKeys.has(key) || manualKeys.has(key)) continue;
+    if (song.isDeleted || song.isDuplicate) continue;
+
+    // Filter to playable songs if streamable tracks exist
+    const isPlayableSong = Boolean(song.driveFileId || song.isPlayable || song.status === 'ready');
+    if (hasDriveFiles && !isPlayableSong) continue;
+
+    seenCandidateKeys.add(key);
+    candidates.push(song);
+    // Bounded candidate pool: cap at 80 candidate tracks to keep recommendation computation fast
+    if (candidates.length >= 80) break;
+  }
+
+  if (candidates.length === 0) return [];
+  if (signal?.aborted) return [];
+
+  // 2. Resolve embedding for current song
+  let currentMeta = null;
+  let currentVector = null;
+  if (currentSong.vector) {
+    const rawDims = currentSong.dimensions || currentSong.embeddingDimensions || currentSong.vector.length;
+    const norm = validateAndNormalizeVector(currentSong.vector, rawDims);
+    if (norm) {
+      currentMeta = resolveEmbeddingMetadata({ ...currentSong, vector: norm });
+      currentVector = norm;
+    }
+  }
+  if (!currentVector && typeof getEmbedding === 'function') {
+    try {
+      const loaded = await getEmbedding(currentKey);
+      if (loaded?.vector) {
+        const rawDims = loaded.dimensions || loaded.vector.length;
+        const norm = validateAndNormalizeVector(loaded.vector, rawDims);
+        if (norm) {
+          currentMeta = resolveEmbeddingMetadata({ ...loaded, vector: norm });
+          currentVector = norm;
+        }
+      }
+    } catch {
+      // Missing embedding or failure handled honestly
+    }
+  }
+
+  if (signal?.aborted) return [];
+
+  // 3. Build contextual taste profile from playback history within compatible space
+  const profile = buildContextualTasteProfile(librarySongs, playbackEvents, {
+    excludeSongKeys: Array.from(recentKeys),
+    targetSpace: currentMeta?.vectorType || 'metadata',
+    targetModel: currentMeta?.model || null,
+    targetDimensions: currentMeta?.dimensions || EMBEDDING_DIMENSIONS,
+  });
+
+  // 4. Rank candidates using embedding similarity when available and compatible, with honest fallback.
+  const hasEmbedding = Boolean(currentVector && currentMeta);
+
+  const scored = [];
+  for (const candidate of candidates) {
+    const candKey = candidate.songKey || getSongKey(candidate);
+    let candMeta = null;
+    let candVector = null;
+    if (candidate.vector) {
+      const rawDims = candidate.dimensions || candidate.embeddingDimensions || candidate.vector.length;
+      const norm = validateAndNormalizeVector(candidate.vector, rawDims);
+      if (norm) {
+        candMeta = resolveEmbeddingMetadata({ ...candidate, vector: norm });
+        candVector = norm;
+      }
+    }
+    if (!candVector && hasEmbedding && typeof getEmbedding === 'function') {
+      try {
+        const loaded = await getEmbedding(candKey);
+        if (loaded?.vector) {
+          const rawDims = loaded.dimensions || loaded.vector.length;
+          const norm = validateAndNormalizeVector(loaded.vector, rawDims);
+          if (norm) {
+            candMeta = resolveEmbeddingMetadata({ ...loaded, vector: norm });
+            candVector = norm;
+          }
+        }
+      } catch {
+        // Honest fallback
+      }
+    }
+
+    let embeddingSimilarity = null;
+    let isCompatible = false;
+    if (hasEmbedding && candMeta && candVector) {
+      isCompatible = areVectorSpacesCompatible(currentMeta, candMeta);
+      if (isCompatible) {
+        embeddingSimilarity = cosineSimilarity(currentVector, candVector);
+      }
+    }
+
+    scored.push({
+      candidate,
+      candKey,
+      candMeta,
+      embeddingSimilarity,
+      isCompatible,
+    });
+  }
+
+  // Rank with contextual signals (play counts, skip affinity, sequence affinity, liked boost, recency penalty, artist diversity)
+  const rankedContextual = rankContextualSongs(
+    scored.map(s => s.candidate),
+    {
+      profile,
+      likedSongKeys,
+      excludeSongKeys: Array.from(recentKeys),
+      limit: candidates.length,
+    }
+  );
+  const contextualScoreByKey = new Map(rankedContextual.map((item, idx) => [
+    item.songKey || getSongKey(item),
+    item.recommendationScore ?? (1 - idx / Math.max(1, rankedContextual.length)),
+  ]));
+
+  // Combine scores: embedding similarity (when available and compatible) + contextual affinity
+  const finalScored = scored.map(item => {
+    const contextualScore = contextualScoreByKey.get(item.candKey) ?? 0;
+    const hasEmbeddingMatch = typeof item.embeddingSimilarity === 'number' && item.isCompatible;
+
+    let finalScore;
+    if (hasEmbeddingMatch) {
+      finalScore = item.embeddingSimilarity * 0.55 + contextualScore * 0.45;
+    } else {
+      // Honest fallback: contextual score without pretending to have an embedding
+      finalScore = contextualScore;
+    }
+
+    return {
+      song: item.candidate,
+      score: finalScore,
+      hasEmbedding: hasEmbeddingMatch,
+      embeddingType: hasEmbeddingMatch ? item.candMeta?.vectorType : null,
+      embeddingModel: hasEmbeddingMatch ? item.candMeta?.model : null,
+      similarityScore: hasEmbeddingMatch ? item.embeddingSimilarity : undefined,
+      isFallback: !hasEmbeddingMatch,
+    };
+  });
+
+  // Sort descending by finalScore
+  finalScored.sort((a, b) => b.score - a.score);
+
+  // Apply artist diversity: max 2 tracks per artist unless pool is small
+  const result = [];
+  const artistCounts = new Map();
+  const targetLimit = Math.min(limit, finalScored.length);
+
+  for (const item of finalScored) {
+    if (result.length >= targetLimit) break;
+    const artist = String(item.song.artist || '').trim().toLowerCase();
+    const count = artistCounts.get(artist) || 0;
+    if (count >= 2 && finalScored.length > targetLimit) continue;
+    artistCounts.set(artist, count + 1);
+
+    result.push({
+      ...item.song,
+      hasEmbedding: item.hasEmbedding,
+      embeddingType: item.embeddingType,
+      embeddingModel: item.embeddingModel,
+      similarityScore: item.similarityScore,
+      isFallback: item.isFallback,
+      recommendationScore: item.score,
+    });
+  }
+
+  if (result.length < targetLimit) {
+    const includedKeys = new Set(result.map(s => s.songKey || getSongKey(s)));
+    for (const item of finalScored) {
+      if (result.length >= targetLimit) break;
+      const key = item.song.songKey || getSongKey(item.song);
+      if (!includedKeys.has(key)) {
+        includedKeys.add(key);
+        result.push({
+          ...item.song,
+          hasEmbedding: item.hasEmbedding,
+          embeddingType: item.embeddingType,
+          embeddingModel: item.embeddingModel,
+          similarityScore: item.similarityScore,
+          isFallback: item.isFallback,
+          recommendationScore: item.score,
+        });
+      }
+    }
+  }
+
+  return result;
 }

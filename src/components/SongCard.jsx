@@ -1,11 +1,11 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { memo, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Play, SkipForward, Download, CheckCircle2, ListMusic, Clock3, Cloud, Plus, Trash2, Info, RefreshCw, X, Sparkles, Heart, Copy, FolderOpen, MoreHorizontal } from 'lucide-react';
 import { statusDetails } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
-export function SongCard({
+export const SongCard = memo(function SongCard({
   song,
   onPlay,
   onPrepare,
@@ -168,7 +168,7 @@ export function SongCard({
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
       >
         <div className="song-card__art-wrapper">
-          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} size={300} sizes="(max-width: 768px) 45vw, 220px" />
+          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} size={240} sizes="(max-width: 768px) 45vw, 220px" />
           {isCurrentSong && (
             <div className={`song-card__playing-bars ${isPlaying ? '' : 'song-card__playing-bars--paused'}`}><span /><span /><span /></div>
           )}
@@ -278,4 +278,4 @@ export function SongCard({
       )}
     </>
   );
-}
+});

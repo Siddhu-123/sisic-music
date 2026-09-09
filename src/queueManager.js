@@ -79,12 +79,17 @@ export function restoreQueueState(raw) {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!parsed || !Array.isArray(parsed.queue)) return null;
     const selectedKey = queueItemKey(parsed.queue[Math.floor(nonnegative(parsed.queueIndex))]);
-    const queue = dedupeQueue(parsed.queue).map(song => {
+    const cleanRecord = song => {
+      if (!song || typeof song !== 'object') return null;
       const result = { ...song };
       for (const field of ['localFile', 'blob', 'isDownloaded', 'isCached', 'hasBlob', 'cacheSizeBytes', 'cachedAt']) delete result[field];
       return result;
-    });
+    };
+    const queue = dedupeQueue(parsed.queue).map(cleanRecord).filter(Boolean);
     const selectedIndex = queue.findIndex(song => queueItemKey(song) === selectedKey);
+    const manualQueue = dedupeQueue(parsed.manualQueue || [])
+      .map(song => queue.find(item => queueItemKey(item) === queueItemKey(song)) || cleanRecord(song))
+      .filter(song => queueItemKey(song));
     const sleepTimer = parsed.sleepTimer?.mode === 'track' ? { mode: 'track' }
       : parsed.sleepTimer?.mode === 'time' && Number.isFinite(parsed.sleepTimer.deadline) ? { mode: 'time', deadline: parsed.sleepTimer.deadline } : null;
     const uniqueStrings = (value, limit) => Array.isArray(value) ? [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))].slice(0, limit) : [];
@@ -94,6 +99,7 @@ export function restoreQueueState(raw) {
     return {
       queue,
       originalQueue: dedupeQueue(parsed.originalQueue || []).map(song => queue.find(item => queueItemKey(item) === queueItemKey(song))).filter(Boolean),
+      manualQueue,
       queueIndex: selectedIndex >= 0 ? selectedIndex : Math.min(Math.floor(nonnegative(parsed.queueIndex)), Math.max(0, queue.length - 1)),
       repeatMode: REPEAT_MODES.includes(parsed.repeatMode) ? parsed.repeatMode : 'off',
       shuffleMode: ['off', 'shuffle', 'smart'].includes(parsed.shuffleMode) ? parsed.shuffleMode : 'off',

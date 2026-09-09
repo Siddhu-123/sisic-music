@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Shuffle, Repeat, Repeat1, ListMusic, Cloud, Info, LoaderCircle } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Shuffle, Repeat, Repeat1, ListMusic, Info, LoaderCircle } from 'lucide-react';
 import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { ProgressSlider } from './ProgressSlider.jsx';
@@ -53,8 +53,7 @@ export function PlayerBar({
                 <span className="player-artist">{currentSong.artist}</span>
               </span>
             </button>
-            <Cloud size={16} color="var(--text-muted)" style={{ marginLeft: 'auto' }} />
-            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info">
+            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info" style={{ marginLeft: 'auto' }}>
               <Info size={16} />
             </button>
           </>
@@ -109,7 +108,7 @@ export function PlayerBar({
           aria-label="Volume"
         />
       </div>
-      <PlaybackSettings player={player} onToggleQueue={onToggleQueue} />
+      <PlaybackSettings player={player} />
 
       {isExpanded && (
         <ExpandedPlayer

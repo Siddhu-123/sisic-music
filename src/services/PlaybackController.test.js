@@ -210,3 +210,68 @@ test('failed DJ preload leaves current audio playing and restores ordinary prelo
   assert.equal(c.preloaded.songKey, 'b');
   assert.ok(c.state.djHistory.candidateKeys.includes('c'));
 });
+
+test('search selection starts only the selected track and ignores the rest of the search batch', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs, 1, { isSearch: true });
+  await settle();
+  assert.equal(c.state.currentSongKey, 'b');
+  assert.deepEqual(c.state.queue.map(s => s.songKey), ['b']);
+});
+
+test('explicit context selection preserves upcoming playlist tracks in queue order', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs, 1, { isSearch: false });
+  await settle();
+  assert.equal(c.state.currentSongKey, 'b');
+  assert.deepEqual(c.state.queue.map(s => s.songKey), ['b', 'c', 'd']);
+});
+
+test('manual queue is preserved across search and playlist changes and maintains priority', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay([songs[0]], 0, { isSearch: true });
+  await settle();
+  c.addToQueue({ songKey: 'm1', track: 'M1', driveFileId: 'm1' });
+  c.addToQueue({ songKey: 'm2', track: 'M2', driveFileId: 'm2' });
+
+  // Starting a search result preserves unplayed manual queue tracks with priority
+  c.setQueueAndPlay([songs[1], songs[2]], 0, { isSearch: true });
+  await settle();
+  assert.equal(c.state.currentSongKey, 'b');
+  assert.deepEqual(c.state.queue.map(s => s.songKey), ['b', 'm1', 'm2']);
+
+  // Starting an explicit playlist preserves manual queue with priority ahead of playlist context
+  c.setQueueAndPlay([songs[0], songs[1], songs[2]], 0, { isSearch: false });
+  await settle();
+  assert.equal(c.state.currentSongKey, 'a');
+  assert.deepEqual(c.state.queue.map(s => s.songKey), ['a', 'm1', 'm2', 'b', 'c']);
+});
+
+test('recommendations append after manual queue and stale async responses are safely discarded', async t => {
+  const firstGate = deferred();
+  const { c } = fixture(t, {
+    getRecommendations: async ({ currentSong }) => {
+      if (currentSong.songKey === 'a') {
+        await firstGate.promise;
+        return [{ songKey: 'rec-a', track: 'Rec A' }];
+      }
+      return [{ songKey: 'rec-b', track: 'Rec B' }];
+    },
+  });
+
+  c.setQueueAndPlay([songs[0]], 0, { isSearch: true });
+  c.addToQueue({ songKey: 'm1', track: 'M1', driveFileId: 'm1' });
+
+  // Rapidly switch to song b before first recommendations resolve
+  c.setQueueAndPlay([songs[1]], 0, { isSearch: true });
+  await settle();
+
+  // First deferred recommendations resolve after track switch
+  firstGate.resolve();
+  await settle();
+
+  // Queue must contain song b, manual queue m1, and recommendations for b, NOT stale rec-a
+  assert.equal(c.state.currentSongKey, 'b');
+  assert.equal(c.state.queue.some(s => s.songKey === 'rec-a'), false);
+  assert.deepEqual(c.state.queue.map(s => s.songKey), ['b', 'm1', 'rec-b']);
+});

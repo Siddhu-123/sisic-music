@@ -799,7 +799,11 @@ body {
 }
 
 /* ── Home Sections ──────────────────────────────────────────────────────── */
-.home-section { margin-bottom: 32px; }
+.home-section {
+  margin-bottom: 32px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 340px;
+}
 .home-section__title {
   font-size: 1.3rem;
   font-weight: 700;
@@ -2279,8 +2283,10 @@ body {
   height: 100%;
 }
 
-/* ── Neumorphic surface system ──────────────────────────────────────────── */
-:root {
+/* ── Neumorphic surface system & Theme Tokens ─────────────────────────── */
+:root,
+:root[data-theme="light"] {
+  --theme-name: light;
   --green: #4d58c8;
   --green-dark: #3f4bb2;
   --bg: #e7e8ec;
@@ -2289,6 +2295,7 @@ body {
   --bg-card: #e7e8ec;
   --bg-card-hover: #eceef2;
   --text: #20232a;
+  --text-main: #20232a;
   --text-muted: #5f6570;
   --border: rgba(255, 255, 255, 0.62);
   --player-bg: #e7e8ec;
@@ -2298,6 +2305,52 @@ body {
   --shadow-soft: 6px 6px 14px var(--shadow-dark), -6px -6px 14px var(--shadow-light);
   --shadow-inset: inset 5px 5px 12px rgba(164, 169, 181, 0.42), inset -5px -5px 12px rgba(255, 255, 255, 0.86);
   --radius: 18px;
+}
+
+:root[data-theme="dark"] {
+  --theme-name: dark;
+  --green: #6c78ee;
+  --green-dark: #5661d4;
+  --bg: #12141a;
+  --bg-main: #12141a;
+  --bg-elevated: #1a1d26;
+  --bg-card: #181b22;
+  --bg-card-hover: #222630;
+  --text: #f0f2f7;
+  --text-main: #f0f2f7;
+  --text-muted: #959dae;
+  --border: rgba(255, 255, 255, 0.08);
+  --player-bg: #151820;
+  --shadow-light: rgba(255, 255, 255, 0.04);
+  --shadow-dark: rgba(0, 0, 0, 0.55);
+  --shadow-raised: 8px 8px 20px var(--shadow-dark), -6px -6px 18px var(--shadow-light);
+  --shadow-soft: 5px 5px 14px var(--shadow-dark), -4px -4px 10px var(--shadow-light);
+  --shadow-inset: inset 4px 4px 10px rgba(0, 0, 0, 0.55), inset -3px -3px 8px rgba(255, 255, 255, 0.035);
+  --radius: 18px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --theme-name: dark;
+    --green: #6c78ee;
+    --green-dark: #5661d4;
+    --bg: #12141a;
+    --bg-main: #12141a;
+    --bg-elevated: #1a1d26;
+    --bg-card: #181b22;
+    --bg-card-hover: #222630;
+    --text: #f0f2f7;
+    --text-main: #f0f2f7;
+    --text-muted: #959dae;
+    --border: rgba(255, 255, 255, 0.08);
+    --player-bg: #151820;
+    --shadow-light: rgba(255, 255, 255, 0.04);
+    --shadow-dark: rgba(0, 0, 0, 0.55);
+    --shadow-raised: 8px 8px 20px var(--shadow-dark), -6px -6px 18px var(--shadow-light);
+    --shadow-soft: 5px 5px 14px var(--shadow-dark), -4px -4px 10px var(--shadow-light);
+    --shadow-inset: inset 4px 4px 10px rgba(0, 0, 0, 0.55), inset -3px -3px 8px rgba(255, 255, 255, 0.035);
+    --radius: 18px;
+  }
 }
 
 body {
@@ -3989,13 +4042,15 @@ input:focus-visible {
   cursor: grab;
   touch-action: none;
   user-select: none;
-  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--record-rotation, 0deg));
+  transform: translate3d(var(--eject-x, 0px), var(--eject-y, 0px), 0) rotate(var(--record-rotation, 0deg));
+  transform-origin: 50% 50%;
   background:
     radial-gradient(circle at 32% 27%, rgba(255, 255, 255, 0.08), transparent 19%, transparent 100%),
     repeating-radial-gradient(circle at center, #202229 0 0.55px, #08090d 0.9px 1.7px, #292c35 2px 2.25px),
     radial-gradient(circle, #15171d 0 60%, #07080b 76% 100%);
   box-shadow: 0 16px 26px rgba(24, 26, 32, 0.52), inset 0 0 0 1px rgba(255, 255, 255, 0.13), inset 0 0 18px rgba(0, 0, 0, 0.88);
   will-change: transform;
+  backface-visibility: hidden;
 }
 
 .turntable__vinyl::before,
@@ -5165,7 +5220,16 @@ input:focus-visible {
 .view-loading, .queue-loading { display: grid; min-height: 180px; place-items: center; color: var(--text-muted); }
 
 /* Explore uses short content rails instead of one uninterrupted wall of tiles. */
-.content-rail { display: flex; gap: 16px; overflow-x: auto; padding: 2px 2px 14px; scroll-snap-type: x proximity; scrollbar-width: thin; }
+.content-rail {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 2px 2px 14px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
 .content-rail > .song-card { flex: 0 0 clamp(164px, 15vw, 198px); min-height: 238px; scroll-snap-align: start; }
 .content-rail > .song-card .song-card__primary { min-height: 238px; }
 
@@ -5182,7 +5246,11 @@ input:focus-visible {
 .explore-chip:hover, .explore-chip.is-active { color: var(--green); box-shadow: var(--shadow-inset); }
 .explore-chip small { color: inherit; font-size: .66rem; opacity: .72; }
 
-.explore-section { min-width: 0; }
+.explore-section {
+  min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 300px;
+}
 .explore-section__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 13px; }
 .explore-section__heading h2 { margin: 0; font-size: 1.2rem; font-weight: 800; }
 .explore-section__heading > svg { color: var(--green); flex-shrink: 0; }
@@ -5786,4 +5854,443 @@ body,
   margin-left: auto;
   color: var(--text-muted);
   font-size: .68rem;
+}
+
+/* ── Delete Playlist ─────────────────────────────────────────────────────── */
+.main-view__title-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.playlist-header-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(224, 49, 49, 0.25);
+  background: var(--bg);
+  box-shadow: var(--shadow-soft);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-height: 36px;
+}
+
+.playlist-header-delete-btn:hover {
+  color: #e03131;
+  border-color: #e03131;
+  background: rgba(224, 49, 49, 0.08);
+  transform: translateY(-1px);
+}
+
+.playlist-header-delete-btn:active {
+  box-shadow: var(--shadow-inset);
+  transform: translateY(0);
+}
+
+.sidebar__playlist-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+  width: 100%;
+}
+
+.sidebar__playlist-row .playlist-item {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__playlist-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.sidebar__playlist-delete-btn {
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  flex-shrink: 0;
+}
+
+.sidebar__playlist-row:hover .sidebar__playlist-delete-btn,
+.sidebar__playlist-delete-btn:focus-visible {
+  opacity: 1;
+}
+
+.sidebar__playlist-delete-btn:hover {
+  color: #e03131;
+  background: rgba(224, 49, 49, 0.12);
+}
+
+.delete-playlist-modal {
+  max-width: 440px;
+  width: min(92vw, 440px);
+  padding: 24px;
+}
+
+.delete-playlist-icon {
+  color: #e03131;
+}
+
+.delete-playlist-body {
+  margin: 16px 0 20px;
+}
+
+.delete-playlist-desc {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.delete-playlist-subtext {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.delete-playlist-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(224, 49, 49, 0.1);
+  border: 1px solid rgba(224, 49, 49, 0.3);
+  color: #e03131;
+  font-size: 0.8rem;
+}
+
+.delete-playlist-cancel-btn {
+  min-height: 40px;
+}
+
+.delete-playlist-confirm-btn {
+  background: #e03131 !important;
+  color: #ffffff !important;
+  min-height: 40px;
+  box-shadow: 0 4px 12px rgba(224, 49, 49, 0.3) !important;
+}
+
+.delete-playlist-confirm-btn:hover:not(:disabled) {
+  background: #c92a2a !important;
+}
+
+.delete-playlist-confirm-btn:disabled,
+.delete-playlist-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Dark Theme Element Adjustments ──────────────────────────────────────── */
+:root[data-theme="dark"] .player-bar {
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.6), 0 -1px 0 rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme="dark"] .main-view {
+  background:
+    radial-gradient(circle at 86% 0%, rgba(255, 255, 255, 0.035), transparent 27%),
+    var(--bg);
+}
+
+:root[data-theme="dark"] .expanded-player__bg {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 255, 255, 0.05), transparent 36%),
+    var(--bg);
+}
+
+:root[data-theme="dark"] .player-thumb {
+  background: linear-gradient(145deg, #232733, #151820);
+}
+
+:root[data-theme="dark"] .modal-backdrop {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+:root[data-theme="dark"] .modal-overlay {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+/* ── Pixo Day/Night Toggle Micro-Animation ───────────────────────────────── */
+.sidebar__top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.pixo-theme-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 44px; /* Touch target >= 44x44px */
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  border-radius: 999px;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.pixo-theme-toggle:focus-visible .pixo-toggle-track {
+  outline: 3px solid rgba(108, 120, 238, 0.45);
+  outline-offset: 2px;
+}
+
+.pixo-toggle-track {
+  position: relative;
+  width: 56px;
+  height: 28px;
+  border-radius: 999px;
+  overflow: hidden;
+  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, 0.35), inset -2px -2px 5px rgba(255, 255, 255, 0.15);
+  transition: background 0.4s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Light sky gradient */
+.pixo-theme-toggle--light .pixo-toggle-track {
+  background: linear-gradient(135deg, #60a5fa 0%, #93c5fd 100%);
+}
+
+/* Night sky gradient */
+.pixo-theme-toggle--dark .pixo-toggle-track {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  box-shadow: inset 2px 2px 6px rgba(0, 0, 0, 0.6), inset -2px -2px 6px rgba(255, 255, 255, 0.05);
+}
+
+/* Stars layer */
+.pixo-stars-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: opacity 0.35s ease, transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.pixo-theme-toggle--light .pixo-stars-layer {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+.pixo-theme-toggle--dark .pixo-stars-layer {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.pixo-star {
+  position: absolute;
+  background: #ffffff;
+  border-radius: 50%;
+  animation: pixoStarTwinkle 2.5s infinite ease-in-out alternate;
+}
+
+.pixo-star.star-1 { top: 6px; left: 8px; width: 2px; height: 2px; animation-delay: 0s; }
+.pixo-star.star-2 { top: 16px; left: 16px; width: 2.5px; height: 2.5px; animation-delay: 0.6s; }
+.pixo-star.star-3 { top: 7px; left: 23px; width: 1.5px; height: 1.5px; animation-delay: 1.2s; }
+.pixo-star.star-4 { top: 19px; left: 8px; width: 1.8px; height: 1.8px; animation-delay: 1.8s; }
+
+@keyframes pixoStarTwinkle {
+  0% { opacity: 0.4; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+  100% { opacity: 0.6; transform: scale(0.9); }
+}
+
+/* Clouds layer */
+.pixo-clouds-layer {
+  position: absolute;
+  right: 6px;
+  bottom: 3px;
+  display: flex;
+  gap: 2px;
+  pointer-events: none;
+  transition: opacity 0.35s ease, transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.pixo-theme-toggle--light .pixo-clouds-layer {
+  opacity: 0.75;
+  transform: translateX(0);
+}
+
+.pixo-theme-toggle--dark .pixo-clouds-layer {
+  opacity: 0;
+  transform: translateX(12px);
+}
+
+.pixo-cloud {
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+}
+.pixo-cloud.cloud-1 { width: 10px; height: 10px; }
+.pixo-cloud.cloud-2 { width: 7px; height: 7px; margin-top: 3px; }
+
+/* Celestial thumb (Sun/Moon gliding unit) */
+.pixo-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.45s cubic-bezier(0.34, 1.4, 0.64, 1);
+  z-index: 2;
+}
+
+.pixo-theme-toggle--light .pixo-thumb {
+  transform: translateX(0) rotate(0deg);
+}
+
+.pixo-theme-toggle--dark .pixo-thumb {
+  transform: translateX(28px) rotate(360deg);
+}
+
+/* Sun rays micro-animation */
+.pixo-sun-rays {
+  position: absolute;
+  inset: -5px;
+  width: 32px;
+  height: 32px;
+  color: #ffb800;
+  pointer-events: none;
+  transform-origin: center;
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+}
+
+.pixo-theme-toggle--light .pixo-sun-rays {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.pixo-theme-toggle--dark .pixo-sun-rays {
+  opacity: 0;
+  transform: scale(0.1) rotate(120deg);
+}
+
+/* The celestial orb */
+.pixo-orb {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  overflow: hidden;
+  transition: background 0.4s ease, box-shadow 0.4s ease;
+}
+
+/* Day: Golden sun orb */
+.pixo-theme-toggle--light .pixo-orb {
+  background: #ffb800;
+  box-shadow: 0 0 10px rgba(255, 184, 0, 0.8), 0 0 4px rgba(255, 184, 0, 0.6);
+}
+
+/* Night: Silvery moonlight orb */
+.pixo-theme-toggle--dark .pixo-orb {
+  background: #e2e8f0;
+  box-shadow: 0 0 10px rgba(226, 232, 240, 0.6), inset -1px -1px 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Crescent moon shadow carving mask */
+.pixo-orb::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  transition: transform 0.42s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s ease, opacity 0.3s ease;
+  z-index: 2;
+}
+
+.pixo-theme-toggle--light .pixo-orb::before {
+  background: #60a5fa;
+  transform: translate(24px, -24px);
+  opacity: 0;
+}
+
+.pixo-theme-toggle--dark .pixo-orb::before {
+  background: #0f172a;
+  transform: translate(6px, -3px);
+  opacity: 1;
+}
+
+/* Moon craters */
+.pixo-craters {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  transition: opacity 0.35s ease, transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.pixo-theme-toggle--light .pixo-craters {
+  opacity: 0;
+  transform: scale(0.4) rotate(-30deg);
+}
+
+.pixo-theme-toggle--dark .pixo-craters {
+  opacity: 0.85;
+  transform: scale(1) rotate(0deg);
+}
+
+.pixo-crater {
+  position: absolute;
+  background: #94a3b8;
+  border-radius: 50%;
+}
+
+.pixo-crater.crater-1 { top: 5px; left: 5px; width: 4px; height: 4px; opacity: 0.7; }
+.pixo-crater.crater-2 { top: 12px; left: 6px; width: 3px; height: 3px; opacity: 0.6; }
+.pixo-crater.crater-3 { top: 9px; left: 11px; width: 2px; height: 2px; opacity: 0.5; }
+
+.mobile-more-theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+/* Reduced Motion Support */
+@media (prefers-reduced-motion: reduce) {
+  .pixo-toggle-track,
+  .pixo-thumb,
+  .pixo-sun-rays,
+  .pixo-orb,
+  .pixo-orb::before,
+  .pixo-craters,
+  .pixo-stars-layer,
+  .pixo-clouds-layer,
+  .pixo-star {
+    transition-duration: 0.01ms !important;
+    animation: none !important;
+  }
 }

@@ -61,3 +61,15 @@ test('corrupt queue entries preserve the selected identity and discard transient
   assert.equal(restoreQueueState('{oops'), null);
   assert.deepEqual(reorderQueue(songs, 0.5, 2), songs);
 });
+
+test('queue persistence safely restores manualQueue', () => {
+  const serialized = serializeQueueState({
+    queue: songs,
+    queueIndex: 0,
+    manualQueue: [songs[1], { songKey: 'external', track: 'External' }],
+  });
+  const restored = restoreQueueState(serialized);
+  assert.equal(restored.manualQueue.length, 2);
+  assert.equal(restored.manualQueue[0].songKey, 'b');
+  assert.equal(restored.manualQueue[1].songKey, 'external');
+});

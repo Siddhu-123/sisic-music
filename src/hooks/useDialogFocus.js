@@ -26,6 +26,10 @@ export function useDialogFocus(active, onClose, { canClose = true } = {}) {
     const previousFocus = document.activeElement;
     const dialog = dialogRef.current;
     activeDialogs.push(dialog);
+    const prevBodyOverflow = document.body.style.overflow;
+    if (activeDialogs.length === 1) {
+      document.body.style.overflow = 'hidden';
+    }
     const focusable = () => [...(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || [])].filter(item => item.getClientRects().length > 0);
     (dialog?.querySelector('[data-dialog-autofocus]') || focusable()[0] || dialog)?.focus?.();
 
@@ -60,6 +64,9 @@ export function useDialogFocus(active, onClose, { canClose = true } = {}) {
       const wasTop = activeDialogs.at(-1) === dialog;
       const index = activeDialogs.lastIndexOf(dialog);
       if (index >= 0) activeDialogs.splice(index, 1);
+      if (activeDialogs.length === 0) {
+        document.body.style.overflow = prevBodyOverflow;
+      }
       if (wasTop && previousFocus?.isConnected) previousFocus.focus?.();
     };
   }, [active]);

@@ -1,6 +1,6 @@
 import { SlidersHorizontal, Timer } from 'lucide-react';
 
-export function PlaybackSettings({ player, onToggleQueue }) {
+export function PlaybackSettings({ player }) {
   const timer = player.sleepTimer;
   const sleepLabel = timer?.mode === 'track' ? 'End of track' : timer ? `${Math.ceil(player.sleepRemaining / 60)} min left` : 'Off';
   return <details className="playback-settings">
@@ -9,7 +9,6 @@ export function PlaybackSettings({ player, onToggleQueue }) {
     </summary>
     <div className="playback-settings__panel">
       <strong>Playback</strong>
-      <button className="panel-action-btn" onClick={event => { event.currentTarget.closest('details').open = false; onToggleQueue?.(); }}>Open queue</button>
       <label htmlFor="crossfade">Crossfade <span>{player.crossfadeSeconds ? `${player.crossfadeSeconds}s` : 'Off'}</span></label>
       <input id="crossfade" aria-label="Crossfade seconds" type="range" min="0" max="12" step="1"
         value={player.crossfadeSeconds} onChange={e => player.setCrossfade(Number(e.target.value))} />

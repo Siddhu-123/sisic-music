@@ -139,7 +139,7 @@ export function ExploreView({
           {activeMix ? (
             <div className="content-rail">{activeMix.songs.map(song => renderSong(song, activeMix.songs))}</div>
           ) : filteredSongs.length ? (
-            <div className="songs-grid explore-results-grid">{filteredSongs.slice(0, 48).map(song => renderSong(song, filteredSongs))}</div>
+            <div className="songs-grid explore-results-grid">{filteredSongs.slice(0, 48).map(song => renderSong(song, query.trim() ? null : filteredSongs, { isSearch: Boolean(query.trim()) }))}</div>
           ) : (
             <div className="empty-state explore-empty"><Music2 size={40} color="var(--text-muted)" /><h3>No matches</h3><p>Try clearing a mood, genre, or library filter.</p></div>
           )}
