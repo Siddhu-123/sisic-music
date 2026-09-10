@@ -60,6 +60,7 @@ export function Turntable({
   onPitchChange,
   onPitchRangeChange,
   onRpmChange,
+  showCrate = true,
 }) {
   const deckRef = useRef(null);
   const vinylRef = useRef(null);
@@ -634,6 +635,10 @@ export function Turntable({
         onDrop={handleDrop}
       >
         <div className="turntable__deck-label"><span>SISIC / DIRECT DRIVE</span><strong>VINYL MK.II</strong></div>
+        <div className="turntable__strobe" aria-hidden="true">
+          <span className="turntable__strobe-ring" />
+          <span className="turntable__strobe-lens" />
+        </div>
         <div className="turntable__platter-bed">
           <div className="turntable__platter-rim" aria-hidden="true" />
           <div
@@ -684,6 +689,12 @@ export function Turntable({
           <span className="turntable__headshell"><span className="turntable__stylus" /></span>
         </button>
 
+        <div className="turntable__speed-badge" aria-hidden="true">
+          <span className="turntable__speed-dot" />
+          <span>{rpm} RPM</span>
+          <small>Direct Drive</small>
+        </div>
+        <div className="turntable__deck-slogan" aria-hidden="true">GOOD MUSIC BRIGHTER DAYS</div>
         <div className="turntable__readout" aria-live="polite">{status}</div>
       </div>
 
@@ -710,26 +721,28 @@ export function Turntable({
         </label>
       </div>
 
-      <aside className="turntable__crate" aria-label="Vinyl crate">
-        <div className="turntable__crate-heading"><span>CRATE</span><small>click a record to load · drag the disc to switch</small></div>
-        <div className="turntable__crate-list">
-          {crateSongs.map(song => {
-            const key = song.songKey || song.id;
-            return (
-              <button
-                type="button"
-                className="turntable__jacket"
-                key={key}
-                onClick={() => onLoadSong?.(song)}
-              >
-                <span className="turntable__jacket-art">{song.track?.charAt(0) || '♪'}</span>
-                <span><strong>{song.track}</strong><small>{song.artist}</small></span>
-              </button>
-            );
-          })}
-          {!crateSongs.length && <p className="turntable__crate-empty">Queue another record to fill the crate.</p>}
-        </div>
-      </aside>
+      {showCrate && (
+        <aside className="turntable__crate" aria-label="Vinyl crate">
+          <div className="turntable__crate-heading"><span>CRATE</span><small>click a record to load · drag the disc to switch</small></div>
+          <div className="turntable__crate-list">
+            {crateSongs.map(song => {
+              const key = song.songKey || song.id;
+              return (
+                <button
+                  type="button"
+                  className="turntable__jacket"
+                  key={key}
+                  onClick={() => onLoadSong?.(song)}
+                >
+                  <span className="turntable__jacket-art">{song.track?.charAt(0) || '♪'}</span>
+                  <span><strong>{song.track}</strong><small>{song.artist}</small></span>
+                </button>
+              );
+            })}
+            {!crateSongs.length && <p className="turntable__crate-empty">Queue another record to fill the crate.</p>}
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

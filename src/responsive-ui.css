@@ -4,10 +4,11 @@
  * App.css contains the original visual layers. This file is the final,
  * component-oriented source of truth for responsive geometry, touch targets,
  * and interaction states while the legacy styles are retired incrementally.
+ * The expanded reference player is owned by player-reference.css, loaded last.
  */
 
 :root {
-  --sidebar-w: 292px;
+  --sidebar-w: 340px;
   --player-h: 92px;
   --mobile-nav-h: 68px;
   --text-main: var(--text);
@@ -163,12 +164,20 @@ select:focus-visible,
   color: var(--text);
 }
 
-.expanded-player__bg {
+:root[data-theme="light"] .expanded-player__bg {
   opacity: 1;
   background:
     radial-gradient(circle at 12% 12%, hsl(var(--expanded-player-hue, 210) 76% 84% / 0.58), transparent 30%),
     radial-gradient(circle at 86% 78%, hsl(var(--expanded-player-hue-secondary, 250) 62% 88% / 0.52), transparent 34%),
     linear-gradient(135deg, rgba(242, 244, 248, 0.98), rgba(224, 229, 238, 0.96));
+}
+
+:root[data-theme="dark"] .expanded-player__bg {
+  opacity: 1;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(56, 189, 248, 0.12), transparent 45%),
+    radial-gradient(circle at 82% 80%, rgba(99, 102, 241, 0.1), transparent 50%),
+    linear-gradient(145deg, #060913 0%, #0a0e1e 50%, #070a14 100%) !important;
 }
 
 .expanded-player__header {
@@ -188,7 +197,7 @@ select:focus-visible,
 }
 
 .expanded-player__layout {
-  grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.78fr);
+  grid-template-columns: minmax(460px, 1.15fr) minmax(340px, 1fr);
   align-items: start;
 }
 
@@ -467,7 +476,7 @@ select:focus-visible,
   min-height: calc(100dvh - var(--player-h) - 40px);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 768px) {
   .expanded-player__layout {
     grid-template-columns: 1fr;
     gap: 24px;
@@ -977,5 +986,173 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
   .delete-playlist-confirm-btn {
     min-height: 44px;
     padding: 10px 20px;
+  }
+}
+
+/* ==========================================================================
+   Responsive adjustments for TasteProfileModal & ExpandedPlayer
+   ========================================================================== */
+@media (max-width: 960px) {
+  .taste-vector-content-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .taste-metrics-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+  }
+  .expanded-player__layout {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .expanded-player__metadata {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .taste-profile-modal {
+    width: 95vw;
+    padding: 22px 18px;
+    border-radius: 22px;
+  }
+}
+
+@media (max-width: 640px) {
+  .taste-modal-header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .taste-modal-header-left {
+    flex: 1;
+    min-width: 0;
+  }
+  .taste-modal-header-right {
+    width: auto;
+    flex-shrink: 0;
+  }
+  .taste-header-decor,
+  .taste-header-quote {
+    display: none;
+  }
+  .taste-metrics-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .taste-export-banner {
+    flex-direction: column;
+    text-align: center;
+    gap: 14px;
+  }
+  .taste-export-btn {
+    width: 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+  .artist-cards-grid {
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+    gap: 8px;
+  }
+  .artist-card-art-wrap {
+    width: 52px;
+    height: 52px;
+  }
+  .taste-vector-chart-card {
+    padding: 16px 12px;
+  }
+  .vector-bars-container {
+    height: 120px;
+  }
+  .vector-y-axis {
+    font-size: 0.62rem;
+  }
+  .expanded-player__header {
+    padding: 12px 16px;
+  }
+  .expanded-crate-section {
+    margin-top: 20px;
+    padding-top: 16px;
+  }
+  .crate-card {
+    flex: 0 0 120px !important;
+  }
+  .turntable__deck-slogan {
+    display: none;
+  }
+  .turntable__strobe {
+    width: 20px;
+    height: 20px;
+    top: 10px;
+    left: auto;
+    right: 14px;
+  }
+  .turntable__strobe-lens {
+    width: 7px;
+    height: 7px;
+  }
+  .turntable__speed-badge {
+    bottom: 12px;
+    left: 14px;
+    padding: 2px 8px;
+    font-size: 0.68rem;
+  }
+}
+
+@media (max-width: 390px) {
+  .taste-profile-modal {
+    padding: 16px 10px;
+    border-radius: 16px;
+    width: 98vw;
+  }
+  .taste-modal-title {
+    font-size: 1.15rem;
+  }
+  .taste-target-icon {
+    width: 36px;
+    height: 36px;
+  }
+  .taste-metric-card {
+    padding: 12px 14px;
+  }
+  .metric-card-val {
+    font-size: 1.3rem;
+  }
+  .expanded-player__header .expanded-now-playing-badge {
+    padding: 4px 10px;
+    font-size: 0.65rem;
+  }
+  .expanded-player__header .icon-btn {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+  }
+  .expanded-controls .play-btn--large {
+    width: 56px !important;
+    height: 56px !important;
+  }
+  .expanded-controls .icon-btn {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (max-width: 320px) {
+  .taste-profile-modal {
+    padding: 12px 8px;
+  }
+  .taste-modal-title {
+    font-size: 1.05rem;
+  }
+  .artist-cards-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .taste-vector-chart-card {
+    padding: 12px 6px;
+    min-height: 160px;
+  }
+  .vector-bars-container {
+    height: 100px;
   }
 }

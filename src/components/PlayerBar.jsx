@@ -18,6 +18,7 @@ export function PlayerBar({
   onAddToQueue,
   onOpenEqualizer,
   onMoreLikeThis,
+  onSearchLibrary,
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const hue = player.currentSong ? (player.currentSong.track || 'S').charCodeAt(0) % 360 : 0;
@@ -125,6 +126,7 @@ export function PlayerBar({
           onAddToQueue={onAddToQueue}
           onOpenEqualizer={onOpenEqualizer}
           onMoreLikeThis={onMoreLikeThis}
+          onSearchLibrary={onSearchLibrary}
         />
       )}
     </div>

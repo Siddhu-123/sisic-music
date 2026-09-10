@@ -45,6 +45,7 @@ import {
 } from './services/downloadPolicy.js';
 import './App.css';
 import './responsive-ui.css';
+import './player-reference.css';
 
 const QueuePanel = lazy(() => import('./components/QueuePanel.jsx').then(module => ({ default: module.QueuePanel })));
 const ConstellationView = lazy(() => import('./components/views/ConstellationView.jsx').then(module => ({ default: module.ConstellationView })));
@@ -2290,6 +2291,11 @@ function App() {
         onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
         onOpenEqualizer={() => setIsEqOpen(true)}
         onMoreLikeThis={song => setRecommendationTarget(song)}
+        onSearchLibrary={query => {
+          setView(VIEWS.LIBRARY);
+          setSelectedPlaylistKey(null);
+          setSearchQuery(query);
+        }}
       />
       <ToastContainer toasts={toasts} />
 
