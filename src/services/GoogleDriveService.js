@@ -11,12 +11,10 @@ import { tokenExpiryFromResponse } from './driveAuth.js';
 import { getKnownDurationSeconds } from './downloadPolicy.js';
 import { getDriveAudioStreamUrl } from './driveStream.js';
 
-// drive.file limits writes to files created/opened by Sisic. The read-only
-// scope remains necessary because a configured Spotify export may predate the
-// app and therefore may not be visible through drive.file alone.
+// Full Drive access is required because the local worker and the browser may
+// create and update the shared index files through different OAuth clients.
 export const SCOPES = [
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive',
 ].join(' ');
 
 const TOKEN_STORAGE_KEY = 'sisic_access_token';

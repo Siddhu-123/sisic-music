@@ -44,10 +44,8 @@ test('findSongInIndex does not trust a stale non-audio Drive ID', async () => {
   assert.equal(result, null);
 });
 
-test('SCOPES avoids full Drive read/write access while retaining app writes and library reads', () => {
-  assert.ok(SCOPES.includes('https://www.googleapis.com/auth/drive.file'));
-  assert.ok(SCOPES.includes('https://www.googleapis.com/auth/drive.readonly'));
-  assert.ok(!SCOPES.split(' ').includes('https://www.googleapis.com/auth/drive'));
+test('SCOPES allows shared index reads and writes across OAuth clients', () => {
+  assert.equal(SCOPES, 'https://www.googleapis.com/auth/drive');
 });
 
 test('escapeDriveQuery sanitizes single quotes, backslashes, and control characters', () => {

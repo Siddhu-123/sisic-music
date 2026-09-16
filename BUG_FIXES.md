@@ -86,7 +86,7 @@ Authenticated Google Drive streaming and physical iPhone/Android lock-screen beh
 The development fixture is isolated from real accounts, generates local audio, and is excluded from the production entry. Start the server with dummy configuration:
 
 ```sh
-VITE_GOOGLE_CLIENT_ID=local-fixture VITE_SPOTIFY_JSON_FILE_ID=local-fixture VITE_DRIVE_FOLDER_ID=local-fixture npm run dev -- --host 127.0.0.1 --port 5178 --strictPort
+VITE_GOOGLE_CLIENT_ID=258871831982-4q33u89pllcra9lo0fe17tso28vk73o4.apps.googleusercontent.com VITE_SPOTIFY_JSON_FILE_ID=local-fixture VITE_DRIVE_FOLDER_ID=local-fixture npm run dev -- --host 127.0.0.1 --port 5178 --strictPort
 ```
 
 With Playwright and Chromium available, run `npm run test:browser`. If using an external Playwright installation or system Chrome, set `PLAYWRIGHT_PACKAGE` to its module path and `CHROME_PATH` to the Chrome executable. `PLAYER_TEST_URL` overrides the server URL and `PLAYER_TEST_OUTPUT` overrides the screenshot directory (default `/tmp/sisic-player-checks`).
