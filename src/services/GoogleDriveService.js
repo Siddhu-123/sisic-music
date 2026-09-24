@@ -10,6 +10,13 @@ import { cleanImportedFilename } from '../importIdentity.js';
 import { tokenExpiryFromResponse } from './driveAuth.js';
 import { getKnownDurationSeconds } from './downloadPolicy.js';
 import { getDriveAudioStreamUrl } from './driveStream.js';
+import {
+  isAuthWorkerConfigured,
+  getStoredRefreshToken,
+  exchangeCodeWithWorker,
+  refreshAccessTokenWithWorker,
+  clearStoredRefreshToken,
+} from './cloudflareAuth.js';
 
 // Full Drive access is required because the local worker and the browser may
 // create and update the shared index files through different OAuth clients.
@@ -322,6 +329,8 @@ export class GoogleDriveService {
     this.authRequired = false;
     this.tokenRequestPromise = null;
     this.tokenErrorCallback = null;
+    this.codeClient = null;
+    this.tokenRefreshPromise = null;
   }
 
   clearVolatileCaches() {
@@ -416,6 +425,17 @@ export class GoogleDriveService {
       console.error('Google Identity Services not loaded yet');
       return;
     }
+    if (isAuthWorkerConfigured() && window.google?.accounts?.oauth2?.initCodeClient) {
+      this.codeClient = window.google.accounts.oauth2.initCodeClient({
+        client_id: clientId,
+        scope: SCOPES,
+        ux_mode: 'popup',
+        callback: (resp) => {
+          if (resp.error) return;
+        },
+        error_callback: error => this.tokenErrorCallback?.(error),
+      });
+    }
     this.tokenClient = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: SCOPES,
@@ -427,13 +447,39 @@ export class GoogleDriveService {
     });
   }
 
+  async refreshTokenSilently() {
+    if (!isAuthWorkerConfigured()) return false;
+    const refreshToken = getStoredRefreshToken();
+    if (!refreshToken) return false;
+    if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
+
+    this.tokenRefreshPromise = (async () => {
+      try {
+        const data = await refreshAccessTokenWithWorker(refreshToken);
+        if (data.access_token) {
+          this._persistToken(data.access_token, tokenExpiryFromResponse(data));
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.warn('Silent token refresh failed:', err);
+        return false;
+      } finally {
+        this.tokenRefreshPromise = null;
+      }
+    })();
+
+    return this.tokenRefreshPromise;
+  }
+
+  logout() {
+    clearStoredRefreshToken();
+    this.requireAuthentication(new Error('User signed out.'));
+  }
+
   requestToken({ prompt } = {}) {
     if (this.tokenRequestPromise) return this.tokenRequestPromise;
     this.tokenRequestPromise = new Promise((resolve, reject) => {
-      if (!this.tokenClient) {
-        reject(new Error('Token client not initialized'));
-        return;
-      }
       let settled = false;
       const finish = (callback, value) => {
         if (settled) return;
@@ -441,6 +487,40 @@ export class GoogleDriveService {
         this.tokenErrorCallback = null;
         callback(value);
       };
+
+      if (isAuthWorkerConfigured() && this.codeClient) {
+        this.codeClient.callback = async (resp) => {
+          if (resp.error) {
+            finish(reject, new Error(resp.error_description || resp.error));
+            return;
+          }
+          const code = String(resp.code || '').trim();
+          if (!code) {
+            finish(reject, new Error('Google sign-in did not return an authorization code.'));
+            return;
+          }
+          try {
+            const data = await exchangeCodeWithWorker(code);
+            this._persistToken(data.access_token, tokenExpiryFromResponse(data));
+            finish(resolve, data.access_token);
+          } catch (err) {
+            finish(reject, err);
+          }
+        };
+        this.tokenErrorCallback = error => {
+          const message = error?.type === 'popup_closed'
+            ? 'Google sign-in was closed before it finished.'
+            : 'Google sign-in could not open. Allow pop-ups and try again.';
+          finish(reject, new Error(message));
+        };
+        this.codeClient.requestCode();
+        return;
+      }
+
+      if (!this.tokenClient) {
+        finish(reject, new Error('Token client not initialized'));
+        return;
+      }
       this.tokenClient.callback = (resp) => {
         if (resp.error) {
           finish(reject, new Error(resp.error_description || resp.error));
@@ -473,6 +553,10 @@ export class GoogleDriveService {
 
   async getValidAccessToken() {
     if (this.isAuthenticated) return this.accessToken;
+    if (isAuthWorkerConfigured() && getStoredRefreshToken()) {
+      const refreshed = await this.refreshTokenSilently();
+      if (refreshed && this.isAuthenticated) return this.accessToken;
+    }
     throw this.requireAuthentication(new Error('Google Drive authorization is required.'));
   }
 
@@ -481,9 +565,21 @@ export class GoogleDriveService {
   }
 
   async authorizedFetch(url, options = {}, label = 'Drive request') {
+    let token = await this.getValidAccessToken();
     const headers = new Headers(options.headers || {});
-    headers.set('Authorization', `Bearer ${await this.getValidAccessToken()}`);
-    const resp = await fetch(url, { ...options, headers });
+    headers.set('Authorization', `Bearer ${token}`);
+    let resp = await fetch(url, { ...options, headers });
+    if (resp.status === 401 && isAuthWorkerConfigured() && getStoredRefreshToken()) {
+      try {
+        const refreshed = await this.refreshTokenSilently();
+        if (refreshed) {
+          token = this.accessToken;
+          headers.set('Authorization', `Bearer ${token}`);
+          resp = await fetch(url, { ...options, headers });
+        }
+      // eslint-disable-next-line no-empty
+      } catch {}
+    }
     if (resp.status === 401) {
       throw this.requireAuthentication(new Error(`${label} needs Google Drive reconnection.`));
     }

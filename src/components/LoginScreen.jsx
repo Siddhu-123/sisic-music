@@ -41,8 +41,8 @@ export function LoginScreen({ onLogin, error, busy = false, setupStatus = {} }) 
               Enable Drive API <ExternalLink size={13} />
             </a>
           </div>
-          <p className="setup-card__permissions"><strong>Drive permission:</strong> the current browser flow requests read-only access so it can find the existing Spotify export, plus app-managed file access for Sisic indexes and Mac-worker source preparation. The active token stays in this browser tab's session storage, is cleared when the tab closes, and is never stored in localStorage.</p>
-          <p className="setup-card__automation"><strong>Automated:</strong> Google sign-in, Drive authorization, library sync, and Mac-worker source preparation. <strong>One-time manual step:</strong> Google Cloud OAuth and the three build variables.</p>
+          <p className="setup-card__permissions"><strong>Session mode:</strong> {setupStatus.hasAuthWorker ? 'Cloudflare Auth Relay active — background token refresh keeps you logged in across refreshes.' : 'Client-only session — tokens expire after 1 hour.'}</p>
+          <p className="setup-card__automation"><strong>Automated:</strong> Google sign-in, Drive authorization, library sync, and Mac-worker source preparation. <strong>One-time manual step:</strong> Google Cloud OAuth and build variables.</p>
           {missing.length > 0 && <p className="setup-card__missing">Missing from this build: {missing.join(', ')}</p>}
         </div>
         <p className="login-hint">Connect to your Google Drive music library</p>

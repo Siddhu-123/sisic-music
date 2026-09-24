@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { driveService } from '../services/GoogleDriveService';
 import { workerAuthMessageAction } from '../services/driveAuth';
 import { syncLibraryToDb, requestPersistentStorage } from '../db';
+import { isAuthWorkerConfigured, getStoredRefreshToken } from '../services/cloudflareAuth';
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
@@ -61,6 +62,8 @@ export function getAuthSetupStatus() {
     hasClientId: Boolean(CLIENT_ID),
     hasDriveFolder: Boolean(DRIVE_FOLDER_ID),
     hasLibraryFile: Boolean(SPOTIFY_JSON_FILE_ID),
+    hasAuthWorker: isAuthWorkerConfigured(),
+    hasStoredRefreshToken: Boolean(getStoredRefreshToken()),
   };
 }
 
@@ -70,22 +73,34 @@ function missingConfigMessage(missing = getMissingConfig()) {
 
 export function useAuth() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => driveService.isAuthenticated);
-  const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || DEV_UI_PREVIEW);
+  const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || DEV_UI_PREVIEW || Boolean(getStoredRefreshToken()));
   const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
   const [error, setError] = useState(() => missingConfigMessage()
-    || ((driveService.hasAuthorizedSession || DEV_UI_PREVIEW) && !driveService.isAuthenticated ? RECONNECT_MESSAGE : ''));
+    || ((driveService.hasAuthorizedSession || DEV_UI_PREVIEW || Boolean(getStoredRefreshToken())) && !driveService.isAuthenticated ? RECONNECT_MESSAGE : ''));
   const hasSyncedOnMount = useRef(false);
 
   useEffect(() => {
     const missing = getMissingConfig();
     if (missing.length > 0) return undefined;
 
-    if (!driveService.hasAuthorizedSession) return undefined;
+    const hasStoredRefresh = isAuthWorkerConfigured() && Boolean(getStoredRefreshToken());
+    if (!driveService.hasAuthorizedSession && !hasStoredRefresh) return undefined;
     let cancelled = false;
     const init = async () => {
       try {
+        if (hasStoredRefresh && !driveService.isAuthenticated) {
+          const refreshed = await driveService.refreshTokenSilently();
+          if (refreshed && !cancelled) {
+            setIsAuthenticated(true);
+            setHasAuthorizedSession(true);
+            setError('');
+            driveService.syncTokenToServiceWorker();
+            return;
+          }
+        }
+
         await loadGoogleIdentityServices();
         if (cancelled) return;
         driveService.initTokenClient(CLIENT_ID);
@@ -152,8 +167,19 @@ export function useAuth() {
   useEffect(() => {
     if (!isAuthenticated || !driveService.tokenExpiry) return undefined;
 
-    const delay = Math.max(0, driveService.tokenExpiry - Date.now() + 250);
-    const timer = window.setTimeout(() => {
+    const refreshLeadTimeMs = isAuthWorkerConfigured() ? 60 * 1000 : 0;
+    const timeUntilExpiry = driveService.tokenExpiry - Date.now();
+    const delay = Math.max(0, timeUntilExpiry - refreshLeadTimeMs + 250);
+
+    const timer = window.setTimeout(async () => {
+      if (isAuthWorkerConfigured() && getStoredRefreshToken()) {
+        const refreshed = await driveService.refreshTokenSilently();
+        if (refreshed) {
+          setIsAuthenticated(true);
+          setError('');
+          return;
+        }
+      }
       if (!driveService.isAuthenticated) {
         driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
       }
