@@ -1,9 +1,12 @@
-import { EQ_FREQUENCIES, EQ_PRESETS } from './audioGraph.js';
+import { AudioGraphManager } from './audioGraph.js';
 
 export const VINYL_PITCH_LIMITS = {
   narrow: 0.08,
   wide: 0.16,
 };
+
+const NATIVE_MIN_PLAYBACK_RATE = 0.0625;
+const MOTOR_RATE_RAMP_MS = 240;
 
 export function clampAudioRate(rate, minimum = -8, maximum = 8) {
   return Math.max(minimum, Math.min(maximum, Number(rate) || 0));
@@ -24,60 +27,70 @@ export function vinylBrakeRateAtTime(initialRate, elapsedMs, timeConstantMs = 15
   return Math.max(0, exponentialInertiaVelocity(Math.max(0, Number(initialRate) || 0), 0, elapsedMs, timeConstantMs));
 }
 
-function copyReversedChannel(sourceChannel, targetChannel) {
-  for (let index = 0; index < sourceChannel.length; index++) {
-    targetChannel[index] = sourceChannel[sourceChannel.length - index - 1];
-  }
+function nowMs() {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }
 
-export function reverseSamples(samples) {
-  const reversed = new Float32Array(samples.length);
-  copyReversedChannel(samples, reversed);
-  return reversed;
-}
-
-function safeCancel(node) {
-  try {
-    node?.disconnect?.();
-  } catch {
-    // A node can already be disconnected when a source is replaced.
-  }
+function abortError() {
+  return typeof DOMException === 'function'
+    ? new DOMException('Audio source was replaced.', 'AbortError')
+    : Object.assign(new Error('Audio source was replaced.'), { name: 'AbortError' });
 }
 
 export class VinylAudioEngine {
   constructor() {
-    this.audioContext = null;
-    this.buffer = null;
-    this.reversedBuffer = null;
-    this.sourceNode = null;
-    this.sourceGeneration = 0;
-    this.sourceStartedAt = 0;
-    this.sourceStartPosition = 0;
-    this.sourceDirection = 1;
+    this.graph = new AudioGraphManager();
+    this.pendingLoadCancel = null;
+    this.playRequest = 0;
+    this.playRequested = false;
+    this.pendingSeek = null;
+    this.element = typeof Audio === 'function' ? new Audio() : null;
+    this.sourceRequest = 0;
     this.duration = 0;
     this.position = 0;
     this.currentRate = 0;
-    this.motorRate = 1;
+    this.rateRampFrame = null;
     this.rpm = 45;
     this.pitchModifier = 1;
     this.volume = 1;
     this.isPlaying = false;
     this.isStopping = false;
-    this.brakeFrame = null;
     this.isScratching = false;
     this.wasPlayingBeforeScratch = false;
     this.needleLifted = false;
     this.listeners = new Map();
+    this.brakeFrame = null;
     this.timeUpdateTimer = null;
-    this.noiseSource = null;
-    this.noiseGain = null;
-    this.noiseFilter = null;
-    this.masterGainNode = null;
-    this.needleGainNode = null;
-    this.filterNodes = [];
-    this.analyserNode = null;
-    this.currentPreset = 'flat';
-    this.currentGains = [...EQ_PRESETS.flat.gains];
+    this.scratchTimer = null;
+    this.scratchLastAt = 0;
+    this.scratchPosition = 0;
+    this.nativePauseSuppressed = false;
+
+    this.handleLoadedMetadata = this.handleLoadedMetadata.bind(this);
+    this.handleDurationChange = this.handleDurationChange.bind(this);
+    this.handleNativePlay = this.handleNativePlay.bind(this);
+    this.handleNativePause = this.handleNativePause.bind(this);
+    this.handleNativeTimeUpdate = this.handleNativeTimeUpdate.bind(this);
+    this.handleNativeEnded = this.handleNativeEnded.bind(this);
+    this.handleNativeError = this.handleNativeError.bind(this);
+
+    if (this.element) {
+      this.element.preload = 'auto';
+      this.element.crossOrigin = 'anonymous';
+      this.element.preservesPitch = false;
+      this.element.mozPreservesPitch = false;
+      this.element.webkitPreservesPitch = false;
+      this.element.addEventListener('loadedmetadata', this.handleLoadedMetadata);
+      this.element.addEventListener('durationchange', this.handleDurationChange);
+      this.element.addEventListener('play', this.handleNativePlay);
+      this.element.addEventListener('pause', this.handleNativePause);
+      this.element.addEventListener('timeupdate', this.handleNativeTimeUpdate);
+      this.element.addEventListener('ended', this.handleNativeEnded);
+      this.element.addEventListener('error', this.handleNativeError);
+      for (const type of ['waiting', 'playing', 'seeking', 'seeked', 'progress', 'stalled']) {
+        this.element.addEventListener(type, () => this._emit(type));
+      }
+    }
   }
 
   addEventListener(type, callback) {
@@ -101,8 +114,7 @@ export class VinylAudioEngine {
   }
 
   get currentTime() {
-    this._updatePosition();
-    return this.position;
+    return this.isScratching && this.currentRate < 0 ? this.position : this._nativeTime();
   }
 
   set currentTime(value) {
@@ -110,258 +122,278 @@ export class VinylAudioEngine {
   }
 
   get src() {
-    return this.buffer ? 'vinyl-buffer' : '';
+    return this.element?.currentSrc || this.element?.src || '';
+  }
+
+  get error() {
+    return this.element?.error || null;
+  }
+
+  get currentGains() {
+    return [...this.graph.currentGains];
   }
 
   getAttribute(attribute) {
-    return attribute === 'src' ? this.src : '';
+    return this.element?.getAttribute?.(attribute) || '';
   }
 
   ensureContext() {
-    if (typeof window === 'undefined') return null;
-    if (!this.audioContext) {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContextClass) return null;
-      this.audioContext = new AudioContextClass();
-      this._createOutputGraph();
-    }
-    if (this.audioContext.state === 'suspended') this.audioContext.resume().catch(() => {});
-    return this.audioContext;
+    if (!this.element) return null;
+    // Keep ordinary playback on the native media path, including in the background.
+    const context = this.graph.attachAudioElement(this.element);
+    this._applyOutputVolume();
+    if (context?.state === 'suspended') context.resume().catch(() => {});
+    return context;
   }
 
-  _createOutputGraph() {
-    const context = this.audioContext;
-    this.masterGainNode = context.createGain();
-    this.masterGainNode.gain.value = this.volume;
-    this.needleGainNode = context.createGain();
-    this.needleGainNode.gain.value = 1;
-    this.analyserNode = context.createAnalyser();
-    this.analyserNode.fftSize = 128;
-    this.analyserNode.smoothingTimeConstant = 0.8;
-
-    this.filterNodes = EQ_FREQUENCIES.map((frequency, index) => {
-      const filter = context.createBiquadFilter();
-      filter.frequency.value = frequency;
-      filter.type = index === 0 ? 'lowshelf' : index === EQ_FREQUENCIES.length - 1 ? 'highshelf' : 'peaking';
-      if (filter.type === 'peaking') filter.Q.value = 1;
-      filter.gain.value = this.currentGains[index] || 0;
-      return filter;
-    });
-
-    let currentNode = this.needleGainNode;
-    for (const filter of this.filterNodes) {
-      currentNode.connect(filter);
-      currentNode = filter;
+  _applyOutputVolume() {
+    if (!this.element) return;
+    const volume = this.needleLifted ? 0 : this.volume;
+    this.element.muted = volume === 0;
+    if (this.graph.isAttachedTo(this.element)) {
+      this.element.volume = 1;
+      this.graph.setVolume(volume);
+    } else {
+      this.element.volume = volume;
     }
-    currentNode.connect(this.masterGainNode);
-    this.masterGainNode.connect(this.analyserNode);
-    this.analyserNode.connect(context.destination);
-    this._createVinylNoise();
   }
 
-  async loadBlob(blob) {
-    if (!blob) throw new Error('No audio data was provided.');
-    const context = this.ensureContext();
-    if (!context) throw new Error('This browser does not support the Web Audio API.');
-    const data = await blob.arrayBuffer();
-    const decoded = await context.decodeAudioData(data.slice(0));
-    this._stopSource();
-    this._stopTicker();
-    this._cancelBrake();
-    this.buffer = decoded;
-    this.reversedBuffer = this._createReversedBuffer(decoded);
-    this.duration = decoded.duration;
-    this.position = 0;
-    this.currentRate = 0;
-    this.isPlaying = false;
-    this.isScratching = false;
-    this.needleLifted = false;
-    this._setNeedleGain(false);
+  _nativeTime() {
+    const value = Number(this.element?.currentTime);
+    return Number.isFinite(value) ? value : this.position;
+  }
+
+  _syncDuration() {
+    const nextDuration = Number(this.element?.duration);
+    this.duration = Number.isFinite(nextDuration) && nextDuration > 0 ? nextDuration : 0;
+    this.position = this._nativeTime();
+  }
+
+  handleLoadedMetadata() {
+    this._syncDuration();
+    if (this.pendingSeek != null) { const position = this.pendingSeek; this.pendingSeek = null; this.seek(position); }
     this._emit('durationchange');
     this._emit('timeupdate');
-    return decoded;
   }
 
-  _createReversedBuffer(buffer) {
-    const context = this.audioContext;
-    const reversed = context.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
-    for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-      copyReversedChannel(buffer.getChannelData(channel), reversed.getChannelData(channel));
-    }
-    return reversed;
+  handleDurationChange() {
+    this._syncDuration();
+    this._emit('durationchange');
   }
 
-  _createVinylNoise() {
-    const context = this.audioContext;
-    const sampleRate = context.sampleRate || 44100;
-    const length = Math.round(sampleRate * 8);
-    const noiseBuffer = context.createBuffer(1, length, sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    let b0 = 0;
-    let b1 = 0;
-    let b2 = 0;
-    let b3 = 0;
-    let b4 = 0;
-    let b5 = 0;
-    let b6 = 0;
-    for (let index = 0; index < length; index++) {
-      const white = (Math.random() * 2) - 1;
-      b0 = (0.99886 * b0) + (white * 0.0555179);
-      b1 = (0.99332 * b1) + (white * 0.0750759);
-      b2 = (0.96900 * b2) + (white * 0.1538520);
-      b3 = (0.86650 * b3) + (white * 0.3104856);
-      b4 = (0.55000 * b4) + (white * 0.5329522);
-      b5 = (-0.7616 * b5) - (white * 0.0168980);
-      const pink = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + (white * 0.5362)) * 0.08;
-      b6 = white * 0.115926;
-      const click = Math.random() < 0.0018 ? (Math.random() * 2 - 1) * 0.6 : 0;
-      data[index] = pink + click;
-    }
-
-    this.noiseFilter = context.createBiquadFilter();
-    this.noiseFilter.type = 'highpass';
-    this.noiseFilter.frequency.value = 1450;
-    this.noiseGain = context.createGain();
-    this.noiseGain.gain.value = 0.018;
-    this.noiseFilter.connect(this.noiseGain);
-    this.noiseGain.connect(this.masterGainNode);
-    this.noiseBuffer = noiseBuffer;
+  handleNativePlay() {
+    if (!this.playRequested && !this.isScratching) { this.element?.pause(); return; }
+    if (this.isStopping) this._cancelBrake();
+    if (this.isPlaying) return;
+    this.isPlaying = true;
+    this._startTicker();
+    this._emit('play');
   }
 
-  _startNoise() {
-    if (this.noiseSource || !this.noiseBuffer) return;
-    const source = this.audioContext.createBufferSource();
-    source.buffer = this.noiseBuffer;
-    source.loop = true;
-    source.connect(this.noiseFilter);
-    source.start();
-    this.noiseSource = source;
-  }
-
-  _stopNoise() {
-    if (!this.noiseSource) return;
-    try { this.noiseSource.stop(); } catch {
-      // The loop may already have ended during context teardown.
-    }
-    safeCancel(this.noiseSource);
-    this.noiseSource = null;
-  }
-
-  triggerNeedleDrop({ lifted = false } = {}) {
-    const context = this.ensureContext();
-    if (!context || !this.masterGainNode) return;
-    const now = context.currentTime;
-    const oscillator = context.createOscillator();
-    const bodyGain = context.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(lifted ? 82 : 120, now);
-    oscillator.frequency.exponentialRampToValueAtTime(lifted ? 46 : 54, now + 0.12);
-    bodyGain.gain.setValueAtTime(0.0001, now);
-    bodyGain.gain.exponentialRampToValueAtTime(lifted ? 0.04 : 0.12, now + 0.006);
-    bodyGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
-    oscillator.connect(bodyGain);
-    bodyGain.connect(this.masterGainNode);
-    oscillator.start(now);
-    oscillator.stop(now + 0.2);
-  }
-
-  _setNeedleGain(lifted) {
-    if (!this.needleGainNode || !this.audioContext) return;
-    const now = this.audioContext.currentTime;
-    this.needleGainNode.gain.cancelScheduledValues(now);
-    this.needleGainNode.gain.setTargetAtTime(lifted ? 0.0001 : 1, now, 0.025);
-  }
-
-  setNeedleLifted(lifted) {
-    const next = Boolean(lifted);
-    if (next === this.needleLifted) return;
-    this.needleLifted = next;
-    this._setNeedleGain(next);
-    this.triggerNeedleDrop({ lifted: next });
-  }
-
-  _updatePosition() {
-    if (!this.isPlaying || !this.sourceNode || !this.audioContext) return this.position;
-    const elapsed = Math.max(0, this.audioContext.currentTime - this.sourceStartedAt);
-    this.position = Math.max(0, Math.min(this.duration, this.sourceStartPosition + (elapsed * this.currentRate)));
-    return this.position;
-  }
-
-  _stopSource() {
-    this.sourceGeneration += 1;
-    if (!this.sourceNode) return;
-    this.sourceNode.onended = null;
-    try { this.sourceNode.stop(); } catch {
-      // Stopping a source twice is harmless and expected during seek/scratch.
-    }
-    safeCancel(this.sourceNode);
-    this.sourceNode = null;
-  }
-
-  _cancelBrake() {
-    if (this.brakeFrame != null && typeof window !== 'undefined') window.cancelAnimationFrame(this.brakeFrame);
-    this.brakeFrame = null;
-    this.isStopping = false;
-  }
-
-  _finishPause() {
-    this._updatePosition();
-    this._cancelBrake();
+  handleNativePause() {
+    if (!this.element?.paused) return;
+    if (this.nativePauseSuppressed || this.isStopping || this.isScratching || !this.isPlaying) return;
     this.isPlaying = false;
-    this._stopSource();
+    this.currentRate = 0;
     this._stopTicker();
-    this._stopNoise();
     this._emit('pause');
+  }
+
+  handleNativeTimeUpdate() {
+    if (!(this.isScratching && this.currentRate < 0)) {
+      this.position = this._nativeTime();
+    }
     this._emit('timeupdate');
   }
 
-  _scheduleSource() {
-    if (!this.isPlaying || !this.buffer || !this.audioContext || Math.abs(this.currentRate) < 0.002) {
-      this._stopSource();
+  handleNativeEnded() {
+    this.playRequested = false;
+    this._cancelRateRamp();
+    this._cancelBrake();
+    this._syncDuration();
+    this.position = this.duration || this._nativeTime();
+    this.isPlaying = false;
+    this.isStopping = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
+    this.currentRate = 0;
+    this._stopScratchTicker();
+    this._stopTicker();
+    this._emit('timeupdate');
+    this._emit('ended');
+  }
+
+  handleNativeError() {
+    if (!this.element?.error) return;
+    this.playRequested = false;
+    this._cancelRateRamp();
+    this._cancelBrake();
+    this.isPlaying = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
+    this.currentRate = 0;
+    this._stopScratchTicker();
+    this._stopTicker();
+    const nativeError = this.element?.error;
+    this._emit('error', {
+      code: nativeError?.code || 0,
+      message: nativeError?.message || '',
+      sourceUrl: this.src,
+    });
+  }
+
+  _releaseCurrentSource() {
+    this.playRequest += 1;
+    this.playRequested = false;
+    this.pendingLoadCancel?.();
+    this.pendingSeek = null;
+    this.needleLifted = false;
+    this.graph.setFade(1);
+    this._stopScratchTicker();
+    this._stopTicker();
+    this._cancelBrake();
+    this._cancelRateRamp();
+    this.isPlaying = false;
+    this.isStopping = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
+    this.currentRate = 0;
+
+    if (this.element) {
+      this.nativePauseSuppressed = true;
+      this.element.pause();
+      this.element.removeAttribute('src');
+      this.element.load();
+      this.nativePauseSuppressed = false;
+    }
+    this.duration = 0;
+    this.position = 0;
+  }
+
+  async _loadSource(url) {
+    if (!this.element) throw new Error('Audio playback is unavailable in this environment.');
+    const nextUrl = String(url || '').trim();
+    if (!nextUrl) throw new Error('No audio source was provided.');
+
+    const requestId = ++this.sourceRequest;
+    this._releaseCurrentSource();
+    this.element.src = nextUrl;
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (this.pendingLoadCancel === cancel) this.pendingLoadCancel = null;
+        this.element.removeEventListener('loadedmetadata', ready);
+        this.element.removeEventListener('canplay', ready);
+        this.element.removeEventListener('error', failed);
+        callback(value);
+      };
+      const ready = () => {
+        if (requestId !== this.sourceRequest) {
+          finish(reject, abortError());
+          return;
+        }
+        this._syncDuration();
+        finish(resolve, this);
+      };
+      const cancel = () => finish(reject, abortError());
+      this.pendingLoadCancel = cancel;
+      const failed = () => finish(reject, new Error('The audio stream could not be loaded.'));
+      const timeout = setTimeout(() => finish(reject, new Error('The audio stream timed out.')), 15000);
+      this.element.addEventListener('loadedmetadata', ready);
+      this.element.addEventListener('canplay', ready);
+      this.element.addEventListener('error', failed);
+      this.element.load();
+      if (this.element.readyState >= 1) ready();
+    }).catch(error => {
+      if (requestId === this.sourceRequest) this._releaseCurrentSource();
+      throw error;
+    });
+
+    return this;
+  }
+
+  loadUrl(url) {
+    return this._loadSource(url);
+  }
+
+  _nativePlaybackRate(rate) {
+    if (!this.element) return;
+    const magnitude = Math.abs(Number(rate) || 0);
+    if (magnitude < 0.002) return;
+    try {
+      this.element.playbackRate = Math.max(NATIVE_MIN_PLAYBACK_RATE, magnitude);
+    } catch {
+      // Browsers may reject a rate while a source is changing.
+    }
+  }
+
+  _cancelRateRamp() {
+    if (this.rateRampFrame == null) return;
+    if (typeof window !== 'undefined' && typeof this.rateRampFrame === 'number') {
+      window.cancelAnimationFrame(this.rateRampFrame);
+    } else {
+      clearTimeout(this.rateRampFrame);
+    }
+    this.rateRampFrame = null;
+  }
+
+  _rampPlaybackRate(targetRate) {
+    const target = clampAudioRate(targetRate);
+    if (!this.isPlaying || this.isScratching || !this.element) {
+      this._setPlaybackRate(target);
       return;
     }
-    this._stopSource();
-    const direction = this.currentRate < 0 ? -1 : 1;
-    const sourceBuffer = direction < 0 ? this.reversedBuffer : this.buffer;
-    const offset = direction < 0 ? this.duration - this.position : this.position;
-    if (!sourceBuffer || offset >= this.duration - 0.001 || offset < 0) return;
-    const source = this.audioContext.createBufferSource();
-    const generation = this.sourceGeneration;
-    source.buffer = sourceBuffer;
-    source.playbackRate.value = Math.abs(this.currentRate);
-    source.connect(this.needleGainNode);
-    source.onended = () => {
-      if (generation !== this.sourceGeneration || !this.isPlaying) return;
-      this._updatePosition();
-      this.position = this.currentRate < 0 ? 0 : this.duration;
-      this._cancelBrake();
-      this.isPlaying = false;
-      this._stopTicker();
-      this._stopNoise();
-      this.sourceNode = null;
-      this._emit('ended');
+
+    this._cancelRateRamp();
+    const start = Math.abs(Number(this.element.playbackRate) || Math.abs(this.currentRate) || 0);
+    if (Math.abs(start - Math.abs(target)) < 0.001) {
+      this.currentRate = target;
+      this._nativePlaybackRate(target);
+      return;
+    }
+
+    const startedAt = nowMs();
+    const tick = now => {
+      if (!this.isPlaying || this.isScratching || this.isStopping || !this.element) {
+        this.rateRampFrame = null;
+        return;
+      }
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / MOTOR_RATE_RAMP_MS));
+      const eased = progress * progress * (3 - (2 * progress));
+      const nextRate = start + ((Math.abs(target) - start) * eased);
+      this.currentRate = target < 0 ? -nextRate : nextRate;
+      this._nativePlaybackRate(nextRate);
+      if (progress >= 1) {
+        this.currentRate = target;
+        this._nativePlaybackRate(target);
+        this.rateRampFrame = null;
+        return;
+      }
+      this.rateRampFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+        ? window.requestAnimationFrame(tick)
+        : setTimeout(() => tick(nowMs()), 16);
     };
-    source.start(0, Math.max(0, offset));
-    this.sourceNode = source;
-    this.sourceStartedAt = this.audioContext.currentTime;
-    this.sourceStartPosition = this.position;
-    this.sourceDirection = direction;
+
+    this.rateRampFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame(tick)
+      : setTimeout(() => tick(nowMs()), 16);
   }
 
   _setPlaybackRate(rate) {
+    this.position = this._nativeTime();
     const nextRate = clampAudioRate(rate);
-    this._updatePosition();
-    const previousRate = this.currentRate;
     this.currentRate = nextRate;
-    if (!this.isPlaying || !this.buffer) return;
-    const directionChanged = previousRate !== 0 && nextRate !== 0 && Math.sign(previousRate) !== Math.sign(nextRate);
-    if (Math.abs(nextRate) < 0.002 || directionChanged || !this.sourceNode) {
-      this._scheduleSource();
+    if (this.isScratching || !this.isPlaying) return;
+    if (Math.abs(nextRate) < 0.002) {
+      this.nativePauseSuppressed = true;
+      this.element?.pause();
+      this.nativePauseSuppressed = false;
       return;
     }
-    this.sourceStartedAt = this.audioContext.currentTime;
-    this.sourceStartPosition = this.position;
-    this.sourceNode.playbackRate.setTargetAtTime(Math.abs(nextRate), this.audioContext.currentTime, 0.012);
+    this._nativePlaybackRate(nextRate);
   }
 
   get targetMotorRate() {
@@ -374,79 +406,142 @@ export class VinylAudioEngine {
 
   setRpm(rpm) {
     this.rpm = Number(rpm) === 33 ? 33 : 45;
-    if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
+    if (!this.isScratching) {
+      if (this.isPlaying) this._rampPlaybackRate(this.targetMotorRate);
+      else this._setPlaybackRate(this.targetMotorRate);
+    }
   }
 
   setPitchModifier(modifier) {
     this.pitchModifier = Math.max(0.84, Math.min(1.16, Number(modifier) || 1));
-    if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
+    if (!this.isScratching) {
+      if (this.isPlaying) this._rampPlaybackRate(this.targetMotorRate);
+      else this._setPlaybackRate(this.targetMotorRate);
+    }
   }
 
   beginScratch({ resume = this.isPlaying } = {}) {
     if (this.isStopping) this._cancelBrake();
-    this._updatePosition();
+    this._cancelRateRamp();
+    this.position = this._nativeTime();
+    this.scratchPosition = this.position;
     this.isScratching = true;
-    this.wasPlayingBeforeScratch = Boolean(resume);
-    if (this.wasPlayingBeforeScratch && this.isPlaying) this._setPlaybackRate(0);
+    this.wasPlayingBeforeScratch = Boolean(resume && this.isPlaying);
+    this.currentRate = 0;
+    if (this.wasPlayingBeforeScratch) {
+      // Stop exactly at the hand position. setScratchAngularVelocity starts
+      // the native decoder again as soon as the hand moves.
+      this.nativePauseSuppressed = true;
+      this.element?.pause();
+      this.nativePauseSuppressed = false;
+      this._startScratchTicker();
+    }
   }
 
   setScratchAngularVelocity(angularVelocity) {
-    if (!this.isScratching || !this.wasPlayingBeforeScratch) return;
-    this._setPlaybackRate(playbackRateFromAngularVelocity(angularVelocity, this.nominalAngularVelocity, this.pitchModifier));
+    if (!this.isScratching) return;
+    // The hand controls the platter directly. The pitch modifier is already
+    // reflected in the motor's physical target, so applying it here too
+    // would make scratch audio run at pitch squared during release inertia.
+    this.currentRate = playbackRateFromAngularVelocity(angularVelocity, this.nominalAngularVelocity);
+    if (!this.wasPlayingBeforeScratch) return;
+    const magnitude = Math.abs(this.currentRate);
+    if (magnitude < 0.002) {
+      this.nativePauseSuppressed = true;
+      this.element?.pause();
+      this.nativePauseSuppressed = false;
+    } else {
+      // Native media has no portable reverse-playback support. Forward
+      // motion is audible at the hand speed; reverse motion is represented
+      // by a low forward decoder rate plus a controlled backwards seek.
+      this._nativePlaybackRate(this.currentRate < 0 ? NATIVE_MIN_PLAYBACK_RATE : magnitude);
+      if (this.element?.paused) this.element.play().catch(() => {});
+    }
+    this._startScratchTicker();
   }
 
   endScratch() {
     const resume = this.wasPlayingBeforeScratch;
     this.isScratching = false;
     this.wasPlayingBeforeScratch = false;
-    if (resume && this.isPlaying) this._setPlaybackRate(this.targetMotorRate);
-    else this.currentRate = 0;
+    this._stopScratchTicker();
+    if (resume && this.isPlaying) {
+      this.currentRate = this.targetMotorRate;
+      this._nativePlaybackRate(this.currentRate);
+      if (this.element?.paused) this.element.play().catch(() => {});
+    } else {
+      this.currentRate = 0;
+    }
   }
 
   seek(seconds) {
-    if (!this.buffer) return;
-    this._updatePosition();
-    this.position = Math.max(0, Math.min(this.duration, Number(seconds) || 0));
-    if (this.isPlaying) this._scheduleSource();
+    if (!this.element || !this.src) return;
+    this._syncDuration();
+    this.position = Math.max(0, Math.min(this.duration || Number.MAX_SAFE_INTEGER, Number(seconds) || 0));
+    this.scratchPosition = this.position;
+    if (this.element.readyState < 1) { this.pendingSeek = this.position; return; }
+    this.pendingSeek = null;
+    try {
+      this.element.currentTime = this.position;
+    } catch {
+      this.pendingSeek = this.position;
+    }
     this._emit('timeupdate');
   }
 
   async play() {
-    if (!this.buffer) throw new Error('Load a track before pressing play.');
-    const context = this.ensureContext();
-    if (!context) throw new Error('This browser does not support the Web Audio API.');
-    if (this.position >= this.duration - 0.01) this.position = 0;
-    if (this.audioContext.state === 'suspended') await this.audioContext.resume();
-    if (this.isStopping) {
-      this._cancelBrake();
-      if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
-      this._startTicker();
-      this._startNoise();
-      this._emit('spindowncancel');
-      this._emit('play');
-      return;
+    if (!this.element || !this.src) throw new Error('Load a track before pressing play.');
+    const request = ++this.playRequest;
+    const source = this.sourceRequest;
+    this.playRequested = true;
+    const context = this.graph.audioContext;
+    if (context?.state === 'suspended') await context.resume();
+    if (request !== this.playRequest || source !== this.sourceRequest) throw abortError();
+    this._cancelRateRamp();
+    this._syncDuration();
+    if (this.duration && this.position >= this.duration - 0.01) this.seek(0);
+    const wasStopping = this.isStopping;
+    if (this.isStopping) this._cancelBrake();
+    if (wasStopping) this.isPlaying = false;
+    if (!this.isScratching) {
+      this.currentRate = this.targetMotorRate;
+      this._nativePlaybackRate(this.currentRate);
     }
-    this.isPlaying = true;
-    if (!this.isScratching) this.currentRate = this.targetMotorRate;
-    this._scheduleSource();
-    this._startTicker();
-    this._startNoise();
-    this._emit('play');
+
+    try {
+      await this.element.play();
+    } catch (error) {
+      if (request === this.playRequest) {
+        this.playRequested = false;
+        this.isPlaying = false;
+        this._stopTicker();
+      }
+      throw error;
+    }
+
+    if (request !== this.playRequest || source !== this.sourceRequest) throw abortError();
+    if (!this.isPlaying) {
+      this.isPlaying = true;
+      this._startTicker();
+      this._emit('play');
+    }
   }
 
-  pause({ immediate = false } = {}) {
-    if (!this.isPlaying) return;
+  pause({ immediate = true } = {}) {
+    this.playRequest += 1;
+    this.playRequested = false;
+    if (!this.isPlaying) { this.element?.pause(); return; }
     if (this.isStopping) {
       if (immediate) this._finishPause();
       return;
     }
-    if (immediate || !this.sourceNode || !this.audioContext || this.isScratching) {
+    if (immediate || this.isScratching || !this.element) {
       this._finishPause();
       return;
     }
 
     const startRate = Math.max(0.05, Math.abs(this.currentRate || this.targetMotorRate));
-    const startAt = performance.now();
+    const startAt = nowMs();
     const brakeDurationMs = 640;
     this.isStopping = true;
     this._emit('spindownstart', { duration: brakeDurationMs });
@@ -460,23 +555,36 @@ export class VinylAudioEngine {
         this._finishPause();
         return;
       }
-      this._setPlaybackRate(Math.max(0.018, rate));
-      this.brakeFrame = window.requestAnimationFrame(tick);
+      this._nativePlaybackRate(Math.max(0.018, rate));
+      this.brakeFrame = typeof window !== 'undefined'
+        ? window.requestAnimationFrame(tick)
+        : setTimeout(() => tick(nowMs()), 16);
     };
-    this.brakeFrame = window.requestAnimationFrame(tick);
+    this.brakeFrame = typeof window !== 'undefined'
+      ? window.requestAnimationFrame(tick)
+      : setTimeout(() => tick(nowMs()), 16);
+  }
+
+  _finishPause() {
+    if (!(this.isScratching && this.currentRate < 0)) this.position = this._nativeTime();
+    this._cancelBrake();
+    this._cancelRateRamp();
+    this._stopScratchTicker();
+    this.nativePauseSuppressed = true;
+    this.element?.pause();
+    this.nativePauseSuppressed = false;
+    this.isPlaying = false;
+    this.isScratching = false;
+    this.wasPlayingBeforeScratch = false;
+    this.currentRate = 0;
+    this._stopTicker();
+    this._emit('pause');
+    this._emit('timeupdate');
   }
 
   clear() {
-    this.pause({ immediate: true });
-    this._cancelBrake();
-    this._stopSource();
-    this.buffer = null;
-    this.reversedBuffer = null;
-    this.duration = 0;
-    this.position = 0;
-    this.currentRate = 0;
-    this.isScratching = false;
-    this.wasPlayingBeforeScratch = false;
+    this.sourceRequest += 1;
+    this._releaseCurrentSource();
     this._emit('durationchange');
     this._emit('timeupdate');
   }
@@ -484,18 +592,9 @@ export class VinylAudioEngine {
   _startTicker() {
     if (this.timeUpdateTimer) return;
     this.timeUpdateTimer = setInterval(() => {
-      this._updatePosition();
-      if ((this.currentRate > 0 && this.position >= this.duration) || (this.currentRate < 0 && this.position <= 0)) {
-        this._stopSource();
-        this._cancelBrake();
-        this.isPlaying = false;
-        this._stopTicker();
-        this._stopNoise();
-        this._emit('ended');
-        return;
-      }
+      this.position = this._nativeTime();
       this._emit('timeupdate');
-    }, 50);
+    }, 250);
   }
 
   _stopTicker() {
@@ -504,53 +603,117 @@ export class VinylAudioEngine {
     this.timeUpdateTimer = null;
   }
 
+  _startScratchTicker() {
+    if (this.scratchTimer) return;
+    this.scratchLastAt = nowMs();
+    this.scratchTimer = setInterval(() => {
+      if (!this.isScratching || !this.wasPlayingBeforeScratch || !this.element) return;
+      const now = nowMs();
+      const elapsedSeconds = Math.min(0.1, Math.max(0, now - this.scratchLastAt) / 1000);
+      this.scratchLastAt = now;
+      if (this.currentRate < -0.002) {
+        // HTMLAudioElement has no reliable reverse playback. Keep it at a
+        // safe audible rate while the hand-driven seek moves the playhead
+        // backwards; forward hand motion uses the native decoder directly.
+        const nextPosition = this.scratchPosition + (this.currentRate * elapsedSeconds);
+        const bounded = Math.max(0, Math.min(this.duration || Number.MAX_SAFE_INTEGER, nextPosition));
+        this.scratchPosition = bounded;
+        this.position = bounded;
+        try {
+          this.element.currentTime = bounded;
+        } catch {
+          // Ignore a seek that races metadata loading.
+        }
+      } else {
+        this.position = this._nativeTime();
+        this.scratchPosition = this.position;
+      }
+      this._emit('timeupdate');
+      if (this.currentRate < 0 && this.position <= 0) {
+        this.currentRate = 0;
+        this.element.pause();
+      } else if (this.currentRate > 0 && this.duration && this.position >= this.duration) {
+        this.isPlaying = false;
+        this.isScratching = false;
+        this.wasPlayingBeforeScratch = false;
+        this.currentRate = 0;
+        this.nativePauseSuppressed = true;
+        this.element.pause();
+        this.nativePauseSuppressed = false;
+        this._stopScratchTicker();
+        this._stopTicker();
+        this._emit('ended');
+      }
+    }, 50);
+  }
+
+  _stopScratchTicker() {
+    if (!this.scratchTimer) return;
+    clearInterval(this.scratchTimer);
+    this.scratchTimer = null;
+  }
+
+  _cancelBrake() {
+    if (this.brakeFrame == null) {
+      this.isStopping = false;
+      return;
+    }
+    if (typeof window !== 'undefined' && typeof this.brakeFrame === 'number') window.cancelAnimationFrame(this.brakeFrame);
+    else clearTimeout(this.brakeFrame);
+    this.brakeFrame = null;
+    this.isStopping = false;
+    this._emit('spindowncancel');
+  }
+
   setVolume(volume) {
     this.volume = Math.max(0, Math.min(1, Number(volume) || 0));
-    if (this.masterGainNode && this.audioContext) {
-      this.masterGainNode.gain.setTargetAtTime(this.volume, this.audioContext.currentTime, 0.02);
-    }
+    this._applyOutputVolume();
   }
 
   applyPreset(presetKey) {
-    const preset = EQ_PRESETS[presetKey];
-    if (!preset) return;
-    this.currentPreset = presetKey;
-    this.currentGains = [...preset.gains];
-    this.filterNodes.forEach((filter, index) => {
-      if (this.audioContext) filter.gain.setTargetAtTime(this.currentGains[index] || 0, this.audioContext.currentTime, 0.02);
-    });
+    if (presetKey !== 'flat') this.ensureContext();
+    this.graph.applyPreset(presetKey);
   }
 
   setBandGain(index, gain) {
-    if (index < 0 || index >= this.filterNodes.length) return;
-    const next = Math.max(-12, Math.min(12, Number(gain) || 0));
-    this.currentPreset = 'custom';
-    this.currentGains[index] = next;
-    if (this.audioContext) this.filterNodes[index].gain.setTargetAtTime(next, this.audioContext.currentTime, 0.02);
+    this.ensureContext();
+    this.graph.setBandGain(index, gain);
   }
 
   getFrequencyData() {
-    if (!this.analyserNode) return new Uint8Array(32);
-    const data = new Uint8Array(this.analyserNode.frequencyBinCount);
-    this.analyserNode.getByteFrequencyData(data);
-    return data;
+    return this.graph.isAttachedTo(this.element) ? this.graph.getFrequencyData() : new Uint8Array(32);
   }
 
   getWaveformData() {
-    if (!this.analyserNode) return new Uint8Array(32);
-    const data = new Uint8Array(this.analyserNode.fftSize);
-    this.analyserNode.getByteTimeDomainData(data);
-    return data;
+    return this.graph.isAttachedTo(this.element) ? this.graph.getWaveformData() : new Uint8Array(32);
+  }
+
+  setNeedleLifted(lifted) {
+    this.needleLifted = Boolean(lifted);
+    this._applyOutputVolume();
+  }
+
+  setFade(value, seconds = 0) {
+    return this.graph.setFade(value, seconds);
+  }
+
+  handleVisibilityChange(hidden) {
+    if (hidden) {
+      if (this.isStopping) this._finishPause();
+      if (this.isScratching) this.endScratch();
+      this._cancelRateRamp();
+      if (this.isPlaying) this._nativePlaybackRate(this.targetMotorRate);
+      this.setNeedleLifted(false);
+    } else if (this.isPlaying && this.graph.audioContext?.state === 'suspended') {
+      this.graph.audioContext.resume().catch(() => {});
+    }
   }
 
   dispose() {
-    this.clear();
-    this._stopNoise();
-    safeCancel(this.masterGainNode);
-    safeCancel(this.analyserNode);
-    this.filterNodes.forEach(safeCancel);
-    this.audioContext?.close?.().catch?.(() => {});
-    this.audioContext = null;
+    this.sourceRequest += 1;
+    this._releaseCurrentSource();
+    this.graph.dispose();
     this.listeners.clear();
+    this.element = null;
   }
 }

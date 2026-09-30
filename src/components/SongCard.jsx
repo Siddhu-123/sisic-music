@@ -1,14 +1,14 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { memo, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Play, SkipForward, Download, CheckCircle2, ListMusic, Clock3, Cloud, Plus, Trash2, Info, RefreshCw, X, Sparkles, Heart, Copy, FolderOpen, MoreHorizontal } from 'lucide-react';
 import { statusDetails } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
-export function SongCard({
+export const SongCard = memo(function SongCard({
   song,
   onPlay,
-  onDownload,
+  onPrepare,
   onAddToQueue,
   onPlayNext,
   onAddToPlaylist,
@@ -22,6 +22,7 @@ export function SongCard({
   isLiked = false,
   isReadyLoose = false,
   isCurrentSong,
+  isPlaying = false,
   isDownloading,
 }) {
   const status = statusDetails(song);
@@ -69,13 +70,11 @@ export function SongCard({
       setDragOffset(0);
       setMenuOpen(true);
     }, 480);
-    if (isReadyLoose) {
-      pointerRef.current = { active: true, startX: event.clientX, offset: 0, swiped: false };
-    }
+    pointerRef.current = { active: isReadyLoose, startX: event.clientX, startY: event.clientY, offset: 0, swiped: false };
   };
 
   const handlePointerMove = (event) => {
-    if (Math.abs(event.clientX - (pointerRef.current.startX || event.clientX)) > 8) clearLongPress();
+    if (Math.hypot(event.clientX - pointerRef.current.startX, event.clientY - pointerRef.current.startY) > 8) clearLongPress();
     if (!pointerRef.current.active) return;
     const offset = Math.max(-110, Math.min(110, event.clientX - pointerRef.current.startX));
     if (Math.abs(offset) > 8) pointerRef.current.swiped = true;
@@ -88,17 +87,11 @@ export function SongCard({
     if (longPressTriggeredRef.current) {
       pointerRef.current.active = false;
       setDragOffset(0);
-      window.setTimeout(() => {
-        longPressTriggeredRef.current = false;
-      }, 0);
       return;
     }
     if (!pointerRef.current.active) return;
     const offset = pointerRef.current.offset || dragOffset;
     pointerRef.current.active = false;
-    window.setTimeout(() => {
-      pointerRef.current.swiped = false;
-    }, 0);
     setDragOffset(0);
     if (offset <= -72) onDeleteReady?.(song);
     if (offset >= 72) onAddToPlaylist?.(song);
@@ -140,7 +133,7 @@ export function SongCard({
     onPlayNext && { label: 'Next', icon: SkipForward, action: onPlayNext },
     onAddToQueue && { label: 'Queue', icon: ListMusic, action: onAddToQueue },
     onToggleLike && { label: isLiked ? 'Unlike' : 'Like', icon: Heart, action: onToggleLike, fill: isLiked ? 'currentColor' : 'none' },
-    onDownload && { label: song.driveFileId ? 'Offline' : 'Download', icon: Download, action: onDownload, disabled: isDownloading },
+    onPrepare && { label: song.driveFileId ? 'Ready to stream' : 'Prepare on Drive', icon: Download, action: onPrepare, disabled: isDownloading },
     onAddToPlaylist && { label: 'Playlist', icon: Plus, action: onAddToPlaylist },
     onReview && { label: 'Review', icon: RefreshCw, action: onReview },
     onInfo && { label: 'Info', icon: Info, action: onInfo },
@@ -159,13 +152,13 @@ export function SongCard({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
+        onPointerCancel={() => { clearLongPress(); pointerRef.current.active = false; pointerRef.current.swiped = true; setDragOffset(0); }}
         onContextMenu={handleCardContextMenu}
       >
       <button
         className="song-card__primary"
         onClick={() => {
-          if (pointerRef.current.swiped) return;
+          if (pointerRef.current.swiped || longPressTriggeredRef.current) return;
           onPlay(song);
         }}
         onKeyDown={handleCardKeyDown}
@@ -175,9 +168,9 @@ export function SongCard({
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
       >
         <div className="song-card__art-wrapper">
-          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} size={300} sizes="(max-width: 768px) 45vw, 220px" />
+          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} size={240} sizes="(max-width: 768px) 45vw, 220px" />
           {isCurrentSong && (
-            <div className="song-card__playing-bars"><span /><span /><span /></div>
+            <div className={`song-card__playing-bars ${isPlaying ? '' : 'song-card__playing-bars--paused'}`}><span /><span /><span /></div>
           )}
         </div>
         <div className="song-card__info">
@@ -218,13 +211,13 @@ export function SongCard({
         </div>
         <button
           className="song-card__dl-btn"
-          onClick={event => { event.stopPropagation(); onDownload(song); }}
-          aria-label={song.isDownloaded ? 'Offline available' : 'Cache or request song'}
+          onClick={event => { event.stopPropagation(); onPrepare?.(song); }}
+          aria-label={song.driveFileId ? 'Ready to stream' : 'Prepare song on Drive'}
           disabled={isDownloading}
         >
           {isDownloading
             ? <div className="spinner" />
-            : song.isDownloaded || song.isCached || song.hasBlob
+            : song.driveFileId
               ? <CheckCircle2 size={18} color="var(--green)" />
               : <Download size={18} color="var(--text-muted)" />
           }
@@ -285,4 +278,4 @@ export function SongCard({
       )}
     </>
   );
-}
+});

@@ -1,10 +1,11 @@
 import { Laptop, RefreshCw } from 'lucide-react';
 import { workerTaskStatus } from './componentUtils.jsx';
 
-export function MacWorkerTasksPanel({ tasks = [], canonicalRecordCount = 0, onRetry, onRefresh }) {
+export function MacWorkerTasksPanel({ tasks = [], canonicalRecordCount = 0, onRetry, onReview, onRefresh }) {
   const queuedCount = tasks.filter(task => task.workerJob?.status === 'queued').length;
   const activeCount = tasks.filter(task => task.workerJob?.status === 'downloading').length;
-  const attentionCount = tasks.length - queuedCount - activeCount;
+  const reviewCount = tasks.filter(task => task.workerJob?.status === 'needs-review').length;
+  const attentionCount = tasks.length - queuedCount - activeCount - reviewCount;
 
   return (
     <section className="mac-worker-tasks" aria-label="Mac worker tasks">
@@ -25,7 +26,8 @@ export function MacWorkerTasksPanel({ tasks = [], canonicalRecordCount = 0, onRe
         <div><span>Remaining</span><strong>{tasks.length.toLocaleString()}</strong></div>
         <div><span>Queued</span><strong>{queuedCount.toLocaleString()}</strong></div>
         <div><span>Active</span><strong>{activeCount.toLocaleString()}</strong></div>
-        <div><span>Needs attention</span><strong>{attentionCount.toLocaleString()}</strong></div>
+        <div><span>Needs review</span><strong>{reviewCount.toLocaleString()}</strong></div>
+        <div><span>Other attention</span><strong>{attentionCount.toLocaleString()}</strong></div>
       </div>
 
       <div className="mac-worker-tasks__list">
@@ -34,6 +36,7 @@ export function MacWorkerTasksPanel({ tasks = [], canonicalRecordCount = 0, onRe
         ) : tasks.map(task => {
           const job = task.workerJob || {};
           const status = workerTaskStatus(job);
+          const needsReview = job.status === 'needs-review';
           const retryable = ['failed', 'error', 'blocked'].includes(job.status) || (job.status === 'done' && !job.uploadedFileId);
           return (
             <div className="mac-worker-task" key={job.jobId || task.songKey}>
@@ -44,6 +47,7 @@ export function MacWorkerTasksPanel({ tasks = [], canonicalRecordCount = 0, onRe
                 <small>{job.sourceFileId ? `Imported source${job.sourceFileName ? ` · ${job.sourceFileName}` : ''}` : 'yt-dlp source'}{job.expectedFilename ? ` · ${job.expectedFilename}` : ''}</small>
                 {job.lastError && <small className="mac-worker-task__error">{job.lastError}</small>}
               </div>
+              {needsReview && <button className="download-status-row__action" onClick={() => onReview?.(task)} type="button">Review sources</button>}
               {retryable && <button className="download-status-row__action" onClick={() => onRetry?.(task)} type="button">Retry</button>}
             </div>
           );

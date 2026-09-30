@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist",
-    "test": "node --test"
+    "test": "node --test",
+    "test:browser": "node scripts/verify-player.mjs",
+    "test:dj": "node scripts/verify-dj.mjs"
   },
   "dependencies": {
     "dexie": "^4.4.2",

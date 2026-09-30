@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   TONEARM_LIFTED_ANGLE,
   TONEARM_END_ANGLE,
@@ -8,10 +8,13 @@ import {
   tonearmProgressFromAngle,
   vinylSecondsPerTurn,
   wrappedAngleDelta,
+  calculateMotorTargetVelocity,
+  stepMotorVelocity,
+  inertiaVelocity,
 } from '../vinylPhysics.js';
 
 const LONG_PRESS_MS = 420;
-const INERTIA_TIME_CONSTANT_MS = 190;
+const RADIANS_TO_DEGREES = 180 / Math.PI;
 
 function pointerAngle(event, centerX, centerY) {
   return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
@@ -32,15 +35,12 @@ function formatTime(seconds) {
   return `${minutes}:${remainder}`;
 }
 
-function inertiaVelocity(initial, target, elapsed) {
-  return target + ((initial - target) * Math.exp(-Math.max(0, elapsed) / INERTIA_TIME_CONSTANT_MS));
-}
-
 export function Turntable({
   currentSong,
   artwork,
   isPlaying,
   isBraking = false,
+  isBuffering = false,
   progress,
   duration,
   rpm,
@@ -60,19 +60,37 @@ export function Turntable({
   onPitchChange,
   onPitchRangeChange,
   onRpmChange,
+  showCrate = true,
 }) {
   const deckRef = useRef(null);
   const vinylRef = useRef(null);
   const tonearmRef = useRef(null);
   const interactionRef = useRef(null);
   const longPressRef = useRef(null);
-  const inertiaFrameRef = useRef(null);
   const releasedTonearmResetRef = useRef(null);
   const previewProgressRef = useRef(null);
   const recordSwapIndexRef = useRef(null);
+  const recordRotationRef = useRef(0);
+  const motorVelocityRef = useRef(0);
+  const motorFrameRef = useRef(null);
+  const motorLastAtRef = useRef(0);
+  const motorInertiaRef = useRef(null);
+  const reducedMotionRef = useRef(false);
+  const hasCurrentSong = Boolean(currentSong);
+  const activeSongId = currentSong?.songKey || currentSong?.id || '';
+  const lastSongIdRef = useRef(activeSongId);
+  const motorStateRef = useRef({
+    hasCurrentSong,
+    isPlaying,
+    isBraking,
+    isBuffering,
+    dragMode: null,
+    rpm,
+    pitchModifier,
+  });
+  const motorCallbacksRef = useRef({ onScratchVelocity, onScratchEnd });
   const [dragMode, setDragMode] = useState(null);
   const [previewProgress, setPreviewProgress] = useState(null);
-  const [manualRecordAngle, setManualRecordAngle] = useState(0);
   const [tonearmDragAngle, setTonearmDragAngle] = useState(null);
   const [releasedTonearmProgress, setReleasedTonearmProgress] = useState(null);
   const [needleLifted, setNeedleLifted] = useState(false);
@@ -89,8 +107,217 @@ export function Turntable({
       ? TONEARM_LIFTED_ANGLE
       : tonearmAngleFromProgress(releasedTonearmProgress ?? displayedProgress);
   const pitchPercent = ((pitchModifier - 1) * 100).toFixed(1);
-  const vinylSpinDuration = `${vinylSecondsPerTurn(rpm, pitchModifier)}s`;
-  const motorIsRunning = Boolean(isPlaying && !dragMode && !isBraking);
+
+  const writeRecordRotation = useCallback(angle => {
+    recordRotationRef.current = angle;
+    vinylRef.current?.style.setProperty('--record-rotation', `${angle}deg`);
+  }, []);
+
+  const cancelMotorFrame = useCallback(() => {
+    if (motorFrameRef.current == null) return;
+    window.cancelAnimationFrame(motorFrameRef.current);
+    motorFrameRef.current = null;
+  }, []);
+
+  const startMotorFrame = useCallback(() => {
+    if (motorFrameRef.current != null) return;
+
+    motorLastAtRef.current = performance.now();
+    const tick = now => {
+      motorFrameRef.current = null;
+      const elapsedMs = Math.min(80, Math.max(0, now - motorLastAtRef.current));
+      motorLastAtRef.current = now;
+      const state = motorStateRef.current;
+      const inertia = motorInertiaRef.current;
+
+      if (state.dragMode === 'record') {
+        motorVelocityRef.current = 0;
+      } else if (state.dragMode === 'inertia' && inertia) {
+        const inertiaElapsed = now - inertia.startedAt;
+        const velocity = inertiaVelocity(inertia.initial, inertia.target, inertiaElapsed);
+        motorVelocityRef.current = velocity * RADIANS_TO_DEGREES;
+        motorCallbacksRef.current.onScratchVelocity?.(velocity);
+        if (Math.abs(velocity - inertia.target) < 0.025 || inertiaElapsed > 1100) {
+          motorVelocityRef.current = inertia.target * RADIANS_TO_DEGREES;
+          motorCallbacksRef.current.onScratchVelocity?.(inertia.target);
+          motorInertiaRef.current = null;
+          motorCallbacksRef.current.onScratchEnd?.();
+          setDragMode(null);
+        }
+      } else {
+        const targetVelocity = calculateMotorTargetVelocity({
+          isPlaying: state.isPlaying,
+          isBuffering: state.isBuffering,
+          hasCurrentSong: state.hasCurrentSong,
+          dragMode: state.dragMode,
+          rpm: state.rpm,
+          pitchModifier: state.pitchModifier,
+        });
+        motorVelocityRef.current = stepMotorVelocity(
+          motorVelocityRef.current,
+          targetVelocity,
+          elapsedMs,
+          { isBraking: state.isBraking },
+        );
+      }
+
+      if (!reducedMotionRef.current && state.dragMode !== 'record' && Math.abs(motorVelocityRef.current) > 0.001) {
+        writeRecordRotation(recordRotationRef.current + (motorVelocityRef.current * elapsedMs / 1000));
+      }
+
+      if (vinylRef.current) {
+        const isDecel = !state.isPlaying && Math.abs(motorVelocityRef.current) > 0.5;
+        vinylRef.current.classList.toggle('turntable__vinyl--braking', isDecel || state.isBraking);
+        vinylRef.current.classList.toggle('turntable__vinyl--paused', !isDecel && !state.isPlaying && !state.isBraking);
+      }
+
+      const targetVelocity = calculateMotorTargetVelocity(state);
+      const isRunning = targetVelocity > 0;
+      const isSettling = Math.abs(motorVelocityRef.current) > 0.05;
+      const hasInertia = Boolean(state.dragMode === 'inertia' && motorInertiaRef.current);
+
+      const needsFrame = state.hasCurrentSong
+        && state.dragMode !== 'record'
+        && (!reducedMotionRef.current || hasInertia)
+        && (isRunning || isSettling || hasInertia);
+
+      if (needsFrame) {
+        motorFrameRef.current = window.requestAnimationFrame(tick);
+      }
+    };
+
+    motorFrameRef.current = window.requestAnimationFrame(tick);
+  }, [writeRecordRotation]);
+
+  const beginInertia = initialVelocity => {
+    cancelMotorFrame();
+    motorVelocityRef.current = initialVelocity * RADIANS_TO_DEGREES;
+    motorInertiaRef.current = {
+      initial: initialVelocity,
+      target: (2 * Math.PI) / vinylSecondsPerTurn(rpm, pitchModifier),
+      startedAt: performance.now(),
+    };
+    setDragMode('inertia');
+    startMotorFrame();
+  };
+
+  useEffect(() => {
+    motorCallbacksRef.current = { onScratchVelocity, onScratchEnd };
+  }, [onScratchEnd, onScratchVelocity]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const updatePreference = () => {
+      reducedMotionRef.current = mediaQuery.matches;
+      if (mediaQuery.matches) {
+        cancelMotorFrame();
+      } else {
+        const state = motorStateRef.current;
+        if (calculateMotorTargetVelocity(state) > 0 || Math.abs(motorVelocityRef.current) > 0.05) {
+          motorLastAtRef.current = performance.now();
+          startMotorFrame();
+        }
+      }
+    };
+    updatePreference();
+    mediaQuery.addEventListener?.('change', updatePreference);
+    return () => mediaQuery.removeEventListener?.('change', updatePreference);
+  }, [cancelMotorFrame, startMotorFrame]);
+
+  useEffect(() => {
+    motorStateRef.current = {
+      hasCurrentSong,
+      isPlaying,
+      isBraking,
+      isBuffering,
+      dragMode,
+      rpm,
+      pitchModifier,
+    };
+
+    if (!hasCurrentSong) {
+      motorInertiaRef.current = null;
+      motorVelocityRef.current = 0;
+      cancelMotorFrame();
+      return;
+    }
+
+    const targetVelocity = calculateMotorTargetVelocity(motorStateRef.current);
+    const isRunning = targetVelocity > 0;
+    const isSettling = Math.abs(motorVelocityRef.current) > 0.05;
+    const hasInertia = Boolean(dragMode === 'inertia' && motorInertiaRef.current);
+
+    const needsFrame = hasCurrentSong
+      && dragMode !== 'record'
+      && (!reducedMotionRef.current || hasInertia)
+      && (isRunning || isSettling || hasInertia);
+
+    if (needsFrame) {
+      startMotorFrame();
+    } else if (!isSettling && !hasInertia) {
+      cancelMotorFrame();
+    }
+  }, [cancelMotorFrame, dragMode, hasCurrentSong, isBraking, isBuffering, isPlaying, pitchModifier, rpm, startMotorFrame]);
+
+  useEffect(() => {
+    if (lastSongIdRef.current !== activeSongId) {
+      lastSongIdRef.current = activeSongId;
+      if (interactionRef.current) {
+        interactionRef.current = null;
+        setDragMode(null);
+        setNeedleLifted(false);
+        setPreviewProgress(null);
+        setTonearmDragAngle(null);
+        recordSwapIndexRef.current = null;
+        setRecordSwapIndex(null);
+        setRecordOffset({ x: 0, y: 0 });
+        if (longPressRef.current) window.clearTimeout(longPressRef.current);
+      }
+      // Note: We deliberately preserve continuous rotation angle recordRotationRef.current
+      // across track changes so the physical platter spins uninterrupted!
+    }
+  }, [activeSongId]);
+
+  useEffect(() => {
+    const resetInteraction = () => {
+      interactionRef.current = null;
+      motorInertiaRef.current = null;
+      window.clearTimeout(longPressRef.current);
+      window.clearTimeout(releasedTonearmResetRef.current);
+      onScratchEnd?.();
+      onNeedleLift?.(false);
+      onProgressPreview?.(null);
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        resetInteraction();
+        cancelMotorFrame();
+        setDragMode(null);
+        setNeedleLifted(false);
+        setPreviewProgress(null);
+        setTonearmDragAngle(null);
+        setRecordOffset({ x: 0, y: 0 });
+      } else {
+        const state = motorStateRef.current;
+        const targetVelocity = calculateMotorTargetVelocity(state);
+        const needsFrame = state.hasCurrentSong
+          && state.dragMode !== 'record'
+          && (!reducedMotionRef.current || (state.dragMode === 'inertia' && motorInertiaRef.current))
+          && (targetVelocity > 0 || Math.abs(motorVelocityRef.current) > 0.05);
+        if (needsFrame) {
+          motorLastAtRef.current = performance.now();
+          startMotorFrame();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      resetInteraction();
+      cancelMotorFrame();
+    };
+  }, [cancelMotorFrame, onNeedleLift, onProgressPreview, onScratchEnd, startMotorFrame]);
 
   const updatePreviewProgress = nextProgress => {
     const boundedProgress = nextProgress == null ? null : clamp(nextProgress, 0, 100);
@@ -126,27 +353,8 @@ export function Turntable({
   };
 
   const cancelInertia = () => {
-    if (inertiaFrameRef.current) window.cancelAnimationFrame(inertiaFrameRef.current);
-    inertiaFrameRef.current = null;
-  };
-
-  const beginInertia = initialVelocity => {
-    cancelInertia();
-    const startTime = performance.now();
-    const targetVelocity = (rpm * 2 * Math.PI) / 60;
-    const tick = now => {
-      const velocity = inertiaVelocity(initialVelocity, targetVelocity, now - startTime);
-      onScratchVelocity?.(velocity);
-      if (Math.abs(velocity - targetVelocity) < 0.025 || now - startTime > 1100) {
-        onScratchVelocity?.(targetVelocity);
-        onScratchEnd?.();
-        inertiaFrameRef.current = null;
-        setDragMode(null);
-        return;
-      }
-      inertiaFrameRef.current = window.requestAnimationFrame(tick);
-    };
-    inertiaFrameRef.current = window.requestAnimationFrame(tick);
+    motorInertiaRef.current = null;
+    if (dragMode === 'inertia') setDragMode(null);
   };
 
   const setLifted = lifted => {
@@ -172,7 +380,7 @@ export function Turntable({
       startX: event.clientX,
       startY: event.clientY,
       startProgress: progress,
-      startRecordAngle: manualRecordAngle,
+      startRecordAngle: recordRotationRef.current,
       lastPointerAngle: pointerAngle(event, centerX, centerY),
       lastMoveAt: performance.now(),
       accumulatedDegrees: 0,
@@ -219,7 +427,7 @@ export function Turntable({
       return;
     }
 
-    const distance = Math.hypot(event.clientX - (interaction.centerX), event.clientY - (interaction.centerY));
+    const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
     if (!interaction.moved && distance < 8) return;
     if (!interaction.moved) {
       interaction.moved = true;
@@ -237,7 +445,8 @@ export function Turntable({
     interaction.lastPointerAngle = nextPointerAngle;
     interaction.lastMoveAt = now;
     interaction.lastVelocity = angularVelocity;
-    setManualRecordAngle(interaction.startRecordAngle + interaction.accumulatedDegrees);
+    writeRecordRotation(interaction.startRecordAngle + interaction.accumulatedDegrees);
+    motorVelocityRef.current = angularVelocity * RADIANS_TO_DEGREES;
     const secondsMoved = (interaction.accumulatedDegrees / 360) * (60 / rpm);
     updatePreviewProgress(interaction.startProgress + ((secondsMoved / duration) * 100));
     onScratchVelocity?.(angularVelocity);
@@ -269,7 +478,6 @@ export function Turntable({
     interactionRef.current = null;
     updatePreviewProgress(null);
     clearRecordDragPreview();
-    setManualRecordAngle(angle => ((angle % 360) + 360) % 360);
     if (interaction.startedScratch) {
       onSeek?.(target);
       setDragMode('inertia');
@@ -344,7 +552,15 @@ export function Turntable({
     setDragMode(null);
     setLifted(false);
     onSeek?.(target);
-    if (interaction.wasPlaying && target < 99.8) window.requestAnimationFrame(() => onTogglePlay?.());
+
+  };
+
+  const cancelPointer = event => {
+    if (interactionRef.current?.pointerId !== event.pointerId) return;
+    interactionRef.current = null;
+    clearLongPress(); cancelInertia(); clearRecordDragPreview();
+    updatePreviewProgress(null); setTonearmDragAngle(null); setDragMode(null); setLifted(false);
+    onScratchEnd?.();
   };
 
   const handleDrop = event => {
@@ -359,7 +575,7 @@ export function Turntable({
     event.preventDefault();
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : -1;
     onSeek?.(clamp(progress + (direction * Math.max(1, Math.min(5, duration / 100)) / duration * 100), 0, 100));
-    setManualRecordAngle(angle => angle + (direction * 30));
+    writeRecordRotation(recordRotationRef.current + (direction * 30));
   };
 
   const handleTonearmKeyDown = event => {
@@ -375,7 +591,7 @@ export function Turntable({
 
   useEffect(() => () => {
     clearLongPress();
-    cancelInertia();
+    motorInertiaRef.current = null;
     if (releasedTonearmResetRef.current) window.clearTimeout(releasedTonearmResetRef.current);
   }, []);
 
@@ -383,17 +599,32 @@ export function Turntable({
 
   const crateSongs = queue.filter((song, index) => index !== queueIndex).slice(0, 5);
   const swapSong = recordSwapIndex == null ? null : queue[recordSwapIndex];
+  const motorRunning = calculateMotorTargetVelocity({
+    isPlaying,
+    isBuffering,
+    hasCurrentSong,
+    dragMode,
+    rpm,
+    pitchModifier,
+  }) > 0;
+
   const status = dragMode === 'record'
     ? `Scratching · ${formatTime((displayedProgress / 100) * duration)}`
     : dragMode === 'inertia'
-      ? ' platter settling · motor lock engaged'
+      ? 'Platter settling · motor lock engaged'
       : dragMode === 'lifted'
         ? (swapSong
           ? `Release to load ${swapSong.track}`
-          : (ejectReady ? 'Release outside the deck to eject' : 'Record lifted · drag left or right to change'))
+          : (ejectReady ? 'Release outside the deck to eject' : 'Record lifted · drag left or right to switch'))
         : completed
           ? 'Playback complete · tonearm lifted'
-          : `${rpm} RPM · ${pitchPercent}% pitch · vinyl noise online`;
+          : isBuffering
+            ? 'Buffering audio stream…'
+            : isBraking
+              ? `Platter braking · ${rpm} RPM`
+              : !isPlaying
+                ? 'Paused · motor standby'
+                : `${rpm} RPM · ${pitchPercent >= 0 ? '+' : ''}${pitchPercent}% pitch · direct drive`;
 
   return (
     <div className="turntable-shell">
@@ -404,17 +635,18 @@ export function Turntable({
         onDrop={handleDrop}
       >
         <div className="turntable__deck-label"><span>SISIC / DIRECT DRIVE</span><strong>VINYL MK.II</strong></div>
+        <div className="turntable__strobe" aria-hidden="true">
+          <span className="turntable__strobe-ring" />
+          <span className="turntable__strobe-lens" />
+        </div>
         <div className="turntable__platter-bed">
           <div className="turntable__platter-rim" aria-hidden="true" />
           <div
             ref={vinylRef}
-            className={`turntable__vinyl turntable__vinyl--motor ${isBraking ? 'turntable__vinyl--braking' : ''}`}
+            className={`turntable__vinyl turntable__vinyl--motor ${isBraking ? 'turntable__vinyl--braking' : ''} ${!motorRunning && !isBraking ? 'turntable__vinyl--paused' : ''} ${isBuffering ? 'turntable__vinyl--buffering' : ''}`}
             style={{
-              '--manual-record-angle': `${manualRecordAngle}deg`,
               '--eject-x': `${recordOffset.x}px`,
               '--eject-y': `${recordOffset.y}px`,
-              '--vinyl-spin-duration': vinylSpinDuration,
-              '--vinyl-animation-state': motorIsRunning ? 'running' : 'paused',
             }}
             role="slider"
             tabIndex={0}
@@ -426,7 +658,7 @@ export function Turntable({
             onPointerDown={beginRecordPointer}
             onPointerMove={moveRecordPointer}
             onPointerUp={finishRecordPointer}
-            onPointerCancel={finishRecordPointer}
+            onPointerCancel={cancelPointer} onLostPointerCapture={cancelPointer}
             onKeyDown={handleVinylKeyDown}
           >
             <div className="turntable__vinyl-surface" aria-hidden="true">
@@ -449,7 +681,7 @@ export function Turntable({
           onPointerDown={beginTonearmPointer}
           onPointerMove={moveTonearmPointer}
           onPointerUp={finishTonearmPointer}
-          onPointerCancel={finishTonearmPointer}
+          onPointerCancel={cancelPointer} onLostPointerCapture={cancelPointer}
           onKeyDown={handleTonearmKeyDown}
         >
           <span className="turntable__gimbal" />
@@ -457,6 +689,12 @@ export function Turntable({
           <span className="turntable__headshell"><span className="turntable__stylus" /></span>
         </button>
 
+        <div className="turntable__speed-badge" aria-hidden="true">
+          <span className="turntable__speed-dot" />
+          <span>{rpm} RPM</span>
+          <small>Direct Drive</small>
+        </div>
+        <div className="turntable__deck-slogan" aria-hidden="true">GOOD MUSIC BRIGHTER DAYS</div>
         <div className="turntable__readout" aria-live="polite">{status}</div>
       </div>
 
@@ -483,26 +721,28 @@ export function Turntable({
         </label>
       </div>
 
-      <aside className="turntable__crate" aria-label="Vinyl crate">
-        <div className="turntable__crate-heading"><span>CRATE</span><small>click a record to load · drag the disc to switch</small></div>
-        <div className="turntable__crate-list">
-          {crateSongs.map(song => {
-            const key = song.songKey || song.id;
-            return (
-              <button
-                type="button"
-                className="turntable__jacket"
-                key={key}
-                onClick={() => onLoadSong?.(song)}
-              >
-                <span className="turntable__jacket-art">{song.track?.charAt(0) || '♪'}</span>
-                <span><strong>{song.track}</strong><small>{song.artist}</small></span>
-              </button>
-            );
-          })}
-          {!crateSongs.length && <p className="turntable__crate-empty">Queue another record to fill the crate.</p>}
-        </div>
-      </aside>
+      {showCrate && (
+        <aside className="turntable__crate" aria-label="Vinyl crate">
+          <div className="turntable__crate-heading"><span>CRATE</span><small>click a record to load · drag the disc to switch</small></div>
+          <div className="turntable__crate-list">
+            {crateSongs.map(song => {
+              const key = song.songKey || song.id;
+              return (
+                <button
+                  type="button"
+                  className="turntable__jacket"
+                  key={key}
+                  onClick={() => onLoadSong?.(song)}
+                >
+                  <span className="turntable__jacket-art">{song.track?.charAt(0) || '♪'}</span>
+                  <span><strong>{song.track}</strong><small>{song.artist}</small></span>
+                </button>
+              );
+            })}
+            {!crateSongs.length && <p className="turntable__crate-empty">Queue another record to fill the crate.</p>}
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

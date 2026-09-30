@@ -1,7 +1,9 @@
 import { useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Volume2, CheckCircle2, Shuffle, ListMusic, Cloud, Info } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Shuffle, Repeat, Repeat1, ListMusic, Info, LoaderCircle } from 'lucide-react';
 import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
+import { ProgressSlider } from './ProgressSlider.jsx';
+import { PlaybackSettings } from './PlaybackSettings.jsx';
 import { ExpandedPlayer } from './ExpandedPlayer.jsx';
 
 export function PlayerBar({
@@ -11,14 +13,15 @@ export function PlayerBar({
   onAddToPlaylist,
   onDelete,
   onReview,
-  onDownload,
+  onPrepare,
   onPlayNext,
   onAddToQueue,
   onOpenEqualizer,
   onMoreLikeThis,
+  onSearchLibrary,
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const hue = player.currentSong ? player.currentSong.track.charCodeAt(0) % 360 : 0;
+  const hue = player.currentSong ? (player.currentSong.track || 'S').charCodeAt(0) % 360 : 0;
 
   const {
     currentSong,
@@ -28,7 +31,6 @@ export function PlayerBar({
     volume,
     shuffleMode,
     togglePlay,
-    seek,
     changeVolume,
     playNext,
     playPrev,
@@ -52,11 +54,7 @@ export function PlayerBar({
                 <span className="player-artist">{currentSong.artist}</span>
               </span>
             </button>
-            {currentSong.isDownloaded || currentSong.isCached || currentSong.hasBlob
-              ? <CheckCircle2 size={16} color="var(--green)" style={{ marginLeft: 'auto' }} />
-              : <Cloud size={16} color="var(--text-muted)" style={{ marginLeft: 'auto' }} />
-            }
-            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info">
+            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info" style={{ marginLeft: 'auto' }}>
               <Info size={16} />
             </button>
           </>
@@ -78,11 +76,14 @@ export function PlayerBar({
           <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
             <SkipBack size={20} />
           </button>
-          <button className="play-btn" onClick={togglePlay} aria-label={isPlaying ? 'Pause' : 'Play'}>
-            {isPlaying ? <Pause size={22} fill="black" /> : <Play size={22} fill="black" />}
+          <button className="play-btn" disabled={!player.queue.length} onClick={togglePlay} aria-label={player.isPlayRequested ? 'Pause' : 'Play'}>
+            {player.isBuffering && player.isPlayRequested ? <LoaderCircle className="spin" size={22} /> : isPlaying ? <Pause size={22} fill="black" /> : <Play size={22} fill="black" />}
           </button>
           <button className="icon-btn" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">
             <SkipForward size={20} />
+          </button>
+          <button className={`icon-btn ${player.repeatMode !== 'off' ? 'icon-btn--active' : ''}`} onClick={player.toggleRepeat} aria-label={`Repeat: ${player.repeatMode}`} title={`Repeat: ${player.repeatMode}`}>
+            {player.repeatMode === 'one' ? <Repeat1 size={16} /> : <Repeat size={16} />}
           </button>
           <button className="icon-btn" onClick={onToggleQueue} aria-label="Queue" title="Queue">
             <ListMusic size={16} />
@@ -90,36 +91,28 @@ export function PlayerBar({
         </div>
         <div className="progress-row">
           <span className="time-label">{formatTime((progress / 100) * duration)}</span>
-          <input
-            type="range"
-            className="progress-bar"
-            min={0}
-            max={100}
-            step={0.1}
-            value={progress}
-            onChange={event => seek(Number(event.target.value))}
-            aria-label="Playback position"
-          />
+          <ProgressSlider key={player.currentSongKey || 'empty'} player={player} />
           <span className="time-label">{formatTime(duration)}</span>
         </div>
       </div>
 
       <div className="player-volume">
-        <Volume2 size={18} color="var(--text-muted)" />
+        <button className="icon-btn" onClick={player.toggleMute} aria-label={player.muted ? 'Unmute' : 'Mute'}>{player.muted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}</button>
         <input
           type="range"
           className="volume-bar"
           min={0}
           max={1}
           step={0.01}
-          value={volume}
+          value={player.muted ? 0 : volume}
           onChange={event => changeVolume(Number(event.target.value))}
           aria-label="Volume"
         />
       </div>
+      <PlaybackSettings player={player} />
+
       {isExpanded && (
         <ExpandedPlayer
-          key={currentSong?.songKey || 'expanded-player'}
           player={player}
           onClose={() => setIsExpanded(false)}
           hue={hue}
@@ -128,11 +121,12 @@ export function PlayerBar({
           onAddToPlaylist={onAddToPlaylist}
           onDelete={onDelete}
           onReview={onReview}
-          onDownload={onDownload}
+          onPrepare={onPrepare}
           onPlayNext={onPlayNext}
           onAddToQueue={onAddToQueue}
           onOpenEqualizer={onOpenEqualizer}
           onMoreLikeThis={onMoreLikeThis}
+          onSearchLibrary={onSearchLibrary}
         />
       )}
     </div>

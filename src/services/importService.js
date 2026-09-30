@@ -1,14 +1,12 @@
 import {
-  cacheSongBlob,
   createImportJob,
   enqueueEmbeddingJob,
   enqueueSyncOutbox,
-  getCachedSongAudio,
   findSongByFileIdentity,
   updateImportJob,
   upsertSongToDb,
 } from '../db';
-import { asSongRecord, canonicalAudioFilename } from '../songIdentity';
+import { asSongRecord } from '../songIdentity';
 import { dedupeFileList, extensionFor, isSupportedAudioFile, parseAudioFilename, fileSignature } from '../importIdentity';
 
 let embeddingServicePromise;
@@ -30,9 +28,9 @@ async function readAudioMetadata(file) {
   const fallback = parseAudioFilename(file.name);
   if (typeof Audio === 'undefined' || typeof URL === 'undefined') return { ...fallback, durationSeconds: null };
   const url = URL.createObjectURL(file);
+  const audio = new Audio();
   try {
     const metadata = await new Promise(resolve => {
-      const audio = new Audio();
       const timeout = window.setTimeout(() => resolve(null), 4000);
       audio.preload = 'metadata';
       audio.onloadedmetadata = () => {
@@ -47,6 +45,11 @@ async function readAudioMetadata(file) {
     });
     return { ...fallback, ...(metadata || {}) };
   } finally {
+    audio.onloadedmetadata = null;
+    audio.onerror = null;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
     URL.revokeObjectURL(url);
   }
 }
@@ -113,10 +116,9 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
       syncStatus: 'queued',
       embeddingStatus: hasEmbeddingProvider ? 'queued' : '',
     });
-    await update({ status: 'importing', progress: 0.6, songKey: song.songKey, message: 'Saving offline copy' });
+    await update({ status: 'importing', progress: 0.6, songKey: song.songKey, message: 'Saving import metadata' });
     await upsertSongToDb(song);
-    await cacheSongBlob(song.songKey, file, null, { explicit: true });
-    const storedSong = await upsertSongToDb({ ...song, isDownloaded: true, isCached: true, importStatus: 'complete' });
+    const storedSong = await upsertSongToDb({ ...song, importStatus: 'complete' });
     if (hasEmbeddingProvider) {
       await enqueueEmbeddingJob(storedSong || song);
     }
@@ -141,7 +143,7 @@ export async function importAudioFile(file, { onProgress, driveService = null, d
     }
     const completionMessage = driveJob
       ? 'Imported locally · Queued for Mac upload'
-      : 'Imported locally only · Sign in to queue Mac upload';
+      : 'Imported metadata only · Re-import the source after signing in to queue Mac upload';
     await update({ status: 'complete', progress: 1, message: completionMessage, driveJobId: driveJob?.jobId || '' });
     onProgress?.({ ...job, status: 'complete', progress: 1 });
     return { status: 'complete', song: finalSong, jobId: job.jobId, driveJob };
@@ -157,31 +159,6 @@ export async function importAudioFiles(files, options = {}) {
   const results = [];
   for (const file of dedupeFileList(files)) {
     results.push(await importAudioFile(file, options));
-  }
-  return results;
-}
-
-export async function queueCachedLocalImports(songs = [], { driveService, driveFolderId } = {}) {
-  if (!driveService || !driveFolderId || typeof File === 'undefined') return [];
-  const results = [];
-  for (const input of songs) {
-    const song = asSongRecord(input);
-    if (song.sourceType !== 'local-import' || song.driveFileId || song.driveImportJobId) continue;
-
-    const existingJob = await driveService.findDownloadJob(song, driveFolderId);
-    if (existingJob) {
-      await upsertSongToDb({ ...song, driveImportJobId: existingJob.jobId });
-      results.push({ song, job: existingJob, existing: true });
-      continue;
-    }
-
-    const cached = await getCachedSongAudio(song.songKey);
-    if (!cached?.blob) continue;
-    const fileName = song.localFileName || canonicalAudioFilename(song);
-    const file = new File([cached.blob], fileName, { type: cached.blob.type || 'audio/mpeg' });
-    const job = await driveService.createImportedAudioJob(song, file, driveFolderId);
-    await upsertSongToDb({ ...song, driveImportJobId: job.jobId });
-    results.push({ song, job, existing: false });
   }
   return results;
 }
