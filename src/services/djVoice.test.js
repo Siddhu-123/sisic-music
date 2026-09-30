@@ -218,3 +218,61 @@ test('the timeout fallback cancels utterance, restores duck and resolves done', 
   assert.equal(clearedId, 1234);
   assert.equal(voice.busy, false);
 });
+
+// ---- pins found by mutation testing ----
+test('pickVoice falls back to the default voice, then the first voice', () => {
+  assert.equal(pickVoice([{ name: 'x', lang: 'fr-FR' }, { name: 'y', lang: 'de-DE', default: true }]).name, 'y');
+  assert.equal(pickVoice([{ name: 'x', lang: 'fr-FR' }]).name, 'x');
+  assert.equal(pickVoice([{ name: 'x', lang: 'fr-FR' }, { name: 'z', lang: 'de-DE' }]).name, 'x');
+});
+
+test('speak sets rate 1.02 and volume 1 by default, honours numbers and ignores non-numbers', async () => {
+  const run = async options => {
+    const speech = new FakeSpeech();
+    const voice = createDjVoice({ speech, Utterance: FakeUtterance });
+    const done = voice.speak('hello there', options);
+    const { rate, volume } = speech.lastUtterance;
+    speech.lastUtterance.onend();
+    await done;
+    return { rate, volume };
+  };
+  assert.deepEqual(await run(undefined), { rate: 1.02, volume: 1 });
+  assert.deepEqual(await run({ rate: 1.3, volume: 0.5 }), { rate: 1.3, volume: 0.5 });
+  assert.deepEqual(await run({ rate: NaN, volume: 'loud' }), { rate: 1.02, volume: 1 });
+});
+
+test('speech without a speak function, or an Utterance that throws, resolves unavailable', async () => {
+  assert.equal(await createDjVoice({ speech: {}, Utterance: FakeUtterance }).speak('hi'), 'unavailable');
+  assert.equal(await createDjVoice({ speech: { speak() {} }, Utterance: undefined }).speak('hi'), 'unavailable');
+  class Throwing { constructor() { throw new Error('no'); } }
+  assert.equal(await createDjVoice({ speech: new FakeSpeech(), Utterance: Throwing }).speak('hi'), 'unavailable');
+});
+
+test('ducking happens once per utterance even if start fires twice, and never after the utterance ended', async () => {
+  const speech = new FakeSpeech();
+  const calls = [];
+  const voice = createDjVoice({ speech, Utterance: FakeUtterance, duck: (db, s) => calls.push([db, s]) });
+  const done = voice.speak('one two three');
+  const utterance = speech.lastUtterance;
+  utterance.onstart();
+  utterance.onstart();
+  assert.deepEqual(calls, [[-12, 0.3]]);
+  utterance.onend();
+  assert.equal(await done, 'done');
+  utterance.onstart();
+  assert.deepEqual(calls, [[-12, 0.3], [0, 0.5]]);
+});
+
+test('speech errors: canceled and interrupted resolve cancelled, anything else resolves done', async () => {
+  const outcome = async event => {
+    const speech = new FakeSpeech();
+    const voice = createDjVoice({ speech, Utterance: FakeUtterance });
+    const done = voice.speak('hello');
+    speech.lastUtterance.onerror(event);
+    return done;
+  };
+  assert.equal(await outcome({ error: 'canceled' }), 'cancelled');
+  assert.equal(await outcome({ error: 'interrupted' }), 'cancelled');
+  assert.equal(await outcome({ error: 'synthesis-failed' }), 'done');
+  assert.equal(await outcome(undefined), 'done');
+});
