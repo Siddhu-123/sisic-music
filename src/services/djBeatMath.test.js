@@ -241,7 +241,7 @@ test('octave = 1 keeps the incoming on its beats while the outgoing plays on fro
   }
 });
 
-test('when the outgoing list has a tempo ramp the feed-forward rate follows it beat by beat and the simulated incoming stays within 10 ms of desired', () => {
+test('when the outgoing list has a tempo ramp the feed-forward rate follows it (averaged over a few beats) and the simulated incoming stays within 10 ms of desired', () => {
   const gaps = Array.from({ length: 30 }, (_, i) => 500 - i * 3);
   const outBeats = [0];
   for (const g of gaps) outBeats.push(outBeats.at(-1) + g / 1000);
@@ -263,7 +263,9 @@ test('when the outgoing list has a tempo ramp the feed-forward rate follows it b
     assert.ok(absError < 0.010, `incoming error ${absError} exceeded 10 ms at outTime=${outTime}`);
 
     const b = Math.max(0, Math.min(gaps.length - 1, Math.floor(beatIndexAt(outBeats, outTime))));
-    const expectedFeedForward = 0.5 / (gaps[b] / 1000);
+    const lo = Math.max(0, b + 1 - 4);
+    const hi = Math.min(outBeats.length - 1, b + 4);
+    const expectedFeedForward = 0.5 / ((outBeats[hi] - outBeats[lo]) / (hi - lo));
     const actualFeedForward = step.rate / (1 - Math.min(Math.max(step.errorSeconds / 0.8, -MAX_FOLLOW_RATE_STEP), MAX_FOLLOW_RATE_STEP));
     assert.ok(Math.abs(actualFeedForward - expectedFeedForward) < 1e-9, `feed-forward rate should track beat by beat`);
 
@@ -271,6 +273,19 @@ test('when the outgoing list has a tempo ramp the feed-forward rate follows it b
     inTime += dt * step.rate;
   }
   assert.ok(maxAbsError < 0.010, 'simulated incoming stays within 10 ms of desired throughout ramp');
+});
+
+test('beats quantised to the tracker\'s 20 ms grid do not make the feed-forward rate jump between beats', () => {
+  const grid = 0.02;
+  const outBeats = Array.from({ length: 64 }, (_, i) => Math.round(i * (60 / 83.9) / grid) * grid);
+  const inBeats = Array.from({ length: 64 }, (_, i) => Math.round(i * (60 / 80.96) / grid) * grid);
+  const follower = beatFollower({ outBeats, inBeats, outTime: 4, inTime: 4 });
+  const truth = 83.9 / 80.96;
+  for (let outTime = 5; outTime < 40; outTime += 0.37) {
+    const step = followerStep(follower, { outTime, inTime: timeAtBeatIndex(inBeats, beatIndexAt(outBeats, outTime) + follower.k0), outRate: 1 });
+    assert.ok(Math.abs(step.rate / (1 - Math.min(Math.max(step.errorSeconds / 0.8, -0.04), 0.04)) / truth - 1) < 0.01,
+      `feed-forward ${step.rate} strays more than 1 % from ${truth} at ${outTime}`);
+  }
 });
 
 test('sanitizer keeps valid lists, drops invalid ones, keeps records valid without them, and drops unknown fields', () => {

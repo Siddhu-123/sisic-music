@@ -362,7 +362,7 @@ export class PlaybackController {
               mix.candidateRhythm?.beatListVersion === 1 &&
               (mix.sourceRhythm?.outroVirtual ?? 0) <= 0.25 * outBeats.length &&
               (mix.candidateRhythm?.introVirtual ?? 0) <= 0.25 * inBeats.length &&
-              outgoing.currentTime >= outBeats[0] - 2 &&
+              outgoing.currentTime >= outBeats[0] - 8 &&
               outgoing.currentTime <= outBeats[outBeats.length - 1] + 8
             ) {
               const follower = beatFollower({

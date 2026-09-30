@@ -86,17 +86,19 @@ export function timeAtBeatIndex(beats, index) {
 }
 
 /**
- * The duration in seconds of the beat interval containing the given song time.
+ * The beat period in seconds around the given song time, averaged over up to 2 * halfWindow beats.
+ * The tracker reports beats on a 20 ms grid, so one gap alone can be 3 % off; a window averages that out
+ * while still following a real tempo change.
  */
-export function localPeriodAt(beats, time) {
+export function localPeriodAt(beats, time, halfWindow = 4) {
   if (!Array.isArray(beats) || beats.length < 2 || !Number.isFinite(time)) return NaN;
   const last = beats.length - 1;
-  if (time <= beats[0]) return beats[1] - beats[0];
-  if (time >= beats[last]) return beats[last] - beats[last - 1];
-  const idx = beatIndexAt(beats, time);
-  if (!Number.isFinite(idx)) return NaN;
-  const i = Math.max(0, Math.min(last - 1, Math.floor(idx)));
-  return beats[i + 1] - beats[i];
+  const index = beatIndexAt(beats, time);
+  if (!Number.isFinite(index)) return NaN;
+  const interval = Math.max(0, Math.min(last - 1, Math.floor(index)));
+  const lo = Math.max(0, interval + 1 - halfWindow);
+  const hi = Math.min(last, interval + halfWindow);
+  return (beats[hi] - beats[lo]) / (hi - lo);
 }
 
 /**
