@@ -604,6 +604,12 @@ function App() {
     new Set(driveDuplicateSongs.map(song => song.songKey).filter(Boolean))
   ), [driveDuplicateSongs]);
 
+  // Stable list for the galaxy so it doesn't re-cluster on every player tick.
+  const galaxySongs = useMemo(
+    () => allSongs.filter(song => !duplicateSongKeySet.has(song.songKey)),
+    [allSongs, duplicateSongKeySet],
+  );
+
   const driveSongKeySet = useMemo(() => {
     return new Set(driveIndexSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
   }, [driveIndexSongs]);
@@ -1869,6 +1875,7 @@ function App() {
         />
         <ImportStatusPanel jobs={importJobs} embeddingJobs={embeddingJobs} />
 
+        {(view === VIEWS.HOME || view === VIEWS.DOWNLOADS) && (
         <section className="drive-summary" aria-label="Drive storage summary">
           <div>
             <span className="drive-summary__label">Drive folder</span>
@@ -1895,6 +1902,7 @@ function App() {
             <span>Storage</span>
           </button>
         </section>
+        )}
 
         {view === VIEWS.HOME && (
           <>
@@ -2117,9 +2125,10 @@ function App() {
         {view === VIEWS.CONSTELLATION && (
           <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
             <ConstellationView
-              songs={allSongs.filter(song => !duplicateSongKeySet.has(song.songKey))}
+              songs={galaxySongs}
               currentSong={player.currentSong}
-              onPlaySong={(song) => handlePlaySong(song, allSongs.filter(item => !duplicateSongKeySet.has(item.songKey)))}
+              onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
+              onPlayCluster={(clusterSongs) => clusterSongs.length && handlePlaySong(clusterSongs[0], clusterSongs)}
               onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
             />
           </Suspense>

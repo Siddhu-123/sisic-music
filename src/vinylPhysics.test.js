@@ -21,7 +21,8 @@ test('vinyl rotates at 45 RPM and maps a full turn to the correct playback time'
   assert.equal(VINYL_SECONDS_PER_TURN, 4 / 3);
   assert.equal(vinylSecondsFromDegrees(360), 4 / 3);
   assert.equal(vinylSecondsFromDegrees(-180), -2 / 3);
-  assert.equal(vinylSecondsPerTurn(33, 1), 60 / 33);
+  // The "33" setting is 33⅓ RPM.
+  assert.ok(Math.abs(vinylSecondsPerTurn(33, 1) - (60 / (100 / 3))) < 1e-9);
   assert.equal(vinylSecondsPerTurn(45, 1.08), 60 / (45 * 1.08));
 });
 
@@ -31,8 +32,8 @@ test('motor target velocity synchronizes playing, buffering, paused, and stopped
   assert.equal(calculateMotorTargetVelocity({ isPlaying: true, hasCurrentSong: true }), nominal45);
 
   // 33 RPM
-  const nominal33 = 360 / (60 / 33);
-  assert.equal(calculateMotorTargetVelocity({ isPlaying: true, hasCurrentSong: true, rpm: 33 }), nominal33);
+  const nominal33 = 360 / (60 / (100 / 3));
+  assert.ok(Math.abs(calculateMotorTargetVelocity({ isPlaying: true, hasCurrentSong: true, rpm: 33 }) - nominal33) < 1e-9);
 
   // Pitch modified
   const pitched45 = 360 / (60 / (45 * 1.08));
@@ -86,4 +87,12 @@ test('tonearm progress tracks from the outer groove toward the label', () => {
   assert.equal(tonearmAngleFromProgress(0), TONEARM_START_ANGLE);
   assert.equal(tonearmAngleFromProgress(100), TONEARM_END_ANGLE);
   assert.equal(tonearmProgressFromAngle((TONEARM_START_ANGLE + TONEARM_END_ANGLE) / 2), 50);
+});
+
+test('33 RPM runs at 33⅓ and the lifted arm rests off the record', async () => {
+  const { physicalRpm, vinylSecondsPerTurn, TONEARM_LIFTED_ANGLE, TONEARM_START_ANGLE } = await import('./vinylPhysics.js');
+  assert.ok(Math.abs(physicalRpm(33) - 100 / 3) < 1e-9);
+  assert.ok(Math.abs(vinylSecondsPerTurn(33) - 1.8) < 1e-9);
+  assert.equal(vinylSecondsPerTurn(45), 60 / 45);
+  assert.ok(TONEARM_LIFTED_ANGLE < TONEARM_START_ANGLE);
 });

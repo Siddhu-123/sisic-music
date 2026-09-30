@@ -27,6 +27,9 @@ const MOOD_RULES = [
   ['Uplifting', ['sun', 'summer', 'happy', 'uplifting', 'morning', 'bright']],
 ];
 
+// Fallback labels mean "no match", so they never name a mix or a filter chip.
+const GENERIC_FACETS = new Set(['Open format', 'Discovery']);
+
 function songText(song = {}) {
   return normalizeText([
     song.track,
@@ -121,7 +124,7 @@ export function getExploreFacets(songs = [], type = 'genre', limit = 8) {
   const labelsForSong = type === 'mood' ? getSongMoods : getSongGenres;
   const counts = new Map();
   for (const song of songs) {
-    for (const label of labelsForSong(song)) counts.set(label, (counts.get(label) || 0) + 1);
+    for (const label of labelsForSong(song)) if (!GENERIC_FACETS.has(label)) counts.set(label, (counts.get(label) || 0) + 1);
   }
   return [...counts.entries()]
     .sort(([, a], [, b]) => b - a)
@@ -136,7 +139,7 @@ function songKey(song) {
 function dominantFacet(songs, getLabels) {
   const counts = new Map();
   for (const song of songs) {
-    for (const label of getLabels(song)) counts.set(label, (counts.get(label) || 0) + Math.max(1, Number(song.playCount) || 0));
+    for (const label of getLabels(song)) if (!GENERIC_FACETS.has(label)) counts.set(label, (counts.get(label) || 0) + Math.max(1, Number(song.playCount) || 0));
   }
   return [...counts.entries()].sort(([, a], [, b]) => b - a)[0]?.[0] || '';
 }
@@ -154,7 +157,7 @@ export function buildExploreMixes(songs = [], {
   for (const event of starts) {
     if (event.songKey) playCountByKey.set(event.songKey, (playCountByKey.get(event.songKey) || 0) + 1);
   }
-  const profile = buildContextualTasteProfile(pool, playbackEvents, { now, currentContext });
+  const profile = buildContextualTasteProfile(pool, playbackEvents, { now, currentContext, likedSongKeys: liked });
   const ranked = rankContextualSongs(pool, {
     profile,
     likedSongKeys: liked,

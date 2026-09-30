@@ -91,3 +91,26 @@ test('cluster view projects songs to 3D and assigns bounded k-means groups', () 
     assert.ok(item.clusterSize >= 1);
   }
 });
+
+test('artist identity outweighs unrelated titles and mood markers match whole words', () => {
+  const a = computeSongEmbedding({ artist: 'Artist One', track: 'Morning Light' });
+  const b = computeSongEmbedding({ artist: 'Artist One', track: 'Completely Different' });
+  const c = computeSongEmbedding({ artist: 'Someone Else', track: 'Morning Lights' });
+  assert.ok(cosineSimilarity(a, b) > cosineSimilarity(a, computeSongEmbedding({ artist: 'Third', track: 'Completely Different' })));
+  assert.ok(cosineSimilarity(a, c) > 0);
+  const therapy = computeSongEmbedding({ artist: 'Z', track: 'Therapy' });
+  const rap = computeSongEmbedding({ artist: 'Q', track: 'Rap Song' });
+  const rap2 = computeSongEmbedding({ artist: 'W', track: 'Another Rap' });
+  assert.ok(cosineSimilarity(rap, rap2) > cosineSimilarity(therapy, rap2));
+});
+
+test('getSongEmbedding ignores stale v1 and audio vectors but keeps current ones', async () => {
+  const { getSongEmbedding, METADATA_EMBEDDING_MODEL } = await import('./tasteEmbeddingService.js');
+  const song = { artist: 'A', track: 'T' };
+  const fresh = computeSongEmbedding(song);
+  const stored = new Array(64).fill(0).map((_, i) => (i === 0 ? 1 : 0));
+  assert.deepEqual(getSongEmbedding({ ...song, vector: stored, embeddingModel: 'metadata-ngram-v1' }), fresh);
+  assert.deepEqual(getSongEmbedding({ ...song, vector: stored, embeddingProvider: 'sisic-client' }), fresh);
+  assert.deepEqual(getSongEmbedding({ ...song, vector: new Array(200).fill(0.07), vectorType: 'learned-audio' }), fresh);
+  assert.equal(getSongEmbedding({ ...song, vector: stored, embeddingModel: METADATA_EMBEDDING_MODEL }), stored);
+});

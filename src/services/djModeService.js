@@ -203,7 +203,7 @@ export function scoreDjTransition(source = {}, candidate = {}, positionSeconds) 
 
 export function rankDjCandidates({ source, songs = [], playbackEvents = [], likedSongKeys = [], transitionScores = new Map(), history = {}, positionSeconds, now = Date.now(), currentContext = getPlaybackContext(now, typeof navigator === 'undefined' ? '' : navigator.userAgent) } = {}) {
   const sourceKey = keyOf(source);
-  const profile = buildContextualTasteProfile(songs, playbackEvents, { now, currentContext });
+  const profile = buildContextualTasteProfile(songs, playbackEvents, { now, currentContext, likedSongKeys });
   const contextual = rankContextualSongs(songs.filter(song => song.driveFileId), {
     profile,
     likedSongKeys,

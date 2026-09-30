@@ -43,7 +43,8 @@ export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs
             <div className="empty-state">No recommendations found in your library yet.</div>
           ) : (
             recommendations.map((song) => {
-              const matchPct = Math.round(((song.similarityScore + 1) / 2) * 100);
+              // Cosine similarity mapped directly; (s + 1) / 2 showed unrelated songs as a 50%+ match.
+              const matchPct = Math.round(Math.max(0, Math.min(1, song.similarityScore)) * 100);
               return (
                 <div key={song.songKey} className="recommendation-card">
                   <div className="recommendation-info">

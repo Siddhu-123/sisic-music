@@ -107,6 +107,7 @@ export function Turntable({
       ? TONEARM_LIFTED_ANGLE
       : tonearmAngleFromProgress(releasedTonearmProgress ?? displayedProgress);
   const pitchPercent = ((pitchModifier - 1) * 100).toFixed(1);
+  const rpmLabel = Number(rpm) === 33 ? '33⅓' : String(rpm);
 
   const writeRecordRotation = useCallback(angle => {
     recordRotationRef.current = angle;
@@ -189,12 +190,13 @@ export function Turntable({
     motorFrameRef.current = window.requestAnimationFrame(tick);
   }, [writeRecordRotation]);
 
-  const beginInertia = initialVelocity => {
+  const beginInertia = (initialVelocity, resumeMotor = true) => {
     cancelMotorFrame();
     motorVelocityRef.current = initialVelocity * RADIANS_TO_DEGREES;
     motorInertiaRef.current = {
       initial: initialVelocity,
-      target: (2 * Math.PI) / vinylSecondsPerTurn(rpm, pitchModifier),
+      // A record scratched while paused settles to rest instead of spinning back up.
+      target: resumeMotor ? (2 * Math.PI) / vinylSecondsPerTurn(rpm, pitchModifier) : 0,
       startedAt: performance.now(),
     };
     setDragMode('inertia');
@@ -380,6 +382,7 @@ export function Turntable({
       startX: event.clientX,
       startY: event.clientY,
       startProgress: progress,
+      wasPlaying: isPlaying,
       startRecordAngle: recordRotationRef.current,
       lastPointerAngle: pointerAngle(event, centerX, centerY),
       lastMoveAt: performance.now(),
@@ -481,7 +484,7 @@ export function Turntable({
     if (interaction.startedScratch) {
       onSeek?.(target);
       setDragMode('inertia');
-      beginInertia(interaction.lastVelocity);
+      beginInertia(interaction.lastVelocity, interaction.wasPlaying);
     } else {
       setDragMode(null);
       onTogglePlay?.();
@@ -621,10 +624,10 @@ export function Turntable({
           : isBuffering
             ? 'Buffering audio stream…'
             : isBraking
-              ? `Platter braking · ${rpm} RPM`
+              ? `Platter braking · ${rpmLabel} RPM`
               : !isPlaying
                 ? 'Paused · motor standby'
-                : `${rpm} RPM · ${pitchPercent >= 0 ? '+' : ''}${pitchPercent}% pitch · direct drive`;
+                : `${rpmLabel} RPM · ${pitchPercent >= 0 ? '+' : ''}${pitchPercent}% pitch · direct drive`;
 
   return (
     <div className="turntable-shell">
@@ -691,7 +694,7 @@ export function Turntable({
 
         <div className="turntable__speed-badge" aria-hidden="true">
           <span className="turntable__speed-dot" />
-          <span>{rpm} RPM</span>
+          <span>{rpmLabel} RPM</span>
           <small>Direct Drive</small>
         </div>
         <div className="turntable__deck-slogan" aria-hidden="true">GOOD MUSIC BRIGHTER DAYS</div>

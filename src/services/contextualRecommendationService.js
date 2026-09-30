@@ -1,14 +1,16 @@
 import { getSongKey } from '../songIdentity.js';
 import {
-  computeSongEmbedding,
   cosineSimilarity,
   EMBEDDING_DIMENSIONS,
+  getSongEmbedding,
 } from './tasteEmbeddingService.js';
 
 export const PLAYBACK_SESSION_GAP_MS = 20 * 60 * 1000;
 export const PLAYBACK_START_EVENT_TYPES = Object.freeze(['playback-start', 'playback-resume']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// How quickly "what you were just listening to" fades into long-term taste.
+const SEQUENCE_HALF_LIFE_MS = 6 * 60 * 60 * 1000;
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -208,8 +210,7 @@ export function sessionizePlaybackEvents(events = [], options = {}) {
 }
 
 function getSongVector(song) {
-  if (song?.vector && song.vector.length === EMBEDDING_DIMENSIONS) return song.vector;
-  return computeSongEmbedding(song);
+  return getSongEmbedding(song || {});
 }
 
 function normaliseVector(values) {
@@ -256,6 +257,7 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
   const negativeAccumulator = new Float32Array(targetDimensions);
   const recentAccumulator = new Float32Array(targetDimensions);
   const lastPlayedAtByKey = new Map();
+  const lastSkippedAtByKey = new Map();
   const now = timestampValue(options.now, Date.now());
   const halfLifeDays = Math.max(1, finiteNumber(options.recencyHalfLifeDays, 30));
   const currentContext = options.currentContext || getPlaybackContext(now, options.userAgent || '');
@@ -264,6 +266,8 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
 
   function getCompatibleVector(song) {
     if (!song) return null;
+    // Metadata space always goes through the versioned helper so stale v1 vectors never mix in.
+    if (targetSpace === 'metadata') return targetDimensions === EMBEDDING_DIMENSIONS ? getSongVector(song) : null;
     const meta = resolveEmbeddingMetadata(song);
     if (meta && areVectorSpacesCompatible(spaceMeta, meta)) {
       return meta.vector;
@@ -279,7 +283,7 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     const recencyWeight = 2 ** (-ageDays / halfLifeDays);
     const sessionWeight = recencyWeight * contextMatchScore(session.context, currentContext);
 
-    session.tracks.forEach(track => {
+    session.tracks.forEach((track, trackIndex) => {
       const song = songByKey.get(track.songKey);
       if (!song) return;
       const vector = getCompatibleVector(song);
@@ -293,16 +297,35 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
       if (negativeWeight > 0) {
         if (vector) addWeightedVector(negativeAccumulator, vector, negativeWeight * sessionWeight);
         negativeSignalCount += 1;
+        if (track.status === 'skipped') {
+          lastSkippedAtByKey.set(track.songKey, Math.max(lastSkippedAtByKey.get(track.songKey) || 0, track.lastEventAt));
+        }
       }
 
       if (sessionIndex === sessions.length - 1 && track.status !== 'skipped' && vector) {
-        const orderWeight = 0.65 + ((session.tracks.indexOf(track) + 1) / Math.max(1, session.tracks.length)) * 0.35;
+        const orderWeight = 0.65 + ((trackIndex + 1) / Math.max(1, session.tracks.length)) * 0.35;
         addWeightedVector(recentAccumulator, vector, Math.max(0.2, positiveWeight) * orderWeight);
       }
     });
   });
 
+  // Explicit likes and imported play counts are durable taste signals even
+  // with little or no event history (e.g. a freshly synced device).
+  const likedSongKeys = new Set(options.likedSongKeys || []);
+  let explicitSignalCount = 0;
+  songs.forEach(song => {
+    const key = song.songKey || getSongKey(song);
+    const likeWeight = likedSongKeys.has(key) ? 0.9 : 0;
+    const playWeight = Math.min(0.6, Math.log1p(finiteNumber(song.playCount)) * 0.2);
+    if (!likeWeight && !playWeight) return;
+    const vector = getCompatibleVector(song);
+    if (!vector) return;
+    addWeightedVector(positiveAccumulator, vector, likeWeight + playWeight);
+    explicitSignalCount += 1;
+  });
+
   const recentSession = sessions.at(-1);
+  const sequenceWeight = recentSession ? 2 ** (-Math.max(0, now - recentSession.endedAt) / SEQUENCE_HALF_LIFE_MS) : 0;
   return {
     vector: normaliseVector(positiveAccumulator),
     negativeVector: normaliseVector(negativeAccumulator),
@@ -311,10 +334,13 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     sessionCount: sessions.length,
     positiveSignalCount,
     negativeSignalCount,
-    hasSignal: Boolean(positiveSignalCount || negativeSignalCount),
+    explicitSignalCount,
+    sequenceWeight,
+    hasSignal: Boolean(positiveSignalCount || negativeSignalCount || explicitSignalCount),
     currentContext,
     recentSongKeys: recentSession?.trackKeys || [],
     lastPlayedAtByKey,
+    lastSkippedAtByKey,
     targetSpace,
     spaceMeta,
   };
@@ -331,18 +357,32 @@ function recencyPenalty(lastPlayedAt, now) {
   return Math.max(0, 0.26 * (1 - Math.min(1, ageDays / 14)));
 }
 
+function skipPenalty(lastSkippedAt, now) {
+  if (!lastSkippedAt) return 0;
+  const ageDays = Math.max(0, (now - lastSkippedAt) / DAY_MS);
+  return Math.max(0, 0.3 * (1 - Math.min(1, ageDays / 7)));
+}
+
+function lookup(mapOrObject, key) {
+  return mapOrObject instanceof Map ? mapOrObject.get(key) : mapOrObject?.[key];
+}
+
 export function rankContextualSongs(songs = [], options = {}) {
   const profile = options.profile;
   const likedSongKeys = new Set(options.likedSongKeys || []);
   const excluded = new Set(options.excludeSongKeys || []);
   const playCountByKey = options.playCountByKey || new Map();
   const now = timestampValue(options.now, Date.now());
+  // Stale sessions hand their weight back to long-term taste instead of
+  // steering today's picks with what was played weeks ago.
+  const sequenceWeight = Number.isFinite(profile?.sequenceWeight) ? Math.min(1, Math.max(0, profile.sequenceWeight)) : 1;
+  const tasteWeight = 0.52 + (0.3 * (1 - sequenceWeight));
   const scored = songs
     .map(song => {
       const key = song.songKey || getSongKey(song);
       let vector = null;
       if (profile?.spaceMeta) {
-        const meta = resolveEmbeddingMetadata(song);
+        const meta = profile.spaceMeta.vectorType === 'metadata' ? null : resolveEmbeddingMetadata(song);
         if (meta && areVectorSpacesCompatible(profile.spaceMeta, meta)) {
           vector = meta.vector;
         } else if (profile.spaceMeta.vectorType === 'metadata') {
@@ -359,12 +399,10 @@ export function rankContextualSongs(songs = [], options = {}) {
       const likedBoost = likedSongKeys.has(key) ? 0.22 : 0;
       const popularityBoost = Math.min(0.14, Math.log1p(plays) * 0.045);
       const discoveryBoost = plays === 0 ? (profile?.hasSignal ? 0.035 : 0.05) : 0;
-      const lastPlayedAt = profile?.lastPlayedAtByKey instanceof Map
-        ? profile.lastPlayedAtByKey.get(key)
-        : profile?.lastPlayedAtByKey?.[key];
-      const recentPenalty = recencyPenalty(lastPlayedAt, now);
-      const score = (tasteAffinity * 0.52)
-        + (sequenceAffinity * 0.3)
+      const recentPenalty = recencyPenalty(lookup(profile?.lastPlayedAtByKey, key), now)
+        + skipPenalty(lookup(profile?.lastSkippedAtByKey, key), now);
+      const score = (tasteAffinity * tasteWeight)
+        + (sequenceAffinity * 0.3 * sequenceWeight)
         - (skipAffinity * 0.28)
         + likedBoost
         + popularityBoost
@@ -596,6 +634,8 @@ export async function buildUpNextRecommendations({
     targetSpace: currentMeta?.vectorType || 'metadata',
     targetModel: currentMeta?.model || null,
     targetDimensions: currentMeta?.dimensions || EMBEDDING_DIMENSIONS,
+    likedSongKeys,
+    now: Date.now(),
   });
 
   // 4. Rank candidates using embedding similarity when available and compatible, with honest fallback.

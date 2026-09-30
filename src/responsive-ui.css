@@ -1156,3 +1156,71 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
     height: 100px;
   }
 }
+
+/* Galaxy ------------------------------------------------------------------ */
+/* Fixed-height stage the canvas fills, so its pixel buffer (width x DPR) can
+   never stretch the layout on high-DPI screens. */
+.constellation-canvas-wrapper { flex: none; height: clamp(360px, 62vh, 720px); min-height: 0; }
+.constellation-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.constellation-cluster-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 11px;
+  border: 1px solid transparent; border-radius: 999px; background: var(--bg-card, var(--bg));
+  color: var(--text-muted); font: inherit; font-size: .72rem; cursor: pointer;
+  box-shadow: var(--shadow-soft); transition: color .15s ease, border-color .15s ease;
+}
+.constellation-cluster-chip:hover:not(:disabled),
+.constellation-cluster-chip:focus-visible { color: var(--text); border-color: var(--accent-blue, var(--green)); }
+.constellation-cluster-chip:disabled { cursor: default; box-shadow: none; }
+.constellation-cluster-chip i,
+.constellation-tooltip__dot { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 50%; vertical-align: middle; }
+
+@media (max-width: 760px) {
+  /* One swipeable line of clusters instead of a wall of wrapped chips. */
+  .constellation-cluster-legend { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-inline: -16px; padding: 4px 16px 8px; }
+  .constellation-cluster-legend::-webkit-scrollbar { display: none; }
+  .constellation-cluster-chip { flex: none; white-space: nowrap; }
+  .constellation-canvas-wrapper { height: 58vh; }
+}
+
+/* Card rails: transparent track (no grey band under the cards), hidden on touch. */
+.content-rail { scrollbar-color: rgba(128, 132, 145, 0.35) transparent; }
+@media (pointer: coarse) {
+  .content-rail { scrollbar-width: none; }
+  .content-rail::-webkit-scrollbar { display: none; }
+}
+
+.constellation-controls { flex-wrap: wrap; }
+
+@media (max-width: 760px) {
+  /* Drive summary: one swipeable row instead of filling the first screen. */
+  .drive-summary {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    gap: 8px;
+    margin: 0 -16px 16px;
+    padding: 4px 16px 12px;
+  }
+  .drive-summary::-webkit-scrollbar { display: none; }
+  .drive-summary > div,
+  .drive-summary__button {
+    flex: 0 0 auto;
+    min-width: 128px;
+    min-height: 0;
+    padding: 8px 12px;
+    scroll-snap-align: start;
+  }
+  /* Explore filters: one swipeable line per group instead of a wall of chips. */
+  .explore-filter-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin-inline: -16px;
+    padding: 4px 16px 8px;
+  }
+  .explore-filter-row::-webkit-scrollbar { display: none; }
+  .explore-filter-row > span { width: auto; flex: none; }
+  .explore-filter-row > button { flex: none; white-space: nowrap; }
+  .constellation-title-group { align-items: flex-start; }
+}
