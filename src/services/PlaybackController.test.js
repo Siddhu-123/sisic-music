@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PlaybackController, QUEUE_STORAGE_KEY } from './PlaybackController.js';
-import { incomingStartPosition, phaseErrorSeconds } from './djBeatMath.js';
+import { MAX_FOLLOW_RATE_STEP, incomingStartPosition, phaseErrorSeconds } from './djBeatMath.js';
 
 const songs = ['a', 'b', 'c', 'd'].map(songKey => ({ songKey, track: songKey, artist: 'Artist', driveFileId: songKey }));
 const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
@@ -10,7 +10,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
 class FakeAudio {
   constructor() {
     this.listeners = new Map(); this.duration = 0; this.currentTime = 0; this.paused = true; this.src = ''; this.error = null;
-    this.currentGains = [0, 0, 0, 0, 0]; this.fades = []; this.targetMotorRate = 1; this.pitchModifier = 1;
+    this.currentGains = [0, 0, 0, 0, 0]; this.fades = []; this.targetMotorRate = 1; this.pitchModifier = 1; this.rpm = 45;
     this.pitchModifierCalls = []; this.bassCuts = []; this.seeks = [];
     this.element = { readyState: 4, seeking: false, buffered: { length: 0 } };
   }
@@ -23,8 +23,8 @@ class FakeAudio {
   clear() { this.src = ''; this.duration = 0; this.currentTime = 0; this.paused = true; this.emit('timeupdate'); }
   seek(value) { this.currentTime = value; this.seeks.push(value); this.emit('timeupdate'); }
   setVolume(value) { this.volume = value; }
-  setRpm() {}
-  setPitchModifier(value) { this.pitchModifier = value; this.pitchModifierCalls.push(value); }
+  setRpm(value) { this.rpm = Number(value) < 40 ? 100 / 3 : 45; }
+  setPitchModifier(value) { this.pitchModifier = value; this.pitchModifierCalls.push(value); this.targetMotorRate = (this.rpm / 45) * value; }
   applyPreset() {} setBandGain() {}
   ensureContext() { return {}; }
   setFade(value, seconds, options) { this.fades.push([value, seconds, options]); return true; }
@@ -591,4 +591,393 @@ test('after a beat mix the pitch eases home over seconds instead of jumping, and
   c.beatMixPitchShifted = true;
   c.finishFade();
   assert.equal(engine.pitchModifier, 1.04, 'an abrupt end (scratch, skip) restores at once');
+});
+
+function createTestTimer() {
+  let cb = null;
+  const setIntervalFn = fn => { cb = fn; return 1; };
+  const clearIntervalFn = () => { cb = null; };
+  const tick = () => { if (cb) cb(); };
+  return {
+    setIntervalFn,
+    clearIntervalFn,
+    tick,
+    get registered() { return Boolean(cb); },
+  };
+}
+
+test('beat follower PLL loop wiring in PlaybackController', async t => {
+  const outBeats = [10000, ...Array(31).fill(500)];
+  const inBeats = [0, ...Array(31).fill(500)];
+  const outRhythm = {
+    bpm: 120, firstDownbeat: 10, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8,
+    rhythmStatus: 'ready', outroStart: 10, outroBars: 8,
+    outroBeats: outBeats, outroVirtual: 0, beatListVersion: 1,
+  };
+  const inRhythm = {
+    bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8,
+    rhythmStatus: 'ready', introBars: 8, startBpm: 120,
+    introBeats: inBeats, introVirtual: 0, beatListVersion: 1,
+  };
+
+  // (a) with valid beat lists and an incoming engine whose fake currentTime runs 30 ms ahead of the desired beat,
+  // after some 100 ms ticks the requested pitch modifier is lower than the feed-forward ratio (slowing down),
+  // and the applied rates stay within MAX_FOLLOW_RATE_STEP of the feed-forward rate; with a 30 ms lag it speeds up
+  // (mutating the sign of the correction must fail a test)
+  {
+    const timer = createTestTimer();
+    const songA = { ...songs[0], djRhythm: outRhythm };
+    const songB = { ...songs[1], djRhythm: inRhythm };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    const plan = {
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: inRhythm,
+    };
+    assert.equal(c.planDjTransition(plan), true);
+    await settle();
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    const incoming = c.audio;
+    assert.equal(c.retiring, outgoing);
+    assert.ok(c.followLoop?.running, 'followLoop should be running');
+    assert.equal(timer.registered, true);
+
+    const feedForwardRatio = 1.0;
+    const initialOut = outgoing.currentTime;
+    const initialIn = incoming.currentTime;
+
+    // Simulate tick: outgoing advances by 0.1s, incoming runs 30 ms ahead (+0.03s) of desired beat
+    outgoing.currentTime = initialOut + 0.1;
+    incoming.currentTime = initialIn + 0.1 + 0.03;
+    timer.tick();
+
+    assert.ok(
+      incoming.pitchModifier < feedForwardRatio,
+      `expected pitch modifier to slow down (< ${feedForwardRatio}), got ${incoming.pitchModifier}`
+    );
+    assert.ok(
+      feedForwardRatio - incoming.pitchModifier <= MAX_FOLLOW_RATE_STEP + 1e-6,
+      `expected rate correction within MAX_FOLLOW_RATE_STEP, got ${feedForwardRatio - incoming.pitchModifier}`
+    );
+    const slowModifier = incoming.pitchModifier;
+
+    // Simulate tick: incoming lags 30 ms behind (-0.03s) desired beat
+    outgoing.currentTime = initialOut + 0.2;
+    incoming.currentTime = initialIn + 0.2 - 0.03;
+    timer.tick();
+
+    assert.ok(
+      incoming.pitchModifier > feedForwardRatio,
+      `expected pitch modifier to speed up (> ${feedForwardRatio}), got ${incoming.pitchModifier}`
+    );
+    assert.ok(
+      incoming.pitchModifier - feedForwardRatio <= MAX_FOLLOW_RATE_STEP + 1e-6,
+      `expected rate correction within MAX_FOLLOW_RATE_STEP, got ${incoming.pitchModifier - feedForwardRatio}`
+    );
+    assert.ok(incoming.pitchModifier > slowModifier, 'speed-up must be higher than slow-down');
+  }
+
+  // (b) an outgoing list whose tempo ramps makes the requested rate follow it beat by beat
+  {
+    const timer = createTestTimer();
+    const rampOutBeats = [10000, 500, 480, 450, 400, ...Array(27).fill(400)];
+    const rampOutRhythm = { ...outRhythm, outroBeats: rampOutBeats };
+    const songA = { ...songs[0], djRhythm: rampOutRhythm };
+    const songB = { ...songs[1], djRhythm: inRhythm };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 5;
+    assert.equal(c.planDjTransition({
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 10,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: rampOutRhythm,
+      candidateRhythm: inRhythm,
+    }), true);
+    await settle();
+
+    outgoing.currentTime = 10;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    const incoming = c.audio;
+    assert.ok(c.followLoop?.running);
+
+    outgoing.currentTime = 10.6;
+    incoming.currentTime = 0.604167;
+    timer.tick();
+    const rate1 = incoming.pitchModifier;
+    assert.ok(Math.abs(rate1 - 500 / 480) < 1e-4, `expected ~${500 / 480}, got ${rate1}`);
+
+    outgoing.currentTime = 11.1;
+    incoming.currentTime = 1.13333;
+    timer.tick();
+    const rate2 = incoming.pitchModifier;
+    assert.ok(Math.abs(rate2 - 500 / 450) < 1e-4, `expected ~${500 / 450}, got ${rate2}`);
+    assert.ok(rate2 > rate1, 'requested rate accelerates beat by beat following outgoing tempo ramp');
+  }
+
+  // (c) without lists, or with introVirtual over 25 %, no follower loop is started and the pitch modifier stays at the constant ratio
+  {
+    const timer = createTestTimer();
+    const noListsOut = { ...outRhythm, outroBeats: null };
+    const noListsIn = { ...inRhythm, introBeats: null };
+    const songA = { ...songs[0], djRhythm: noListsOut };
+    const songB = { ...songs[1], djRhythm: noListsIn };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: noListsOut,
+      candidateRhythm: noListsIn,
+    }), true);
+    await settle();
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    assert.equal(c.followLoop, null, 'no follower loop started without beat lists');
+    assert.equal(timer.registered, false);
+    assert.equal(c.audio.pitchModifier, 1, 'pitch modifier stays at constant ratio');
+  }
+  {
+    const timer = createTestTimer();
+    const highVirtualIn = { ...inRhythm, introVirtual: 9 };
+    const songA = { ...songs[0], djRhythm: outRhythm };
+    const songB = { ...songs[1], djRhythm: highVirtualIn };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: highVirtualIn,
+    }), true);
+    await settle();
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    assert.equal(c.followLoop, null, 'no follower loop started when introVirtual > 25%');
+    assert.equal(timer.registered, false);
+    assert.equal(c.audio.pitchModifier, 1, 'pitch modifier stays at constant ratio');
+  }
+
+  // (d) finishFade stops the follower loop and restores pitch as before
+  {
+    const timer = createTestTimer();
+    const songA = { ...songs[0], djRhythm: outRhythm };
+    const songB = { ...songs[1], djRhythm: inRhythm };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: inRhythm,
+    }), true);
+    await settle();
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    assert.ok(c.followLoop?.running);
+    assert.equal(timer.registered, true);
+
+    c.finishFade({ glide: false });
+    assert.equal(c.followLoop, null, 'followLoop stopped and cleared on finishFade');
+    assert.equal(timer.registered, false, 'timer cleared on finishFade');
+    assert.equal(c.audio.pitchModifier, 1, 'pitch modifier restored to state setting');
+  }
+
+  // (e) a large error (over 0.75 beat) stops following (the loop reports 'lost-lock')
+  {
+    const timer = createTestTimer();
+    const songA = { ...songs[0], djRhythm: outRhythm };
+    const songB = { ...songs[1], djRhythm: inRhythm };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: inRhythm,
+    }), true);
+    await settle();
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    const incoming = c.audio;
+    assert.ok(c.followLoop?.running);
+
+    const initialOut = outgoing.currentTime;
+    const initialIn = incoming.currentTime;
+    outgoing.currentTime = initialOut + 0.1;
+    incoming.currentTime = initialIn + 0.1 + 0.40;
+    timer.tick();
+
+    assert.equal(c.followLoop.running, false, 'loop stopped following after large error');
+    assert.equal(c.followLoop.stopReason, 'lost-lock', 'loop reported lost-lock');
+    assert.equal(timer.registered, false, 'timer was cleared on lost-lock');
+  }
+
+  // (f) setPitchModifier during a mix stops the follower
+  {
+    const timer = createTestTimer();
+    const songA = { ...songs[0], djRhythm: outRhythm };
+    const songB = { ...songs[1], djRhythm: inRhythm };
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: inRhythm,
+    }), true);
+    await settle();
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    assert.ok(c.followLoop?.running);
+    assert.equal(timer.registered, true);
+
+    c.setPitchModifier(1.05);
+    assert.equal(c.followLoop, null, 'setPitchModifier stops and clears followLoop');
+    assert.equal(timer.registered, false, 'timer cleared on setPitchModifier');
+    assert.equal(c.audio.pitchModifier, 1.05);
+  }
+});
+
+
+test('the beat follower only starts on lists it can trust and applies the rate the engine really plays', async t => {
+  const beats = (first, count = 32) => [first, ...Array(count - 1).fill(500)];
+  const rhythm = extra => ({ bpm: 120, firstDownbeat: 10, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready', outroStart: 10, outroBars: 8,
+    introBars: 8, startBpm: 120, beatListVersion: 1, outroVirtual: 0, introVirtual: 0, outroBeats: beats(10000), introBeats: beats(0), ...extra });
+  const start = async ({ source = {}, incomingRhythm = {}, outRate = 1, incomingRpm = 45 } = {}) => {
+    const timer = createTestTimer();
+    const outRhythm = rhythm(source);
+    const inRhythm = rhythm(incomingRhythm);
+    const { c } = fixture(t, { followTimers: timer });
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([{ ...songs[0], djRhythm: outRhythm }, { ...songs[1], djRhythm: inRhythm }]);
+    await settle();
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    outgoing.targetMotorRate = outRate;
+    assert.equal(c.planDjTransition({ candidate: { ...songs[1], djRhythm: inRhythm }, sourceSongKey: 'a', transitionAtSeconds: 20, crossfadeSeconds: 8, beatSync: true, mixBars: 4,
+      tempoRatio: 1, tempoOctave: 0, sourceRhythm: outRhythm, candidateRhythm: inRhythm }), true);
+    await settle();
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+    const incoming = c.audio;
+    incoming.setRpm(incomingRpm);
+    return { c, timer, outgoing, incoming };
+  };
+
+  assert.equal((await start()).c.followLoop?.running, true, 'trusted lists start a follower');
+  assert.equal((await start({ source: { outroVirtual: 16 } })).c.followLoop, null, 'half the outgoing list guessed');
+  assert.equal((await start({ incomingRhythm: { introVirtual: 16 } })).c.followLoop, null, 'half the incoming list guessed');
+  assert.equal((await start({ source: { beatListVersion: 2 } })).c.followLoop, null, 'unknown outgoing list version');
+  assert.equal((await start({ incomingRhythm: { beatListVersion: 2 } })).c.followLoop, null, 'unknown incoming list version');
+  assert.equal((await start({ source: { outroBeats: beats(30000) } })).c.followLoop, null, 'lock far before the outgoing list begins');
+
+  for (const [outRate, incomingRpm] of [[1.05, 45], [1, 100 / 3]]) {
+    const { timer, outgoing, incoming } = await start({ outRate, incomingRpm });
+    const outAt = outgoing.currentTime;
+    const inAt = incoming.currentTime;
+    outgoing.currentTime = outAt + 0.1 * outRate;
+    incoming.currentTime = inAt + 0.1 * outRate;
+    timer.tick();
+    assert.ok(Math.abs(incoming.targetMotorRate - outRate) < 1e-6, `engine rate ${incoming.targetMotorRate} should equal the outgoing rate ${outRate} when on the beat (rpm ${incomingRpm})`);
+  }
 });

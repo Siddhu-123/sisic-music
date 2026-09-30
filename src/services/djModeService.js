@@ -188,18 +188,18 @@ function energyAt(song, position) {
 }
 
 export function transitionCacheKey(source, candidate, positionSeconds) {
-  const fingerprint = [source?.bpm, source?.musicalKey, source?.keyConfidence, energyAt(source, positionSeconds), source?.loudnessLufs, source?.djMetadataVersion, candidate?.bpm, candidate?.musicalKey, candidate?.keyConfidence, energyAt(candidate, 0), candidate?.loudnessLufs, candidate?.djMetadataVersion, source?.djRhythm?.bpm, source?.djRhythm?.outroBpm, source?.djRhythm?.gridCoverage, candidate?.djRhythm?.bpm, candidate?.djRhythm?.introBpm, candidate?.djRhythm?.gridCoverage].map(value => value ?? '').join('|');
+  const fingerprint = [source?.bpm, source?.musicalKey, source?.keyConfidence, energyAt(source, positionSeconds), source?.loudnessLufs, source?.djMetadataVersion, candidate?.bpm, candidate?.musicalKey, candidate?.keyConfidence, energyAt(candidate, 0), candidate?.loudnessLufs, candidate?.djMetadataVersion, source?.djRhythm?.bpm, source?.djRhythm?.outroBpm, source?.djRhythm?.gridCoverage, candidate?.djRhythm?.bpm, candidate?.djRhythm?.startBpm, candidate?.djRhythm?.gridCoverage].map(value => value ?? '').join('|');
   return `${keyOf(source)}::${keyOf(candidate)}::${fingerprint}`;
 }
 
 // Tempo of each track at the moment of the mix. With a beat grid the local tempo at the outro and
-// intro is used (a track can drift), otherwise the single whole-track bpm from the v1 analysis.
+// start is used (a track can drift), otherwise the single whole-track bpm from the v1 analysis.
 function tempoPair(source, candidate, positionSeconds) {
   const out = source.djRhythm;
   const incoming = candidate.djRhythm;
   if (hasBeatGrid(out) && hasBeatGrid(incoming)) {
     const nearOutro = Number.isFinite(positionSeconds) && out.outroStart != null && positionSeconds >= out.outroStart - 20;
-    return { grid: true, out: nearOutro && out.outroBpm ? out.outroBpm : out.bpm, incoming: incoming.introBpm || incoming.bpm };
+    return { grid: true, out: nearOutro && out.outroBpm ? out.outroBpm : out.bpm, incoming: incoming.startBpm || incoming.bpm };
   }
   return { grid: false, out: normaliseTempo(source.bpm), incoming: normaliseTempo(candidate.bpm) };
 }

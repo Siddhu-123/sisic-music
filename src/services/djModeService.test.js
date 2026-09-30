@@ -11,6 +11,7 @@ import {
   predictSkipProbability,
   rankDjCandidates,
   scoreDjTransition,
+  transitionCacheKey,
 } from './djModeService.js';
 
 const source = { songKey: 'source', track: 'Source', artist: 'Artist A', genre: 'dance', driveFileId: 'source', bpm: 120, musicalKey: 'C major', energy: .42, loudnessLufs: -10 };
@@ -179,3 +180,36 @@ test('a low-confidence key estimate is treated as unknown, so it neither blocks 
   assert.equal(sure.harmonicCompatible, false, 'two confident, clashing keys still reject the mix');
   assert.equal(sure.acceptable, false);
 });
+
+test('startBpm is used for incoming, outroBpm for outgoing near outro, introBpm falls back to bpm, and cache key tracks them', () => {
+  const out126 = gridded('out', 126, 'C major');
+  const inWithStart = gridded('in', 120, 'C major', { startBpm: 126 });
+  const scoreWithStart = scoreDjTransition(out126, inWithStart);
+  assert.equal(scoreWithStart.tempoDelta, 0);
+  assert.equal(scoreWithStart.tempoRatio, 1);
+
+  const outWithOutro = gridded('out2', 120, 'C major', { outroBpm: 124, outroStart: 180 });
+  const in124 = gridded('in2', 124, 'C major');
+  const scoreNearOutro = scoreDjTransition(outWithOutro, in124, 165);
+  assert.equal(scoreNearOutro.tempoDelta, 0);
+  assert.equal(scoreNearOutro.tempoRatio, 1);
+
+  const scoreFarFromOutro = scoreDjTransition(outWithOutro, in124, 60);
+  assert.ok(Math.abs(scoreFarFromOutro.tempoDelta - 4) < 1e-9);
+  assert.ok(Math.abs(scoreFarFromOutro.tempoRatio - 120 / 124) < 1e-9);
+
+  const inWithOldIntroOnly = gridded('in3', 120, 'C major', { introBpm: 128 });
+  const scoreOldIntro = scoreDjTransition(out126, inWithOldIntroOnly);
+  assert.ok(Math.abs(scoreOldIntro.tempoRatio - 126 / 120) < 1e-9);
+
+  const keyBase = transitionCacheKey(outWithOutro, inWithStart, 165);
+  const inDiffStart = { ...inWithStart, djRhythm: { ...inWithStart.djRhythm, startBpm: 128 } };
+  assert.notEqual(transitionCacheKey(outWithOutro, inDiffStart, 165), keyBase);
+
+  const outDiffOutro = { ...outWithOutro, djRhythm: { ...outWithOutro.djRhythm, outroBpm: 128 } };
+  assert.notEqual(transitionCacheKey(outDiffOutro, inWithStart, 165), keyBase);
+
+  const inDiffIntro = { ...inWithStart, djRhythm: { ...inWithStart.djRhythm, introBpm: 999 } };
+  assert.equal(transitionCacheKey(outWithOutro, inDiffIntro, 165), keyBase);
+});
+

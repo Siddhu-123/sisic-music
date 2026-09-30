@@ -1,6 +1,7 @@
 import { VinylAudioEngine } from './VinylAudioEngine.js';
 import { EQ_PRESETS } from './audioGraph.js';
-import { beatSeconds, hasBeatGrid, incomingStartPosition, phaseErrorSeconds } from './djBeatMath.js';
+import { beatFollower, beatSeconds, decodeBeatList, followerStep, hasBeatGrid, incomingStartPosition, phaseErrorSeconds } from './djBeatMath.js';
+import { createFollowLoop } from './followLoop.js';
 import { rememberDjTransition } from './djModeService.js';
 import { dedupeQueue, insertAfter, insertAtEnd, queueItemKey, reorderQueue, restoreQueueState, serializeQueueState } from '../queueManager.js';
 
@@ -26,8 +27,9 @@ const shuffle = songs => {
 // One synchronous owner for transport intent, async requests and queue identity.
 // React observes snapshots; no queue mutation waits for an effect to update a ref.
 export class PlaybackController {
-  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations } = {}) {
+  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations, followTimers } = {}) {
     this.sleep = sleep;
+    this.followTimers = followTimers;
     this.resolveUrl = resolveUrl;
     this.createAudio = createAudio;
     this.storage = storage;
@@ -73,6 +75,7 @@ export class PlaybackController {
     this.beatMixPitchShifted = false;
     this.bassCutApplied = false;
     this.pitchGlide = null;
+    this.followLoop = null;
     this.loading = false;
     this.transitioning = false;
     this.lastPersisted = 0;
@@ -210,6 +213,8 @@ export class PlaybackController {
       this.retiring?.setBassCut?.(0);
       this.standby?.setBassCut?.(0); // A mix abandoned before it started leaves the cut on the idle engine.
     }
+    this.followLoop?.stop('finished');
+    this.followLoop = null;
     clearInterval(this.pitchGlide);
     this.pitchGlide = null;
     if (this.beatMixPitchShifted) {
@@ -348,6 +353,53 @@ export class PlaybackController {
             this.retiring = outgoing;
             await this.lockBeatPhase(mix, outgoing, incoming, latest);
             if (!latest()) return false;
+            const outBeats = decodeBeatList(mix.sourceRhythm?.outroBeats);
+            const inBeats = decodeBeatList(mix.candidateRhythm?.introBeats);
+            if (
+              outBeats &&
+              inBeats &&
+              mix.sourceRhythm?.beatListVersion === 1 &&
+              mix.candidateRhythm?.beatListVersion === 1 &&
+              (mix.sourceRhythm?.outroVirtual ?? 0) <= 0.25 * outBeats.length &&
+              (mix.candidateRhythm?.introVirtual ?? 0) <= 0.25 * inBeats.length &&
+              outgoing.currentTime >= outBeats[0] - 2 &&
+              outgoing.currentTime <= outBeats[outBeats.length - 1] + 8
+            ) {
+              const follower = beatFollower({
+                outBeats,
+                inBeats,
+                octave: mix.tempoOctave || 0,
+                outTime: outgoing.currentTime,
+                inTime: incoming.currentTime,
+              });
+              if (follower) {
+                const incomingBeatPeriod = beatSeconds(mix.candidateRhythm, mix.candidateRhythm?.startBpm)
+                  || (inBeats.length >= 2 ? inBeats[1] - inBeats[0] : null)
+                  || beatSeconds(mix.candidateRhythm)
+                  || 0.5;
+                const read = () => {
+                  if (!latest() || this.retiring !== outgoing || this.audio !== incoming) return null;
+                  if (outgoing.paused || incoming.paused) return null;
+                  return {
+                    outTime: outgoing.currentTime,
+                    inTime: incoming.currentTime,
+                    outRate: Number.isFinite(outgoing.targetMotorRate) ? outgoing.targetMotorRate : 1,
+                  };
+                };
+                const step = reading => followerStep(follower, reading);
+                const apply = rate => incoming.setPitchModifier(rate / ((incoming.rpm || 45) / 45));
+                this.followLoop?.stop('finished');
+                this.followLoop = createFollowLoop({
+                  intervalMs: 100,
+                  maxErrorSeconds: 0.75 * incomingBeatPeriod,
+                  read,
+                  step,
+                  apply,
+                  ...this.followTimers,
+                });
+                this.followLoop.start();
+              }
+            }
             const inBeat = beatSeconds(mix.candidateRhythm);
             incoming.setFade(1, crossfade, { curve: 'equal-power' });
             outgoing.setFade(0, crossfade, { curve: 'equal-power' });
@@ -907,7 +959,7 @@ export class PlaybackController {
     this.persist();
   }
   setRpm = value => { const rpm = Number(value) === 33 ? 33 : 45; this.audio?.setRpm(rpm); this.update({ rpm }); };
-  setPitchModifier = value => { clearInterval(this.pitchGlide); this.pitchGlide = null; const pitchModifier = Math.max(1 - this.state.pitchRange, bounded(value, 1 + this.state.pitchRange, 1)); this.audio?.setPitchModifier(pitchModifier); this.update({ pitchModifier }); };
+  setPitchModifier = value => { this.followLoop?.stop('finished'); this.followLoop = null; clearInterval(this.pitchGlide); this.pitchGlide = null; const pitchModifier = Math.max(1 - this.state.pitchRange, bounded(value, 1 + this.state.pitchRange, 1)); this.audio?.setPitchModifier(pitchModifier); this.update({ pitchModifier }); };
   setPitchRange = value => { this.update({ pitchRange: Number(value) >= 0.16 ? 0.16 : 0.08 }); this.setPitchModifier(this.state.pitchModifier); };
   beginScratch = resume => { this.finishFade(); this.audio?.beginScratch({ resume }); };
   setScratchAngularVelocity = value => this.audio?.setScratchAngularVelocity(value);
@@ -925,6 +977,7 @@ export class PlaybackController {
     this.recommendationAbort?.abort();
     this.update({ djPlan: null, djPrediction: null });
     this.persist(); this.active = false; this.enabled = false; this.cancelLoad(); this.cancelPreload(); this.finishFade();
+    this.followLoop?.stop('finished'); this.followLoop = null;
     this.audio?.dispose(); this.standby?.dispose(); this.audio = null; this.standby = null; this.loadedSong = null;
   };
 }
