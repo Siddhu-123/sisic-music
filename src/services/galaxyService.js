@@ -180,7 +180,8 @@ export function labelCluster(songs = []) {
   const facets = new Map();
   const artists = new Map();
   for (const song of songs) {
-    for (const label of [...getSongMoods(song), ...getSongGenres(song)]) {
+    // Genres come first so a tie between a genre and a mood names the cluster by genre.
+    for (const label of [...getSongGenres(song), ...getSongMoods(song)]) {
       if (!GENERIC_LABELS.has(label)) facets.set(label, (facets.get(label) || 0) + 1);
     }
     const artist = String(song.artist || '').split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0].trim();

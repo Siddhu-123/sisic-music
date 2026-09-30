@@ -54,3 +54,13 @@ test('clusters get readable labels and every point is placed', () => {
   assert.ok(galaxy.points.every(point => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z)));
   assert.ok(galaxy.clusters.length >= 1 && galaxy.clusters.every(cluster => cluster.label));
 });
+
+test('a genre wins a tie against a mood when naming a cluster', () => {
+  const songs = [
+    { artist: 'A', track: 'Study one', genre: 'Jazz' },
+    { artist: 'B', track: 'Study two', genre: 'Jazz' },
+    { artist: 'C', track: 'Study three', genre: 'Jazz' },
+  ];
+  // "Study" also reads as the Focus mood for all three; the genre should still name the cluster.
+  assert.equal(labelCluster(songs), 'Jazz');
+});

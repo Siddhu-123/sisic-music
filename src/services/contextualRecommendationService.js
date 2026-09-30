@@ -4,6 +4,7 @@ import {
   EMBEDDING_DIMENSIONS,
   getSongEmbedding,
 } from './tasteEmbeddingService.js';
+import { buildInterests, interestAffinity } from './tasteInterests.js';
 
 export const PLAYBACK_SESSION_GAP_MS = 20 * 60 * 1000;
 export const PLAYBACK_START_EVENT_TYPES = Object.freeze(['playback-start', 'playback-resume']);
@@ -11,6 +12,10 @@ export const PLAYBACK_START_EVENT_TYPES = Object.freeze(['playback-start', 'play
 const DAY_MS = 24 * 60 * 60 * 1000;
 // How quickly "what you were just listening to" fades into long-term taste.
 const SEQUENCE_HALF_LIFE_MS = 6 * 60 * 60 * 1000;
+// A time-of-day vector starts from long-term taste and moves toward that
+// bucket's own listening only as sessions accumulate (CoSeRNN: context matters
+// most, and is noisiest, in rarely seen contexts). This many sessions' worth of prior.
+const CONTEXT_PRIOR_SESSIONS = 2;
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -258,6 +263,17 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
   const recentAccumulator = new Float32Array(targetDimensions);
   const lastPlayedAtByKey = new Map();
   const lastSkippedAtByKey = new Map();
+  // Net evidence per song (recency-decayed), kept whether or not the song has a
+  // vector so portable "anchor" tracks can be derived independent of any embedding.
+  const songSignal = new Map();
+  const bumpSignal = (key, song, field, amount) => {
+    if (!(amount > 0)) return;
+    const entry = songSignal.get(key) || { song, positive: 0, negative: 0 };
+    entry[field] += amount;
+    songSignal.set(key, entry);
+  };
+  // Recency-only weighted vectors per time-of-day bucket (no current-context boost).
+  const bucketAccumulators = new Map();
   const now = timestampValue(options.now, Date.now());
   const halfLifeDays = Math.max(1, finiteNumber(options.recencyHalfLifeDays, 30));
   const currentContext = options.currentContext || getPlaybackContext(now, options.userAgent || '');
@@ -282,6 +298,8 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     const ageDays = Math.max(0, (now - session.endedAt) / DAY_MS);
     const recencyWeight = 2 ** (-ageDays / halfLifeDays);
     const sessionWeight = recencyWeight * contextMatchScore(session.context, currentContext);
+    const bucketKey = session.context?.timeBucket || 'unknown';
+    let sessionHadVector = false;
 
     session.tracks.forEach((track, trackIndex) => {
       const song = songByKey.get(track.songKey);
@@ -290,12 +308,21 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
       const positiveWeight = track.status === 'skipped' ? 0 : Math.min(1.6, track.positiveWeight);
       const negativeWeight = Math.min(1.4, track.negativeWeight);
       if (positiveWeight > 0) {
-        if (vector) addWeightedVector(positiveAccumulator, vector, positiveWeight * sessionWeight);
+        if (vector) {
+          addWeightedVector(positiveAccumulator, vector, positiveWeight * sessionWeight);
+          if (!bucketAccumulators.has(bucketKey)) bucketAccumulators.set(bucketKey, { sum: new Float32Array(targetDimensions), sessions: 0, mass: 0 });
+          const bucket = bucketAccumulators.get(bucketKey);
+          addWeightedVector(bucket.sum, vector, positiveWeight * recencyWeight);
+          bucket.mass += positiveWeight * recencyWeight;
+          sessionHadVector = true;
+        }
+        bumpSignal(track.songKey, song, 'positive', positiveWeight * sessionWeight);
         positiveSignalCount += 1;
         lastPlayedAtByKey.set(track.songKey, Math.max(lastPlayedAtByKey.get(track.songKey) || 0, track.lastEventAt));
       }
       if (negativeWeight > 0) {
         if (vector) addWeightedVector(negativeAccumulator, vector, negativeWeight * sessionWeight);
+        bumpSignal(track.songKey, song, 'negative', negativeWeight * sessionWeight);
         negativeSignalCount += 1;
         if (track.status === 'skipped') {
           lastSkippedAtByKey.set(track.songKey, Math.max(lastSkippedAtByKey.get(track.songKey) || 0, track.lastEventAt));
@@ -307,6 +334,7 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
         addWeightedVector(recentAccumulator, vector, Math.max(0.2, positiveWeight) * orderWeight);
       }
     });
+    if (sessionHadVector) bucketAccumulators.get(bucketKey).sessions += 1;
   });
 
   // Explicit likes and imported play counts are durable taste signals even
@@ -318,16 +346,53 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     const likeWeight = likedSongKeys.has(key) ? 0.9 : 0;
     const playWeight = Math.min(0.6, Math.log1p(finiteNumber(song.playCount)) * 0.2);
     if (!likeWeight && !playWeight) return;
+    bumpSignal(key, song, 'positive', likeWeight + playWeight);
     const vector = getCompatibleVector(song);
     if (!vector) return;
     addWeightedVector(positiveAccumulator, vector, likeWeight + playWeight);
     explicitSignalCount += 1;
   });
 
+  const longTerm = normaliseVector(positiveAccumulator);
+
+  // Interests: cluster the songs that carry positive evidence (net of skips).
+  const interestItems = [];
+  songSignal.forEach((entry, key) => {
+    const net = entry.positive - (0.5 * entry.negative);
+    if (net <= 0) return;
+    const vector = getCompatibleVector(entry.song);
+    if (vector) interestItems.push({ vector, weight: net, songKey: key });
+  });
+  const interests = buildInterests(interestItems, { maxInterests: options.maxInterests || 4 }).map(interest => ({
+    vector: interest.vector,
+    weight: interest.weight,
+    size: interest.size,
+    songKeys: interest.members.map(index => interestItems[index].songKey),
+  }));
+
+  // Time-of-day vectors, shrunk toward long-term taste for rarely seen buckets.
+  const totalBucketMass = [...bucketAccumulators.values()].reduce((sum, bucket) => sum + bucket.mass, 0);
+  const totalBucketSessions = [...bucketAccumulators.values()].reduce((sum, bucket) => sum + bucket.sessions, 0);
+  const meanSessionMass = totalBucketSessions ? totalBucketMass / totalBucketSessions : 0;
+  const contextVectors = {};
+  if (longTerm) {
+    bucketAccumulators.forEach((bucket, key) => {
+      if (!bucket.sessions || key === 'unknown') return;
+      const blended = new Float32Array(targetDimensions);
+      addWeightedVector(blended, bucket.sum, 1);
+      addWeightedVector(blended, longTerm, CONTEXT_PRIOR_SESSIONS * meanSessionMass);
+      const vector = normaliseVector(blended);
+      if (vector) contextVectors[key] = { vector, sessions: bucket.sessions };
+    });
+  }
+
   const recentSession = sessions.at(-1);
   const sequenceWeight = recentSession ? 2 ** (-Math.max(0, now - recentSession.endedAt) / SEQUENCE_HALF_LIFE_MS) : 0;
   return {
-    vector: normaliseVector(positiveAccumulator),
+    vector: longTerm,
+    interests,
+    contextVectors,
+    songSignal,
     negativeVector: normaliseVector(negativeAccumulator),
     recentVector: normaliseVector(recentAccumulator),
     sessions,
@@ -393,7 +458,10 @@ export function rankContextualSongs(songs = [], options = {}) {
       }
 
       const plays = Math.max(finiteNumber(song.playCount), playCountFor(playCountByKey, key));
-      const tasteAffinity = (profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0;
+      // With several distinct interests a song is judged by the one it fits best; a
+      // single blended centroid would favour music that sits between them.
+      const multiInterest = vector && profile?.interests?.length > 1 ? interestAffinity(vector, profile.interests) : null;
+      const tasteAffinity = multiInterest ?? ((profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0);
       const sequenceAffinity = (profile?.recentVector && vector) ? cosineSimilarity(profile.recentVector, vector) : 0;
       const skipAffinity = (profile?.negativeVector && vector) ? cosineSimilarity(profile.negativeVector, vector) : 0;
       const likedBoost = likedSongKeys.has(key) ? 0.22 : 0;

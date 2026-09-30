@@ -1224,3 +1224,41 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
   .explore-filter-row > button { flex: none; white-space: nowrap; }
   .constellation-title-group { align-items: flex-start; }
 }
+
+/* ---- Taste profile: interests + portable passport ---- */
+.interest-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.interest-row { display: grid; grid-template-columns: minmax(96px, 1.2fr) minmax(0, 3fr) 44px; align-items: center; gap: 12px; }
+.interest-label { font-size: 0.85rem; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.interest-track { height: 10px; border-radius: 999px; background: var(--bg); box-shadow: var(--shadow-inset); overflow: hidden; }
+.interest-track > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #2563eb, #38bdf8); }
+.interest-pct { font-size: 0.78rem; color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+.interest-context { margin: 12px 0 0; font-size: 0.78rem; color: var(--text-muted); }
+
+.passport-panel { margin-top: 20px; padding: 18px 20px; border-radius: 18px; background: var(--bg); box-shadow: var(--shadow-inset); display: grid; gap: 14px; }
+.passport-header { display: flex; align-items: flex-start; gap: 12px; }
+.passport-layers { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.passport-layers li { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; font-size: 0.8rem; color: var(--text-muted); }
+.passport-layers strong { color: var(--text); font-weight: 600; }
+.passport-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.passport-btn--ghost { background: transparent; color: var(--text); border: 1px solid var(--border); box-shadow: none; }
+.passport-btn--ghost:hover { border-color: #38bdf8; box-shadow: none; }
+.taste-export-btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+.passport-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.passport-notice { margin: 0; font-size: 0.8rem; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-muted); }
+.passport-notice--error { border-color: rgba(239, 68, 68, 0.55); color: #ef4444; }
+.passport-notice--warn { border-color: rgba(245, 158, 11, 0.55); color: #d97706; }
+.passport-import { display: grid; gap: 12px; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--border); }
+.passport-import__head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.passport-import__head strong { display: block; font-size: 0.88rem; color: var(--text); }
+.passport-import__head span { font-size: 0.74rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.passport-import__how { margin: 0; font-size: 0.78rem; color: var(--text-muted); }
+.passport-link { background: none; border: 0; color: #38bdf8; font-size: 0.78rem; font-weight: 600; cursor: pointer; min-height: 32px; padding: 0 4px; }
+.passport-privacy { margin: 0; display: flex; align-items: flex-start; gap: 8px; font-size: 0.74rem; color: var(--text-muted); }
+.passport-privacy svg { flex: none; margin-top: 2px; }
+
+@media (max-width: 760px) {
+  .interest-row { grid-template-columns: minmax(80px, 1fr) minmax(0, 1.4fr) 40px; gap: 8px; }
+  .passport-layers li { grid-template-columns: 1fr; gap: 2px; }
+  .passport-panel { padding: 14px; }
+  .passport-actions .taste-export-btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
+}

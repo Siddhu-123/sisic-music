@@ -2341,6 +2341,12 @@ function App() {
             onClose={() => setIsTasteProfileOpen(false)}
             librarySummary={librarySummary}
             songs={allSongs}
+            likedSongKeys={likedSongKeys}
+            onPlayMix={mixSongs => {
+              if (!mixSongs.length) return;
+              setIsTasteProfileOpen(false);
+              handlePlaySong(mixSongs[0], mixSongs);
+            }}
           />
         </Suspense>
       )}
