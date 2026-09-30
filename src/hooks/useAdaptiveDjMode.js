@@ -1,10 +1,30 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { cacheDjTransitionScores, getDjTransitionScores } from '../db.js';
-import { buildSkipObservations, chooseDjCandidate, chooseDjTransitionTime, DJ_SKIP_THRESHOLD, planDjMix, predictSkipProbability, rankDjCandidates } from '../services/djModeService.js';
+import { getSongKey } from '../songIdentity.js';
+import { commentaryFor } from '../services/djCommentary.js';
+import {
+  factsFor,
+  nextFromSet,
+  planNextSet,
+  shouldSpeak,
+} from '../services/djSetDirector.js';
+import {
+  buildSkipObservations,
+  chooseDjCandidate,
+  chooseDjTransitionTime,
+  DJ_SKIP_THRESHOLD,
+  planDjMix,
+  predictSkipProbability,
+  rankDjCandidates,
+  scoreDjTransition,
+} from '../services/djModeService.js';
 
 export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) {
   const observations = useMemo(() => buildSkipObservations(playbackEvents), [playbackEvents]);
   const latest = useRef(null);
+  const djSetRef = useRef(null);
+  const commentaryMemoryRef = useRef({ recent: [] });
+
   useEffect(() => { latest.current = { player, songs, playbackEvents, likedSongKeys, observations }; });
   useEffect(() => {
     if (!player.djModeEnabled || !player.isPlaying) return undefined;
@@ -30,15 +50,112 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) 
         const transitionAtSeconds = chooseDjTransitionTime(prediction, p.duration, fadeSeconds, p.djHistory);
         const ranked = rankDjCandidates({ source, songs: state.songs, playbackEvents: state.playbackEvents, positionSeconds: transitionAtSeconds,
           likedSongKeys: state.likedSongKeys, history: p.djHistory, transitionScores: new Map(cached.map(score => [score.cacheKey, score])) });
-        const choice = chooseDjCandidate(ranked, { history: p.djHistory });
-        if (!choice || cancelled) return;
-        const plan = planDjMix({ source, candidate: choice.song, positionSeconds, duration: p.duration, prediction, transition: choice.transition, history: p.djHistory, fadeSeconds });
+
+        const findSong = key => state.songs.find(s => (s.songKey || getSongKey(s)) === key);
+
+        let candidate = null;
+        let kind = null;
+        let isFallback = false;
+
+        let nextKey = nextFromSet(djSetRef.current, p.currentSongKey);
+        if (nextKey) {
+          const song = findSong(nextKey);
+          if (song && song.driveFileId) {
+            candidate = song;
+            kind = 'link';
+          }
+        }
+
+        if (!candidate) {
+          const count = 3 + Math.floor(Math.random() * 3);
+          const newSet = planNextSet({ source, ranked, count, rng: Math.random });
+          if (newSet?.keys?.length) {
+            djSetRef.current = newSet;
+            const firstKey = nextFromSet(newSet, p.currentSongKey);
+            if (firstKey) {
+              const song = findSong(firstKey);
+              if (song && song.driveFileId) {
+                candidate = song;
+                kind = 'set-intro';
+              }
+            }
+          }
+        }
+
+        let choice = null;
+        if (!candidate) {
+          choice = chooseDjCandidate(ranked, { history: p.djHistory });
+          if (choice) {
+            candidate = choice.song;
+            isFallback = Boolean(choice.fallback);
+            djSetRef.current = null;
+            kind = null;
+          }
+        }
+
+        if (!candidate || cancelled) return;
+
+        const candidateKey = candidate.songKey || getSongKey(candidate);
+        const rankedItem = ranked.find(item => (item.song?.songKey || getSongKey(item.song)) === candidateKey);
+        const transition = choice?.transition || rankedItem?.transition || scoreDjTransition(source, candidate, transitionAtSeconds);
+
+        const plan = planDjMix({ source, candidate, positionSeconds, duration: p.duration, prediction, transition, history: p.djHistory, fadeSeconds });
         if (plan?.transitionAtSeconds == null) return;
+
         const current = latest.current.player;
         if (current.currentSongKey !== p.currentSongKey || current.queueRevision !== p.queueRevision
           || Math.abs(current.progress / 100 * current.duration - positionSeconds) > 4) return;
-        p.planDjTransition({ ...plan, sourceSongKey: p.currentSongKey, candidate: choice.song, probability: prediction.probability,
-          fallback: choice.fallback, sourceRhythm: source.djRhythm, candidateRhythm: choice.song.djRhythm });
+
+        let commentaryText = null;
+        if (p.djVoiceEnabled && kind) {
+          try {
+            const speakAllowed = shouldSpeak({
+              kind,
+              mix: plan,
+              outgoing: source,
+              incoming: candidate,
+              rng: Math.random,
+            });
+            if (speakAllowed) {
+              const historyMap = new Map();
+              for (const ev of (state.playbackEvents || [])) {
+                if (!ev?.songKey) continue;
+                const isPlay = ev.eventType === 'playback-start'; // a finished play is also logged as complete: count starts only
+                if (!isPlay) continue;
+                const prev = historyMap.get(ev.songKey) || { playCount: 0, lastPlayedAt: null };
+                const createdAt = ev.createdAt ? (Date.parse(ev.createdAt) || Number(ev.createdAt)) : null;
+                const lastPlayedAt = createdAt && (!prev.lastPlayedAt || createdAt > prev.lastPlayedAt) ? createdAt : prev.lastPlayedAt;
+                historyMap.set(ev.songKey, { playCount: prev.playCount + 1, lastPlayedAt });
+              }
+
+              const facts = factsFor({
+                outgoing: source,
+                incoming: candidate,
+                set: djSetRef.current,
+                mix: plan,
+                history: historyMap,
+                now: Date.now(),
+              });
+
+              const comm = commentaryFor({
+                kind,
+                facts,
+                memory: commentaryMemoryRef.current || { recent: [] },
+                rng: Math.random,
+              });
+
+              if (comm?.text) {
+                commentaryText = comm.text;
+                commentaryMemoryRef.current = comm.memory;
+              }
+            }
+          } catch {
+            /* never throw from speaking path */
+          }
+        }
+
+        p.planDjTransition({ ...plan, sourceSongKey: p.currentSongKey, candidate, probability: prediction.probability,
+          fallback: isFallback, sourceRhythm: source.djRhythm, candidateRhythm: candidate.djRhythm, commentaryText });
         cacheDjTransitionScores(ranked.map(item => item.transition)).catch(() => {});
       } catch (error) {
         console.warn('Adaptive DJ ranking failed:', error);

@@ -297,6 +297,7 @@ export class PlaybackController {
     this.loading = true;
     this.desiredPlaying = autoplay;
     this.loadedSong = null;
+    this.commentarySpoken = false;
     this.update({ currentSong: cleanSong(song), currentSongKey: keyOf(song), error: '', isBuffering: true, progress: 0, duration: 0 });
     try {
       // Await the existing preload rather than start a second stream for the same song.
@@ -356,6 +357,7 @@ export class PlaybackController {
             this.retiring = outgoing;
             await this.lockBeatPhase(mix, outgoing, incoming, latest);
             if (!latest()) return false;
+            this.speakTransitionCommentary(mix);
             const outBeats = decodeBeatList(mix.sourceRhythm?.outroBeats);
             const inBeats = decodeBeatList(mix.candidateRhythm?.introBeats);
             if (
@@ -416,6 +418,7 @@ export class PlaybackController {
           } else {
             incoming.setFade(1, crossfade);
             outgoing.setFade(0, crossfade);
+            this.speakTransitionCommentary(mix);
           }
           this.retiring = outgoing;
           this.fadeDeadline = this.now() + crossfade * 1000;
@@ -431,6 +434,9 @@ export class PlaybackController {
       this.failed.delete(keyOf(song));
       this.played.add(keyOf(song));
       const completedDjPlan = this.djPlan && keyOf(this.djPlan.candidate) === keyOf(song);
+      if (completedDjPlan && !this.commentarySpoken) {
+        this.speakTransitionCommentary(mix);
+      }
       const djHistory = completedDjPlan ? rememberDjTransition(this.state.djHistory, keyOf(song), this.djPlan.transitionAtSeconds, this.djPlan.mixBars) : this.state.djHistory;
       if (completedDjPlan) this.djPlan = null;
       this.update({ currentSong: this.loadedSong, currentSongKey: keyOf(song), duration: incoming.duration,
@@ -949,6 +955,7 @@ export class PlaybackController {
       tempoOctave: plan.tempoOctave,
       sourceRhythm: plan.sourceRhythm,
       candidateRhythm: plan.candidateRhythm,
+      commentaryText: plan.commentaryText || plan.commentary || null,
     };
     this.update({ djPlan: {
       candidateSongKey: keyOf(candidate), candidateTitle: candidate.track, transitionAtSeconds, crossfadeSeconds, probability: Number(plan.probability || 0), fallback: Boolean(plan.fallback),
@@ -958,6 +965,18 @@ export class PlaybackController {
     this.persist();
     return true;
   };
+  speakTransitionCommentary(mix) {
+    if (this.commentarySpoken) return;
+    const text = mix?.commentaryText || mix?.commentary || this.djPlan?.commentaryText || this.djPlan?.commentary;
+    if (text) {
+      this.commentarySpoken = true;
+      try {
+        Promise.resolve(this.speakDj(text)).catch(() => {});
+      } catch {
+        /* catch and ignore */
+      }
+    }
+  }
   setSleepTimer = value => {
     this.clearDjPlan({ persist: false });
     const sleepTimer = value === 'track' ? { mode: 'track' } : Number(value) > 0 ? { mode: 'time', deadline: this.now() + Number(value) * 60000 } : null;

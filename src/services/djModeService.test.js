@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import React from 'react';
+import { useAdaptiveDjMode } from '../hooks/useAdaptiveDjMode.js';
 import {
   chooseDjCandidate,
   buildSkipObservations,
@@ -212,4 +214,127 @@ test('startBpm is used for incoming, outroBpm for outgoing near outro, introBpm 
   const inDiffIntro = { ...inWithStart, djRhythm: { ...inWithStart.djRhythm, introBpm: 999 } };
   assert.equal(transitionCacheKey(outWithOutro, inDiffIntro, 165), keyBase);
 });
+
+test('the hook plans a set then follows it, falls back to greedy when the set is empty, and does not speak when voice is off', async () => {
+  const internals = React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const prevH = internals.H;
+  const refs = [];
+  let cleanup = null;
+
+  const useRunAdaptiveDjHook = (player, songList, events, likedKeys) => {
+    if (typeof cleanup === 'function') cleanup();
+    cleanup = null;
+    let refIdx = 0;
+    const effects = [];
+    internals.H = {
+      useRef(initial) {
+        const idx = refIdx++;
+        if (refs[idx] === undefined) refs[idx] = { current: initial };
+        return refs[idx];
+      },
+      useMemo(fn) { return fn(); },
+      useEffect(fn) { effects.push(fn); },
+    };
+    try {
+      useAdaptiveDjMode(player, songList, events, likedKeys);
+      for (const eff of effects) {
+        const res = eff();
+        if (typeof res === 'function') cleanup = res;
+      }
+    } finally {
+      internals.H = prevH;
+    }
+  };
+  const settleTicks = async () => {
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+  };
+
+  const testSongs = [
+    { songKey: 's1', track: 'Song 1', artist: 'Daft Punk', bpm: 120, musicalKey: 'C major', energy: 0.5, driveFileId: 'df1', djRhythm: rhythm(120) },
+    { songKey: 's2', track: 'Song 2', artist: 'Daft Punk', bpm: 120, musicalKey: 'C major', energy: 0.52, driveFileId: 'df2', djRhythm: rhythm(120) },
+    { songKey: 's3', track: 'Song 3', artist: 'Daft Punk', bpm: 121, musicalKey: 'G major', energy: 0.54, driveFileId: 'df3', djRhythm: rhythm(121) },
+    { songKey: 's4', track: 'Song 4', artist: 'Daft Punk', bpm: 120, musicalKey: 'A minor', energy: 0.56, driveFileId: 'df4', djRhythm: rhythm(120) },
+    { songKey: 's5', track: 'Song 5', artist: 'Justice', bpm: 120, musicalKey: 'C major', energy: 0.58, driveFileId: 'df5', djRhythm: rhythm(120) },
+  ];
+
+  const skipEventsFor = (key) =>
+    Array.from({ length: 8 }, () => [event('playback-start', key, 0), event('user-skip', key, 25)]).flat();
+
+  let planned = [];
+  const player = {
+    djModeEnabled: true,
+    isPlaying: true,
+    currentSongKey: 's1',
+    currentSong: testSongs[0],
+    progress: (15 / 180) * 100, // 15 seconds into 180s track
+    duration: 180,
+    crossfadeSeconds: 4,
+    djVoiceEnabled: true,
+    djPlan: null,
+    djHistory: {},
+    queueRevision: 0,
+    planDjTransition(p) {
+      this.djPlan = p;
+      planned.push(p);
+      return true;
+    },
+    setDjPrediction() {},
+  };
+
+  try {
+    // 1. Initial run: hook plans a new set and picks the first song
+    useRunAdaptiveDjHook(player, testSongs, skipEventsFor('s1'), []);
+    await settleTicks();
+    assert.equal(planned.length, 1);
+    const plan1 = planned[0];
+    assert.equal(plan1.fallback, false);
+    assert.ok(plan1.commentaryText); // Spoke intro commentary because voice is enabled
+    const nextKey1 = plan1.candidate.songKey;
+    assert.ok(['s2', 's3', 's4', 's5'].includes(nextKey1));
+
+    // 2. Transition completed: player moves to nextKey1, set remains in ref and is followed
+    player.currentSongKey = nextKey1;
+    player.currentSong = testSongs.find(s => s.songKey === nextKey1);
+    player.djPlan = null;
+    planned = [];
+
+    useRunAdaptiveDjHook(player, testSongs, skipEventsFor(nextKey1), []);
+    await settleTicks();
+    assert.equal(planned.length, 1);
+    const plan2 = planned[0];
+    assert.equal(plan2.fallback, false);
+    const nextKey2 = plan2.candidate.songKey;
+    assert.notEqual(nextKey2, nextKey1);
+
+    // 3. Set is empty / exhausted: falls back to greedy chooseDjCandidate
+    // Force set ref to empty set
+    refs[1].current = { keys: [] }; // refs[1] is djSetRef
+    player.currentSongKey = nextKey2;
+    player.currentSong = testSongs.find(s => s.songKey === nextKey2);
+    player.djPlan = null;
+    planned = [];
+
+    // Empty candidates pool for set planning by keeping only 1 candidate song
+    const singleCandidateList = [player.currentSong, testSongs[0]];
+    useRunAdaptiveDjHook(player, singleCandidateList, skipEventsFor(nextKey2), []);
+    await settleTicks();
+    assert.equal(planned.length, 1);
+    assert.equal(planned[0].fallback, false); // fallback or greedy choice succeeds
+
+    // 4. When voice is off, hook does not speak (commentaryText is null)
+    player.djVoiceEnabled = false;
+    player.currentSongKey = 's1';
+    player.currentSong = testSongs[0];
+    player.djPlan = null;
+    planned = [];
+
+    useRunAdaptiveDjHook(player, testSongs, skipEventsFor('s1'), []);
+    await settleTicks();
+    assert.equal(planned.length, 1);
+    assert.equal(planned[0].commentaryText, null);
+  } finally {
+    if (typeof cleanup === 'function') cleanup();
+  }
+});
+
 

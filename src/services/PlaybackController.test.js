@@ -1079,3 +1079,67 @@ test('controller setDuck applies ducking to playing and retiring engines', async
   assert.deepEqual(retiring.ducks, [[-12, 0.3], [0, 0.5]]);
 });
 
+test('the controller path speaks once per transition when mix starts, and not when voice is off', async t => {
+  let spokenTexts = [];
+  const fakeVoice = {
+    speak: async (text) => { spokenTexts.push(text); return 'done'; },
+    cancel: () => {},
+  };
+  const { c } = fixture(t, { createVoice: () => fakeVoice });
+  c.setQueueAndPlay(songs);
+  await settle();
+
+  c.setDjModeEnabled(true);
+  c.setDjVoiceEnabled(true);
+
+  c.audio.currentTime = 10;
+  assert.equal(c.planDjTransition({
+    sourceSongKey: 'a',
+    candidate: songs[2],
+    transitionAtSeconds: 20,
+    crossfadeSeconds: 4,
+    commentaryText: 'Up next is track C',
+  }), true);
+  await settle();
+
+  // Trigger DJ transition
+  c.audio.currentTime = 20;
+  c.audio.emit('timeupdate');
+  await settle();
+
+  assert.equal(c.state.currentSongKey, 'c');
+  assert.equal(spokenTexts.length, 1);
+  assert.equal(spokenTexts[0], 'Up next is track C');
+
+  // Verify second timeupdate doesn't speak again
+  c.audio.currentTime = 21;
+  c.audio.emit('timeupdate');
+  await settle();
+  assert.equal(spokenTexts.length, 1);
+
+  // Finish crossfade so controller is ready for next transition
+  c.finishFade();
+  await settle();
+
+  // When voice is disabled, does not speak
+  spokenTexts = [];
+  c.setDjVoiceEnabled(false);
+  c.audio.currentTime = 10;
+  assert.equal(c.planDjTransition({
+    sourceSongKey: 'c',
+    candidate: songs[3],
+    transitionAtSeconds: 20,
+    crossfadeSeconds: 4,
+    commentaryText: 'Up next is track D',
+  }), true);
+  await settle();
+
+  c.audio.currentTime = 20;
+  c.audio.emit('timeupdate');
+  await settle();
+
+  assert.equal(c.state.currentSongKey, 'd');
+  assert.equal(spokenTexts.length, 0);
+});
+
+
