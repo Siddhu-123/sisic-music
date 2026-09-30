@@ -28,6 +28,8 @@ export class AudioGraphManager {
     this.fadeGainNode = null;
     this.bassNode = null;
     this.bassCutDb = 0;
+    this.fadeLevel = 1;
+    this.fadeRampEndsAt = 0;
     this.limiterNode = null;
     this.filterNodes = [];
     this.analyserNode = null;
@@ -162,6 +164,8 @@ export class AudioGraphManager {
     this.filterNodes = [];
     this.masterGainNode = null;
     this.fadeGainNode = null;
+    this.fadeLevel = 1;
+    this.fadeRampEndsAt = 0;
     this.bassNode = null;
     this.limiterNode = null;
     this.analyserNode = null;
@@ -189,7 +193,12 @@ export class AudioGraphManager {
     if (!this.fadeGainNode || !this.audioContext) return false;
     const gain = this.fadeGainNode.gain;
     const now = this.audioContext.currentTime;
-    const start = gain.value;
+    // `gain.value` only reflects a change after the next render quantum (and not at all while the
+    // context is starting), so a fade requested right after another would start from a stale value.
+    // Start from the level last asked for, unless a ramp is still running and the live value is exact.
+    const start = now < this.fadeRampEndsAt ? gain.value : this.fadeLevel;
+    this.fadeLevel = value;
+    this.fadeRampEndsAt = seconds > 0 ? now + seconds : 0;
     gain.cancelScheduledValues(now);
     gain.setValueAtTime(start, now);
     if (seconds <= 0) gain.setValueAtTime(value, now);

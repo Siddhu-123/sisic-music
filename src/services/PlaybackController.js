@@ -26,7 +26,8 @@ const shuffle = songs => {
 // One synchronous owner for transport intent, async requests and queue identity.
 // React observes snapshots; no queue mutation waits for an effect to update a ref.
 export class PlaybackController {
-  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, getRecommendations } = {}) {
+  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations } = {}) {
+    this.sleep = sleep;
     this.resolveUrl = resolveUrl;
     this.createAudio = createAudio;
     this.storage = storage;
@@ -71,6 +72,7 @@ export class PlaybackController {
     this.bassTimer = null;
     this.beatMixPitchShifted = false;
     this.bassCutApplied = false;
+    this.pitchGlide = null;
     this.loading = false;
     this.transitioning = false;
     this.lastPersisted = 0;
@@ -182,7 +184,22 @@ export class PlaybackController {
     this.preloaded = null;
     this.standby?.clear();
   }
-  finishFade = () => {
+  // After a beat-synced mix the new track keeps the tempo it was matched to, then eases back to the user's
+  // own pitch setting over several seconds, like sliding a pitch fader home. Jumping back would be heard
+  // as a pitch bend of up to a semitone.
+  glidePitchHome = (engine, seconds = 6) => {
+    clearInterval(this.pitchGlide);
+    const from = engine.pitchModifier;
+    const startedAt = this.now();
+    this.pitchGlide = setInterval(() => {
+      if (this.audio !== engine) { clearInterval(this.pitchGlide); this.pitchGlide = null; return; }
+      const progress = Math.min(1, (this.now() - startedAt) / (seconds * 1000));
+      const eased = progress * progress * (3 - 2 * progress);
+      engine.setPitchModifier(from + (this.state.pitchModifier - from) * eased);
+      if (progress >= 1) { clearInterval(this.pitchGlide); this.pitchGlide = null; }
+    }, 250);
+  };
+  finishFade = ({ glide = false } = {}) => {
     clearTimeout(this.fadeTimer);
     this.fadeTimer = null;
     clearTimeout(this.bassTimer);
@@ -193,9 +210,12 @@ export class PlaybackController {
       this.retiring?.setBassCut?.(0);
       this.standby?.setBassCut?.(0); // A mix abandoned before it started leaves the cut on the idle engine.
     }
+    clearInterval(this.pitchGlide);
+    this.pitchGlide = null;
     if (this.beatMixPitchShifted) {
       this.beatMixPitchShifted = false;
-      this.audio?.setPitchModifier?.(this.state.pitchModifier);
+      if (glide && this.audio) this.glidePitchHome(this.audio);
+      else this.audio?.setPitchModifier?.(this.state.pitchModifier);
     }
     if (this.retiring) {
       this.retiring.clear();
@@ -231,6 +251,29 @@ export class PlaybackController {
     }
     return true;
   }
+  // `play()` resolves before the first audible sample, so the start position chosen up front is off by the
+  // start-up latency. Once the element is really advancing, measure the beat-phase error against the
+  // outgoing track and step the incoming track onto the grid. It is still at gain 0 (the fade-in has not
+  // begun), so the seeks are inaudible; a seek takes a moment to settle, so measure again and repeat.
+  lockBeatPhase = async (mix, outgoing, incoming, isCurrent) => {
+    const octave = mix.tempoOctave || 0;
+    const beat = beatSeconds(mix.candidateRhythm);
+    if (!beat) return;
+    let reference = incoming.currentTime;
+    let lead = 0; // Time a seek costs before audio resumes; learned from the error left after the previous seek.
+    for (let attempt = 0; attempt < 4 && isCurrent(); attempt++) {
+      if (attempt === 0) for (let waited = 0; waited < 300 && incoming.currentTime - reference < 0.01; waited += 20) await this.sleep(20);
+      else await this.sleep(60);
+      if (!isCurrent()) return;
+      const outNow = outgoing.currentTime;
+      const inNow = incoming.currentTime;
+      const err = phaseErrorSeconds(mix.sourceRhythm, outNow, mix.candidateRhythm, inNow, octave);
+      if (!Number.isFinite(err) || Math.abs(err) <= 0.008 || Math.abs(err) >= 0.75 * beat) return;
+      if (attempt > 0) lead = Math.max(0, Math.min(0.15, lead - err));
+      incoming.seek(inNow - err + lead);
+      reference = inNow - err + lead;
+    }
+  };
   loadAndPlay = async (song, { autoplay = true, startAt = 0, signal, crossfade = 0, mix = null } = {}) => {
     if (!this.active || !song || signal?.aborted) return false;
     if (sameSource(this.loadedSong, song) && this.audio?.getAttribute('src') && !this.audio.error && !this.loading) return true;
@@ -302,13 +345,10 @@ export class PlaybackController {
         this.audioRef.current = incoming;
         if (canFade && this.desiredPlaying) {
           if (isBeatMix) {
-            const outNow = outgoing.currentTime;
-            const inNow = incoming.currentTime;
-            const err = phaseErrorSeconds(mix.sourceRhythm, outNow, mix.candidateRhythm, inNow, mix.tempoOctave || 0);
+            this.retiring = outgoing;
+            await this.lockBeatPhase(mix, outgoing, incoming, latest);
+            if (!latest()) return false;
             const inBeat = beatSeconds(mix.candidateRhythm);
-            if (Number.isFinite(err) && Math.abs(err) > 0.004 && inBeat && Math.abs(err) < 0.75 * inBeat) {
-              incoming.seek(incoming.currentTime - err);
-            }
             incoming.setFade(1, crossfade, { curve: 'equal-power' });
             outgoing.setFade(0, crossfade, { curve: 'equal-power' });
             const rate = Math.max(0.05, Number(incoming.targetMotorRate || outgoing.targetMotorRate) || 1);
@@ -324,7 +364,7 @@ export class PlaybackController {
           }
           this.retiring = outgoing;
           this.fadeDeadline = this.now() + crossfade * 1000;
-          this.fadeTimer = setTimeout(() => { this.finishFade(); this.preloadNext(); }, crossfade * 1000 + 50);
+          this.fadeTimer = setTimeout(() => { this.finishFade({ glide: true }); this.preloadNext(); }, crossfade * 1000 + 50);
         } else {
           outgoing.clear();
           this.standby = outgoing;
@@ -448,7 +488,7 @@ export class PlaybackController {
   };
   handleAudioEvent(type, event) {
     if (type === 'timeupdate' || type === 'durationchange' || type === 'progress') {
-      if (this.retiring && this.now() >= this.fadeDeadline) { this.finishFade(); this.preloadNext(); }
+      if (this.retiring && this.now() >= this.fadeDeadline) { this.finishFade({ glide: true }); this.preloadNext(); }
       if (this.checkSleep()) return;
       const duration = this.audio.duration || 0;
       let buffered = 0;
@@ -867,7 +907,7 @@ export class PlaybackController {
     this.persist();
   }
   setRpm = value => { const rpm = Number(value) === 33 ? 33 : 45; this.audio?.setRpm(rpm); this.update({ rpm }); };
-  setPitchModifier = value => { const pitchModifier = Math.max(1 - this.state.pitchRange, bounded(value, 1 + this.state.pitchRange, 1)); this.audio?.setPitchModifier(pitchModifier); this.update({ pitchModifier }); };
+  setPitchModifier = value => { clearInterval(this.pitchGlide); this.pitchGlide = null; const pitchModifier = Math.max(1 - this.state.pitchRange, bounded(value, 1 + this.state.pitchRange, 1)); this.audio?.setPitchModifier(pitchModifier); this.update({ pitchModifier }); };
   setPitchRange = value => { this.update({ pitchRange: Number(value) >= 0.16 ? 0.16 : 0.08 }); this.setPitchModifier(this.state.pitchModifier); };
   beginScratch = resume => { this.finishFade(); this.audio?.beginScratch({ resume }); };
   setScratchAngularVelocity = value => this.audio?.setScratchAngularVelocity(value);

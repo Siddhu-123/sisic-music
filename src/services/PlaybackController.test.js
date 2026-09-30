@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PlaybackController, QUEUE_STORAGE_KEY } from './PlaybackController.js';
-import { incomingStartPosition } from './djBeatMath.js';
+import { incomingStartPosition, phaseErrorSeconds } from './djBeatMath.js';
 
 const songs = ['a', 'b', 'c', 'd'].map(songKey => ({ songKey, track: songKey, artist: 'Artist', driveFileId: songKey }));
 const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
@@ -35,7 +35,7 @@ class FakeAudio {
 function fixture(t, options = {}) {
   const entries = new Map();
   const storage = { getItem: key => entries.get(key), setItem: (key, value) => entries.set(key, value) };
-  const controller = new PlaybackController({ resolveUrl: async song => song.driveFileId, createAudio: () => new FakeAudio(), storage, ...options });
+  const controller = new PlaybackController({ resolveUrl: async song => song.driveFileId, createAudio: () => new FakeAudio(), storage, sleep: async () => {}, ...options });
   controller.activate(); controller.configurePlayback({ enabled: true });
   t.after(() => controller.dispose());
   return { c: controller, storage };
@@ -524,4 +524,71 @@ test('a beat mix that is abandoned before it starts does not leave the idle engi
   assert.deepEqual(idle.bassCuts[0], [-30, 0], 'the mix did cut the incoming bass before failing');
   c.finishFade();
   assert.deepEqual(idle.bassCuts.at(-1), [0, 0], 'and the cut is undone for whoever uses this engine next');
+});
+
+test('the beat lock waits for real playback, then keeps measuring until the incoming is on the grid even when seeks land late', async t => {
+  const rhythm = { bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+  let outgoing; let incoming; let live = false; let stall = 0;
+  // A stand-in clock: sleeping advances the outgoing track, and the incoming one once it has really started.
+  const tick = seconds => {
+    outgoing.currentTime += seconds;
+    if (!live) return;
+    const lost = Math.min(stall, seconds);
+    stall -= lost;
+    incoming.currentTime += seconds - lost;
+  };
+  const { c } = fixture(t, { sleep: async ms => tick(ms / 1000) });
+  const next = { ...songs[1], djRhythm: rhythm };
+  c.setDjModeEnabled(true);
+  c.setQueueAndPlay([{ ...songs[0], djRhythm: rhythm }, next]);
+  await settle();
+  outgoing = c.audio;
+  outgoing.currentTime = 10;
+  assert.equal(c.planDjTransition({ candidate: next, sourceSongKey: 'a', transitionAtSeconds: 20, crossfadeSeconds: 8, beatSync: true, mixBars: 4, tempoRatio: 1, tempoOctave: 0, sourceRhythm: rhythm, candidateRhythm: rhythm }), true);
+  await settle();
+  incoming = c.standby;
+  const play = incoming.play.bind(incoming);
+  incoming.play = async () => { live = true; stall = 0.08; return play(); }; // play() resolves 80 ms before any sound
+  const seek = incoming.seek.bind(incoming);
+  incoming.seek = value => { seek(value); if (live) stall = 0.03; }; // every seek costs 30 ms
+  outgoing.currentTime = 20;
+  outgoing.emit('timeupdate');
+  await settle();
+  tick(0.1); // let any seek settle, then check where the incoming really is
+  const error = phaseErrorSeconds(rhythm, outgoing.currentTime, rhythm, incoming.currentTime);
+  assert.ok(Math.abs(error) <= 0.008, `expected the incoming within 8 ms of the grid, off by ${(error * 1000).toFixed(1)} ms after ${incoming.seeks.length - 1} corrections`);
+  assert.ok(incoming.seeks.length >= 3, 'more than one correction was needed');
+  assert.ok(incoming.seeks.length <= 5, 'and it converged instead of chasing');
+  assert.deepEqual(incoming.fades.at(-1).slice(0, 3), [1, 8, { curve: 'equal-power' }], 'the fade-in only starts after the lock');
+});
+
+test('after a beat mix the pitch eases home over seconds instead of jumping, and a user change stops the glide', async t => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+  const { c } = fixture(t, { now: () => Date.now() });
+  c.setQueueAndPlay([songs[0]]);
+  await settle();
+  const engine = c.audio;
+  engine.pitchModifier = 1 / 1.05; // matched to a track 5% faster during the mix
+  c.beatMixPitchShifted = true;
+  c.finishFade({ glide: true });
+  assert.equal(engine.pitchModifier, 1 / 1.05, 'nothing moves at the instant the mix ends');
+  t.mock.timers.tick(1500);
+  assert.ok(engine.pitchModifier > 1 / 1.05 && engine.pitchModifier < 0.99, `partway home after 1.5 s, got ${engine.pitchModifier}`);
+  const steps = engine.pitchModifierCalls.slice(-6);
+  assert.ok(steps.every((value, i) => i === 0 || (value >= steps[i - 1] && value - steps[i - 1] < 0.01)), 'in small steps');
+  t.mock.timers.tick(6000);
+  assert.equal(engine.pitchModifier, 1, 'home after the glide');
+
+  engine.pitchModifier = 0.96;
+  c.beatMixPitchShifted = true;
+  c.finishFade({ glide: true });
+  t.mock.timers.tick(1000);
+  c.setPitchModifier(1.04);
+  t.mock.timers.tick(7000);
+  assert.equal(engine.pitchModifier, 1.04, 'the listener\'s own pitch move wins');
+
+  engine.pitchModifier = 0.96;
+  c.beatMixPitchShifted = true;
+  c.finishFade();
+  assert.equal(engine.pitchModifier, 1.04, 'an abrupt end (scratch, skip) restores at once');
 });

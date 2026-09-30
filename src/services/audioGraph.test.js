@@ -150,6 +150,19 @@ test('DJ fades use equal-power curves, keeping combined power constant, and only
   assert.equal(graph.fadeGainNode.gain.last[0], 'ramp', 'the default remains linear');
 });
 
+test('a fade requested right after another starts from the requested level, not a stale AudioParam read', t => {
+  const graph = withGraph(t);
+  // A real AudioParam reports its old value until the next render quantum; simulate that.
+  Object.defineProperty(graph.fadeGainNode.gain, 'value', { get: () => 1, set: () => {}, configurable: true });
+  graph.setFade(0);
+  graph.setFade(1, 8, { curve: 'equal-power' });
+  assert.equal(graph.fadeGainNode.gain.last[0], 'curve', 'the fade-in used the equal-power curve, so it started from 0');
+  assert.ok(graph.fadeGainNode.gain.calls.some(([kind, value]) => kind === 'set' && value === 0), 'and the gain was actually set to 0 first');
+  graph.setFade(1);
+  graph.setFade(0, 8, { curve: 'equal-power' });
+  assert.equal(graph.fadeGainNode.gain.last[0], 'curve');
+});
+
 test('the bass shelf can be cut, restored and set before the graph exists', t => {
   const graph = withGraph(t);
   graph.setBassCut(-24, 2);
