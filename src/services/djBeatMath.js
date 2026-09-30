@@ -7,10 +7,132 @@
 export const MAX_TEMPO_STRETCH = 0.08; // A pitch fader on a turntable is +-8%; beyond that a beat-match sounds wrong.
 export const MIN_GRID_COVERAGE = 0.6; // Below this the track is rubato and a constant beat grid would lie.
 export const MIN_DOWNBEAT_AGREEMENT = 0.6; // Below this we align beat to beat, not bar to bar.
+export const MAX_FOLLOW_RATE_STEP = 0.04; // Maximum relative PLL rate correction per step.
 
 const finite = value => Number.isFinite(value);
 const positive = value => finite(value) && value > 0;
 const mod = (value, size) => ((value % size) + size) % size;
+
+/**
+ * Decodes a stored beat list of integer ms values [t0_ms, gap1_ms, gap2_ms, ...] into an array
+ * of song-timeline beat positions in seconds. Null unless it is an array of 3..66 finite ints
+ * with t0 >= 0 and every gap between 200 and 3000 ms.
+ */
+export function decodeBeatList(list) {
+  if (!Array.isArray(list) || list.length < 3 || list.length > 66) return null;
+  const t0 = list[0];
+  if (!Number.isInteger(t0) || t0 < 0) return null;
+  const decoded = new Array(list.length);
+  decoded[0] = t0 / 1000;
+  let currentMs = t0;
+  for (let i = 1; i < list.length; i += 1) {
+    const gap = list[i];
+    if (!Number.isInteger(gap) || gap < 200 || gap > 3000) return null;
+    currentMs += gap;
+    decoded[i] = currentMs / 1000;
+  }
+  return decoded;
+}
+
+/**
+ * Fractional beat index by linear interpolation between neighbouring beats; outside the list
+ * extrapolate with the nearest local period (first/last gap); NaN for an empty or one-beat list.
+ * Binary search, plain arithmetic, no allocations.
+ */
+export function beatIndexAt(beats, time) {
+  if (!Array.isArray(beats) || beats.length < 2 || !Number.isFinite(time)) return NaN;
+  const last = beats.length - 1;
+  if (time <= beats[0]) {
+    const gap = beats[1] - beats[0];
+    return gap > 0 ? (time - beats[0]) / gap : 0;
+  }
+  if (time >= beats[last]) {
+    const gap = beats[last] - beats[last - 1];
+    return gap > 0 ? last + (time - beats[last]) / gap : last;
+  }
+  let low = 0;
+  let high = last - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (time < beats[mid]) {
+      high = mid - 1;
+    } else if (time > beats[mid + 1]) {
+      low = mid + 1;
+    } else {
+      const gap = beats[mid + 1] - beats[mid];
+      return gap > 0 ? mid + (time - beats[mid]) / gap : mid;
+    }
+  }
+  return NaN;
+}
+
+/**
+ * Inverse of beatIndexAt: maps a fractional beat index to song time in seconds with the same extrapolation.
+ */
+export function timeAtBeatIndex(beats, index) {
+  if (!Array.isArray(beats) || beats.length < 2 || !Number.isFinite(index)) return NaN;
+  const last = beats.length - 1;
+  if (index <= 0) {
+    const gap = beats[1] - beats[0];
+    return beats[0] + index * gap;
+  }
+  if (index >= last) {
+    const gap = beats[last] - beats[last - 1];
+    return beats[last] + (index - last) * gap;
+  }
+  const i = Math.floor(index);
+  const gap = beats[i + 1] - beats[i];
+  return beats[i] + (index - i) * gap;
+}
+
+/**
+ * The duration in seconds of the beat interval containing the given song time.
+ */
+export function localPeriodAt(beats, time) {
+  if (!Array.isArray(beats) || beats.length < 2 || !Number.isFinite(time)) return NaN;
+  const last = beats.length - 1;
+  if (time <= beats[0]) return beats[1] - beats[0];
+  if (time >= beats[last]) return beats[last] - beats[last - 1];
+  const idx = beatIndexAt(beats, time);
+  if (!Number.isFinite(idx)) return NaN;
+  const i = Math.max(0, Math.min(last - 1, Math.floor(idx)));
+  return beats[i + 1] - beats[i];
+}
+
+/**
+ * Establishes the beat correspondence at the moment of lock between outgoing and incoming tracks.
+ * k0 = Math.round(beatIndexAt(inBeats, inTime) - beatIndexAt(outBeats, outTime) * 2 ** -octave).
+ */
+export function beatFollower({ outBeats, inBeats, octave = 0, outTime, inTime } = {}) {
+  const inIdx = beatIndexAt(inBeats, inTime);
+  const outIdx = beatIndexAt(outBeats, outTime);
+  if (!Number.isFinite(inIdx) || !Number.isFinite(outIdx) || !Number.isFinite(octave)) return null;
+  const k0 = Math.round(inIdx - outIdx * 2 ** -octave);
+  if (!Number.isFinite(k0)) return null;
+  return { outBeats, inBeats, octave, k0 };
+}
+
+/**
+ * Computes the incoming playback rate using feed-forward tempo matching and PLL phase correction.
+ */
+export function followerStep(follower, { outTime, inTime, outRate = 1, tau = 0.8, maxCorrection = MAX_FOLLOW_RATE_STEP } = {}) {
+  if (!follower || !follower.outBeats || !follower.inBeats) return null;
+  const { outBeats, inBeats, octave = 0, k0 = 0 } = follower;
+  const outIdx = beatIndexAt(outBeats, outTime);
+  if (!Number.isFinite(outIdx) || !Number.isFinite(inTime)) {
+    return { rate: NaN, errorSeconds: NaN, desiredInTime: NaN };
+  }
+  const idx = outIdx * 2 ** -octave + k0;
+  const desiredInTime = timeAtBeatIndex(inBeats, idx);
+  const errorSeconds = inTime - desiredInTime;
+  const localPeriodOut = localPeriodAt(outBeats, outTime);
+  const localPeriodIn = localPeriodAt(inBeats, inTime);
+  const feedForward = (localPeriodIn * outRate * 2 ** -octave) / localPeriodOut;
+  const normalizedError = tau > 0 ? errorSeconds / tau : 0;
+  const correction = Math.min(Math.max(normalizedError, -maxCorrection), maxCorrection);
+  const rate = feedForward * (1 - correction);
+  return { rate, errorSeconds, desiredInTime };
+}
 
 /** A record is usable for beat-syncing only when it has a tempo and a grid that describes the track. */
 export function hasBeatGrid(rhythm) {
@@ -163,13 +285,28 @@ export function sanitizeRhythm(value) {
     rhythmVersion: [0, 100], bpm: [30, 300], firstBeat: [0, 3600], firstDownbeat: [0, 3600], barBeats: [2, 12], beatCount: [0, 100000],
     gridDeviationMs: [0, 5000], gridCoverage: [0, 1], downbeatAgreement: [0, 1], introEnd: [0, 7200], introBars: [0, 512],
     outroStart: [0, 7200], outroBars: [0, 512], duration: [0, 7200], introBpm: [30, 300], outroBpm: [30, 300],
+    startBpm: [30, 300], beatListVersion: [0, 64], introVirtual: [0, 64], outroVirtual: [0, 64],
   };
+  const intFields = new Set(['barBeats', 'beatCount', 'rhythmVersion', 'beatListVersion', 'introBars', 'outroBars', 'introVirtual', 'outroVirtual']);
   for (const [field, [min, max]] of Object.entries(numbers)) {
     const number = inRange(value[field], min, max);
-    if (number != null) record[field] = field === 'barBeats' || field.endsWith('Bars') || field === 'beatCount' || field === 'rhythmVersion' ? Math.round(number) : number;
+    if (number != null) {
+      if (intFields.has(field)) {
+        if (Number.isInteger(number)) record[field] = number;
+      } else {
+        record[field] = number;
+      }
+    }
   }
   if (typeof value.abruptEnd === 'boolean') record.abruptEnd = value.abruptEnd;
   record.rhythmStatus = value.rhythmStatus === 'ready' ? 'ready' : 'no-beats';
   if (typeof value.beatTracker === 'string') record.beatTracker = value.beatTracker.slice(0, 40);
+  for (const field of ['introBeats', 'outroBeats']) {
+    if (Array.isArray(value[field])) {
+      const trimmed = value[field].slice(0, 66);
+      if (decodeBeatList(trimmed)) record[field] = trimmed;
+    }
+  }
   return record.rhythmStatus === 'ready' && record.bpm != null && record.firstDownbeat != null ? record : null;
 }
+

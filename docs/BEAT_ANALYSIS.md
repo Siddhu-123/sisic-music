@@ -12,7 +12,7 @@ The `djRhythm` object contains the following fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `rhythmVersion` | integer | Schema version of the rhythm analysis record (currently 1). |
+| `rhythmVersion` | integer | Schema version of the rhythm analysis record (currently 2). |
 | `rhythmStatus` | string | Status of beat tracking: `"ready"` on success, or `"no-beats"` if fewer than 8 beats were detected. |
 | `beatTracker` | string | Identifier of the model used (e.g., `"beat-this-final0"`). |
 | `bpm` | number | Fitted tempo across the track in beats per minute, calculated by `fit_tempo`. |
@@ -29,8 +29,18 @@ The `djRhythm` object contains the following fields:
 | `outroBars` | integer | Number of quiet outro bars following `outroStart` (0 if the track ends abruptly). |
 | `abruptEnd` | boolean | True if the track ends at full energy without a quiet outro. |
 | `duration` | number | Duration in seconds of the analyzed audio segment. |
-| `introBpm` | number | Local tempo in BPM around `introEnd` via `local_bpm`, folded into the track's primary octave. |
-| `outroBpm` | number | Local tempo in BPM around `outroStart` via `local_bpm`, folded into the track's primary octave. |
+| `startBpm` | number | Tempo over the first 32 folded beats: the tempo an incoming track has when a mix starts at its beginning. |
+| `outroBpm` | number | Tempo over the folded beats from `outroStart` (at most 64): the tempo an outgoing track has when a mix leaves it. Absent when fewer than 8 beats remain. |
+| `introBeats` | integer list | The first 64 folded beats as `[t0_ms, gap1_ms, gap2_ms, ...]`. Only stored when the track has a usable grid (`gridCoverage >= 0.6`). |
+| `outroBeats` | integer list | Up to 64 folded beats from the last beat at or before `outroStart`, same encoding. |
+| `introVirtual`, `outroVirtual` | integer | How many beats in the matching list were inserted to bridge a gap in detections rather than detected. The player only follows a list whose guessed share is 25 % or less. |
+| `beatListVersion` | integer | Encoding version of the beat lists (currently 1). |
+
+`introBpm` (rhythm version 1) is gone: it measured the tempo at the wrong point and on a frame-quantised estimate that could be 3 % off.
+
+### Folding, and why the lists exist
+
+Beat This! sometimes tracks a section at double time, and real recordings are not perfectly steady (a live track measured 81 bpm overall and 78 bpm in its last minute). `fold_beats` walks the detected beats at one metrical level: it follows the running period (limited to 8 % around the global one), skips double-time off-beats and bridges holes of up to 20 s with flagged virtual beats. Tempo, grid coverage and bar grid are then recomputed on the folded beats. The two short beat lists cost about 400 bytes per song and let the player follow the songs' real beats with a phase-locked loop (`followerStep` in `src/services/djBeatMath.js`) instead of assuming one constant tempo.
 
 ## Model Files and Installation
 

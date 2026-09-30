@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   alignmentUnit, downbeatAtOrBefore, downbeatsBetween, equalPowerCurve, hasBeatGrid, incomingStartPosition,
   mixBars, phaseErrorSeconds, semitonesForRate, tempoMatch,
+  decodeBeatList, beatIndexAt, timeAtBeatIndex, beatFollower, followerStep, MAX_FOLLOW_RATE_STEP, sanitizeRhythm,
 } from './djBeatMath.js';
+
 
 const grid = (bpm, firstDownbeat, extra = {}) => ({ rhythmStatus: 'ready', bpm, firstDownbeat, barBeats: 4, gridCoverage: 0.95, downbeatAgreement: 0.9, ...extra });
 
@@ -104,3 +106,230 @@ test('equal-power fades keep total power constant where linear fades dip by 3 dB
   assert.ok(linearPower < 0.51, 'linear midpoint power is 0.5, a 3 dB dip');
   assert.ok(Math.abs(fadeIn[middle] ** 2 + fadeOut[middle] ** 2 - 1) < 1e-5);
 });
+
+test('decodeBeatList rejects malformed lists (non-array, short, negative t0, gap 100 or 5000, NaN, strings)', () => {
+  // Valid list
+  const valid = decodeBeatList([1000, 500, 600]);
+  assert.deepEqual(valid, [1.0, 1.5, 2.1]);
+
+  // Non-array
+  assert.equal(decodeBeatList(null), null);
+  assert.equal(decodeBeatList(undefined), null);
+  assert.equal(decodeBeatList('not an array'), null);
+  assert.equal(decodeBeatList(12345), null);
+  assert.equal(decodeBeatList({}), null);
+
+  // Short (< 3)
+  assert.equal(decodeBeatList([]), null);
+  assert.equal(decodeBeatList([0]), null);
+  assert.equal(decodeBeatList([0, 500]), null);
+
+  // Exceeds 66 entries
+  assert.equal(decodeBeatList([0, ...Array(66).fill(500)]), null); // 67 entries
+  assert.ok(decodeBeatList([0, ...Array(65).fill(500)]) !== null); // 66 entries is valid
+
+  // Negative t0
+  assert.equal(decodeBeatList([-1, 500, 500]), null);
+
+  // Gap 100 or 5000 (outside 200..3000 ms range)
+  assert.equal(decodeBeatList([0, 100, 500]), null);
+  assert.equal(decodeBeatList([0, 5000, 500]), null);
+  assert.equal(decodeBeatList([0, 199, 500]), null);
+  assert.equal(decodeBeatList([0, 3001, 500]), null);
+
+  // NaN
+  assert.equal(decodeBeatList([NaN, 500, 500]), null);
+  assert.equal(decodeBeatList([0, NaN, 500]), null);
+  assert.equal(decodeBeatList([0, 500, NaN]), null);
+
+  // Strings
+  assert.equal(decodeBeatList(['0', 500, 500]), null);
+  assert.equal(decodeBeatList([0, '500', 500]), null);
+
+  // Floats
+  assert.equal(decodeBeatList([0.5, 500, 500]), null);
+  assert.equal(decodeBeatList([0, 500.5, 500]), null);
+});
+
+test('beatIndexAt and timeAtBeatIndex round-trip at 1000 random times including outside the ends', () => {
+  assert.ok(Number.isNaN(beatIndexAt([], 1)));
+  assert.ok(Number.isNaN(beatIndexAt([1], 1)));
+  assert.ok(Number.isNaN(timeAtBeatIndex([], 1)));
+  assert.ok(Number.isNaN(timeAtBeatIndex([1], 1)));
+
+  const raw = [2500];
+  for (let i = 0; i < 40; i += 1) {
+    raw.push(450 + ((i * 17) % 150));
+  }
+  const beats = decodeBeatList(raw);
+  assert.ok(beats);
+
+  const tMin = beats[0] - 20;
+  const tMax = beats.at(-1) + 20;
+
+  for (let i = 0; i < 1000; i += 1) {
+    const t = tMin + Math.random() * (tMax - tMin);
+    const idx = beatIndexAt(beats, t);
+    const roundTripTime = timeAtBeatIndex(beats, idx);
+    assert.ok(Math.abs(roundTripTime - t) < 1e-9, `time round-trip failed at ${t}`);
+  }
+
+  for (let i = 0; i < 1000; i += 1) {
+    const idx = -20 + Math.random() * (beats.length + 40);
+    const t = timeAtBeatIndex(beats, idx);
+    const roundTripIdx = beatIndexAt(beats, t);
+    assert.ok(Math.abs(roundTripIdx - idx) < 1e-9, `index round-trip failed at ${idx}`);
+  }
+});
+
+test('a follower on two constant-tempo lists at equal tempo returns rate 1 and error 0 at lock, and after simulating 5 seconds of wall time with a starting error of +40 ms and the returned rates the error decays below 5 ms', () => {
+  const raw = [0, ...Array(60).fill(500)];
+  const outBeats = decodeBeatList(raw);
+  const inBeats = decodeBeatList(raw);
+
+  const follower = beatFollower({ outBeats, inBeats, outTime: 10, inTime: 10 });
+  assert.ok(follower);
+  assert.equal(follower.k0, 0);
+
+  const lockStep = followerStep(follower, { outTime: 10, inTime: 10 });
+  assert.equal(lockStep.rate, 1);
+  assert.equal(lockStep.errorSeconds, 0);
+
+  let outTime = 10;
+  let inTime = 10 + 0.040;
+  const dt = 0.02;
+  const steps = Math.round(5 / dt);
+  for (let s = 0; s < steps; s += 1) {
+    const step = followerStep(follower, { outTime, inTime, outRate: 1 });
+    outTime += dt * 1;
+    inTime += dt * step.rate;
+  }
+
+  const finalStep = followerStep(follower, { outTime, inTime, outRate: 1 });
+  assert.ok(Math.abs(finalStep.errorSeconds) < 0.005, `error ${finalStep.errorSeconds} should decay below 5 ms`);
+});
+
+test('with outgoing 80 bpm and incoming 84 bpm lists the feed-forward rate is 80/84 (within 1e-9) with error 0', () => {
+  const outBeats = Array.from({ length: 40 }, (_, i) => i * (60 / 80));
+  const inBeats = Array.from({ length: 40 }, (_, i) => i * (60 / 84));
+  const follower = beatFollower({ outBeats, inBeats, outTime: 0, inTime: 0 });
+  assert.ok(follower);
+  const step = followerStep(follower, { outTime: 0, inTime: 0, outRate: 1 });
+  assert.ok(Math.abs(step.errorSeconds) < 1e-9, 'error should be 0');
+  assert.ok(Math.abs(step.rate - 80 / 84) < 1e-9, `rate should be 80/84, got ${step.rate}`);
+});
+
+test('octave = 1 (incoming half-time) works with rate 1 for equal-tempo-at-double lists', () => {
+  const outBeats = Array.from({ length: 40 }, (_, i) => i * (60 / 140));
+  const inBeats = Array.from({ length: 40 }, (_, i) => i * (60 / 70));
+  const follower = beatFollower({ outBeats, inBeats, octave: 1, outTime: 0, inTime: 0 });
+  assert.ok(follower);
+  const step = followerStep(follower, { outTime: 0, inTime: 0 });
+  assert.ok(Math.abs(step.rate - 1) < 1e-9, `rate should be 1, got ${step.rate}`);
+  assert.ok(Math.abs(step.errorSeconds) < 1e-9, 'error should be 0');
+});
+
+test('octave = 1 keeps the incoming on its beats while the outgoing plays on from a mid-song lock', () => {
+  const outBeats = Array.from({ length: 60 }, (_, i) => 10 + i * (60 / 140));
+  const inBeats = Array.from({ length: 60 }, (_, i) => 3 + i * (60 / 70));
+  const outLock = timeAtBeatIndex(outBeats, 10); // On an even outgoing beat, so the half-time incoming index is whole.
+  const inLock = timeAtBeatIndex(inBeats, 7);
+  const follower = beatFollower({ outBeats, inBeats, octave: 1, outTime: outLock, inTime: inLock });
+  for (const elapsed of [0, 1.5, 3, 6]) {
+    const step = followerStep(follower, { outTime: outLock + elapsed, inTime: inLock + elapsed });
+    assert.ok(Math.abs(step.errorSeconds) < 1e-9, `after ${elapsed}s the incoming should still be on its beats, error ${step.errorSeconds}`);
+  }
+});
+
+test('when the outgoing list has a tempo ramp the feed-forward rate follows it beat by beat and the simulated incoming stays within 10 ms of desired', () => {
+  const gaps = Array.from({ length: 30 }, (_, i) => 500 - i * 3);
+  const outBeats = [0];
+  for (const g of gaps) outBeats.push(outBeats.at(-1) + g / 1000);
+  const inBeats = Array.from({ length: 45 }, (_, i) => i * 0.5);
+
+  const follower = beatFollower({ outBeats, inBeats, outTime: 0, inTime: 0 });
+  assert.ok(follower);
+
+  let outTime = 0;
+  let inTime = 0;
+  const dt = 0.01;
+  const totalDuration = outBeats.at(-2);
+
+  let maxAbsError = 0;
+  while (outTime < totalDuration) {
+    const step = followerStep(follower, { outTime, inTime, outRate: 1 });
+    const absError = Math.abs(inTime - step.desiredInTime);
+    if (absError > maxAbsError) maxAbsError = absError;
+    assert.ok(absError < 0.010, `incoming error ${absError} exceeded 10 ms at outTime=${outTime}`);
+
+    const b = Math.max(0, Math.min(gaps.length - 1, Math.floor(beatIndexAt(outBeats, outTime))));
+    const expectedFeedForward = 0.5 / (gaps[b] / 1000);
+    const actualFeedForward = step.rate / (1 - Math.min(Math.max(step.errorSeconds / 0.8, -MAX_FOLLOW_RATE_STEP), MAX_FOLLOW_RATE_STEP));
+    assert.ok(Math.abs(actualFeedForward - expectedFeedForward) < 1e-9, `feed-forward rate should track beat by beat`);
+
+    outTime += dt * 1;
+    inTime += dt * step.rate;
+  }
+  assert.ok(maxAbsError < 0.010, 'simulated incoming stays within 10 ms of desired throughout ramp');
+});
+
+test('sanitizer keeps valid lists, drops invalid ones, keeps records valid without them, and drops unknown fields', () => {
+  const validList = [0, 500, 500, 500];
+  const invalidList = [0, 100, 500];
+
+  const full = {
+    rhythmStatus: 'ready',
+    bpm: 120,
+    firstDownbeat: 0.5,
+    startBpm: 118.5,
+    introBpm: 120,
+    outroBpm: 122,
+    beatListVersion: 1,
+    introVirtual: 4,
+    outroVirtual: 2,
+    introBeats: validList,
+    outroBeats: validList,
+    unknownField: 'bad',
+    anotherJunk: 999,
+  };
+
+  const sanitized = sanitizeRhythm(full);
+  assert.ok(sanitized);
+  assert.equal(sanitized.startBpm, 118.5);
+  assert.equal(sanitized.introBpm, 120);
+  assert.equal(sanitized.outroBpm, 122);
+  assert.equal(sanitized.beatListVersion, 1);
+  assert.equal(sanitized.introVirtual, 4);
+  assert.equal(sanitized.outroVirtual, 2);
+  assert.deepEqual(sanitized.introBeats, validList);
+  assert.deepEqual(sanitized.outroBeats, validList);
+  assert.equal(sanitized.unknownField, undefined);
+  assert.equal(sanitized.anotherJunk, undefined);
+
+  // Drops invalid lists but keeps record valid without them
+  const withInvalidLists = {
+    rhythmStatus: 'ready',
+    bpm: 120,
+    firstDownbeat: 0.5,
+    introBeats: invalidList,
+    outroBeats: 'not an array',
+  };
+  const sanitizedInvalid = sanitizeRhythm(withInvalidLists);
+  assert.ok(sanitizedInvalid);
+  assert.equal(sanitizedInvalid.introBeats, undefined);
+  assert.equal(sanitizedInvalid.outroBeats, undefined);
+  assert.equal(sanitizedInvalid.bpm, 120);
+
+  // Missing lists completely: record is still valid
+  const withoutLists = {
+    rhythmStatus: 'ready',
+    bpm: 120,
+    firstDownbeat: 0.5,
+  };
+  const sanitizedNoLists = sanitizeRhythm(withoutLists);
+  assert.ok(sanitizedNoLists);
+  assert.equal(sanitizedNoLists.bpm, 120);
+  assert.equal(sanitizedNoLists.introBeats, undefined);
+  assert.equal(sanitizedNoLists.outroBeats, undefined);
+});
+
