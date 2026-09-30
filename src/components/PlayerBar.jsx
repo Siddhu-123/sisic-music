@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Volume2, CheckCircle2, Shuffle, ListMusic, Cloud, Info } from 'lucide-react';
-import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { ExpandedPlayer } from './ExpandedPlayer.jsx';
+import { SeekBar } from './SeekBar.jsx';
 
 export function PlayerBar({
   player,
@@ -12,8 +12,6 @@ export function PlayerBar({
   onDelete,
   onReview,
   onDownload,
-  onPlayNext,
-  onAddToQueue,
   onOpenEqualizer,
   onMoreLikeThis,
 }) {
@@ -88,20 +86,7 @@ export function PlayerBar({
             <ListMusic size={16} />
           </button>
         </div>
-        <div className="progress-row">
-          <span className="time-label">{formatTime((progress / 100) * duration)}</span>
-          <input
-            type="range"
-            className="progress-bar"
-            min={0}
-            max={100}
-            step={0.1}
-            value={progress}
-            onChange={event => seek(Number(event.target.value))}
-            aria-label="Playback position"
-          />
-          <span className="time-label">{formatTime(duration)}</span>
-        </div>
+        <SeekBar progress={progress} duration={duration} onSeek={seek} />
       </div>
 
       <div className="player-volume">
@@ -129,8 +114,6 @@ export function PlayerBar({
           onDelete={onDelete}
           onReview={onReview}
           onDownload={onDownload}
-          onPlayNext={onPlayNext}
-          onAddToQueue={onAddToQueue}
           onOpenEqualizer={onOpenEqualizer}
           onMoreLikeThis={onMoreLikeThis}
         />

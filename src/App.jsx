@@ -1972,8 +1972,6 @@ function App() {
         onDelete={handleDeleteReadySong}
         onReview={setReviewSong}
         onDownload={handleDownload}
-        onPlayNext={song => { player.enqueueNext(song); addToast(`Playing "${song.track}" next`); }}
-        onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
         onOpenEqualizer={() => setIsEqOpen(true)}
         onMoreLikeThis={song => setRecommendationTarget(song)}
       />

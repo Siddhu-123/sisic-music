@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Download, Shuffle, Repeat, ListMusic, Plus, Trash2, ChevronDown, Info, RefreshCw, Sliders, Sparkles } from 'lucide-react';
 import { Turntable } from './Turntable.jsx';
-import { formatTime } from './componentUtils.jsx';
+import { SeekBar } from './SeekBar.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
@@ -15,8 +15,6 @@ export function ExpandedPlayer({
   onDelete,
   onReview,
   onDownload,
-  onPlayNext,
-  onAddToQueue,
   onOpenEqualizer,
   onMoreLikeThis,
 }) {
@@ -129,35 +127,25 @@ export function ExpandedPlayer({
               <p className="expanded-player__artist">{currentSong.artist}</p>
             </div>
 
-            <div className="expanded-player__metadata">
-              <section className="expanded-player__text-panel">
-                <h3>Lyrics</h3>
-                <p>{currentSong.lyrics || 'Lyrics will appear here when song metadata is available.'}</p>
-              </section>
-              <section className="expanded-player__text-panel">
-                <h3>Description</h3>
-                <p>{currentSong.description || 'Song description and credits will appear here when available.'}</p>
-              </section>
-            </div>
+            {(currentSong.lyrics || currentSong.description) && (
+              <div className="expanded-player__metadata">
+                {currentSong.lyrics && (
+                  <section className="expanded-player__text-panel">
+                    <h3>Lyrics</h3>
+                    <p>{currentSong.lyrics}</p>
+                  </section>
+                )}
+                {currentSong.description && (
+                  <section className="expanded-player__text-panel">
+                    <h3>About</h3>
+                    <p>{currentSong.description}</p>
+                  </section>
+                )}
+              </div>
+            )}
 
             <div className="expanded-player__controls-area">
-            <div className="expanded-progress">
-            <span className="time-label">{formatTime((displayedProgress / 100) * duration)}</span>
-            <input
-              type="range"
-              className="progress-bar"
-              min={0}
-              max={100}
-              step={0.1}
-              value={displayedProgress}
-              onChange={event => {
-                setProgressPreview(null);
-                seek(Number(event.target.value));
-              }}
-              aria-label="Playback position"
-            />
-            <span className="time-label">{formatTime(duration)}</span>
-          </div>
+              <SeekBar className="expanded-progress" progress={displayedProgress} duration={duration} onSeek={seek} onPreview={setProgressPreview} />
 
           <div className="expanded-controls">
             <button
@@ -186,8 +174,6 @@ export function ExpandedPlayer({
               <div className="expanded-player__actions" role="group" aria-label="Song actions">
                 <button className="panel-action-btn" onClick={() => onOpenSongInfo?.(currentSong)}><Info size={16} /> Info</button>
                 <button className="panel-action-btn" onClick={() => onAddToPlaylist?.(currentSong)}><Plus size={16} /> Playlist</button>
-                <button className="panel-action-btn" onClick={() => onPlayNext?.(currentSong)}><SkipForward size={16} /> Play next</button>
-                <button className="panel-action-btn" onClick={() => onAddToQueue?.(currentSong)}><ListMusic size={16} /> Queue</button>
                 <button className="panel-action-btn" onClick={() => onDownload?.(currentSong)}><Download size={16} /> Offline</button>
                 <button className="panel-action-btn" onClick={() => onReview?.(currentSong)}><RefreshCw size={16} /> Review</button>
                 <button className="panel-action-btn panel-action-btn--danger" onClick={() => onDelete?.(currentSong)}><Trash2 size={16} /> Delete</button>
