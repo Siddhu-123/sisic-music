@@ -162,9 +162,6 @@ export const SongCard = memo(function SongCard({
           onPlay(song);
         }}
         onKeyDown={handleCardKeyDown}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        aria-controls={menuOpen ? menuId : undefined}
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
       >
         <div className="song-card__art-wrapper">
