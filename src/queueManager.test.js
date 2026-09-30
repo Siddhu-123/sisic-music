@@ -73,3 +73,36 @@ test('queue persistence safely restores manualQueue', () => {
   assert.equal(restored.manualQueue[0].songKey, 'b');
   assert.equal(restored.manualQueue[1].songKey, 'external');
 });
+
+const savedWith = fields => JSON.stringify({ version: 1, queue: [{ songKey: 'a', track: 'A' }], ...fields });
+
+test('saved five-band equalizer settings are migrated, not wiped', async () => {
+  const { EQ_FREQUENCIES, EQ_PRESETS } = await import('./services/eqMath.js');
+  // A custom curve from the old layout keeps its shape on the new bands.
+  const custom = restoreQueueState(savedWith({ eqPreset: 'custom', eqGains: [6, 3, 0, -3, -6] }));
+  assert.equal(custom.eqPreset, 'custom');
+  assert.equal(custom.eqGains.length, EQ_FREQUENCIES.length);
+  assert.ok(custom.eqGains[0] > 3 && custom.eqGains.at(-1) < -3, `bass up, treble down: ${custom.eqGains}`);
+
+  // A named preset is re-read from today's definition, whatever gains were saved.
+  const preset = restoreQueueState(savedWith({ eqPreset: 'rock', eqGains: [5, 2, -1, 2, 5] }));
+  assert.equal(preset.eqPreset, 'rock');
+  assert.deepEqual(preset.eqGains, EQ_PRESETS.rock.gains);
+
+  // Current-layout settings pass through, clamped; junk falls back to a flat custom curve.
+  assert.deepEqual(restoreQueueState(savedWith({ eqPreset: 'custom', eqGains: [1, 2, 3, 4, 5, 6, 7, 8, 9, 40] })).eqGains, [1, 2, 3, 4, 5, 6, 7, 8, 9, 12]);
+  const junk = restoreQueueState(savedWith({ eqPreset: 'no-such-preset', eqGains: 'nope' }));
+  assert.equal(junk.eqPreset, 'custom');
+  assert.deepEqual(junk.eqGains, EQ_FREQUENCIES.map(() => 0));
+  // Nothing saved at all: flat, and the EQ is on.
+  const fresh = restoreQueueState(savedWith({}));
+  assert.equal(fresh.eqPreset, 'flat');
+  assert.equal(fresh.eqEnabled, true);
+});
+
+test('the equalizer bypass survives a save and restore', () => {
+  const off = restoreQueueState(serializeQueueState({ queue: [{ songKey: 'a', track: 'A' }], eqPreset: 'flat', eqGains: [], eqEnabled: false }));
+  assert.equal(off.eqEnabled, false);
+  const on = restoreQueueState(serializeQueueState({ queue: [{ songKey: 'a', track: 'A' }], eqEnabled: true }));
+  assert.equal(on.eqEnabled, true);
+});

@@ -1262,3 +1262,55 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
   .passport-panel { padding: 14px; }
   .passport-actions .taste-export-btn { flex: 1 1 100%; justify-content: center; min-height: 44px; }
 }
+
+/* ---- Equalizer: ten bands, response curve, presets ---- */
+.equalizer-modal { width: min(680px, 94vw); max-width: 680px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.eq-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; margin: 4px 0 12px; }
+.eq-switch { display: inline-flex; align-items: center; gap: 10px; background: none; border: 0; color: var(--text); font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; min-height: 40px; padding: 0; }
+.eq-switch__track { position: relative; width: 44px; height: 24px; border-radius: 999px; background: var(--bg); box-shadow: var(--shadow-inset); flex: none; transition: background 0.2s ease; }
+.eq-switch__thumb { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #94a3b8; transition: transform 0.2s ease, background 0.2s ease; }
+.eq-switch--on .eq-switch__track { background: rgba(37, 99, 235, 0.35); }
+.eq-switch--on .eq-switch__thumb { transform: translateX(20px); background: #38bdf8; }
+.eq-switch:focus-visible { outline: 2px solid #38bdf8; outline-offset: 4px; border-radius: 8px; }
+.eq-headroom { margin: 0; font-size: 0.76rem; color: var(--text-muted); }
+.eq-headroom strong { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.eq-curve { margin: 0 0 14px; padding: 12px 16px 26px 38px; border-radius: 18px; background: var(--bg); box-shadow: var(--shadow-inset); transition: opacity 0.2s ease, filter 0.2s ease; }
+.eq-curve--off { opacity: 0.45; filter: grayscale(1); }
+.eq-curve__plot { position: relative; height: clamp(110px, 22vw, 150px); }
+.eq-curve__svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.eq-curve__grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.eq-curve__zero { stroke: rgba(148, 163, 184, 0.55); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.eq-curve__area { fill: rgba(56, 189, 248, 0.16); }
+.eq-curve__line { fill: none; stroke: #38bdf8; stroke-width: 2.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.eq-curve__dot { position: absolute; width: 9px; height: 9px; border-radius: 50%; background: #38bdf8; border: 2px solid var(--bg); transform: translate(-50%, -50%); pointer-events: none; }
+.eq-curve__label { position: absolute; font-size: 0.66rem; color: var(--text-muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+.eq-curve__label--y { left: -8px; transform: translate(-100%, -50%); }
+.eq-curve__label--x { top: 100%; margin-top: 6px; transform: translateX(-50%); }
+
+.preset-button { display: inline-flex; align-items: center; gap: 6px; }
+.preset-button--user { padding: 0; }
+.preset-button__apply, .preset-button__delete { background: none; border: 0; color: inherit; font: inherit; cursor: pointer; }
+.preset-button__apply { padding: 6px 4px 6px 14px; font-weight: inherit; }
+.preset-button__delete { padding: 6px 10px 6px 4px; color: var(--text-muted); min-width: 30px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; }
+.preset-button__delete:hover, .preset-button__delete:focus-visible { color: #ef4444; }
+.preset-button--add { border: 1px dashed var(--border); background: transparent; box-shadow: none; }
+.eq-save-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.eq-save-form input { flex: 1 1 160px; min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 0.85rem; box-shadow: var(--shadow-inset); }
+.eq-message { margin: 8px 0 0; font-size: 0.78rem; color: var(--text-muted); }
+
+.equalizer-sliders-container { gap: 2px; padding: 18px 8px; transition: opacity 0.2s ease; }
+.equalizer-sliders-container--off { opacity: 0.5; }
+.equalizer-sliders-container .eq-band { flex: 1 1 0; min-width: 0; }
+.eq-gain-label { font-size: 0.66rem; font-variant-numeric: tabular-nums; }
+.eq-freq-label { font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 520px) {
+  .equalizer-modal { padding: 16px; }
+  .eq-curve { padding: 10px 10px 24px 32px; }
+  .eq-gain-label { font-size: 0.58rem; }
+  .eq-freq-label { font-size: 0.66rem; }
+  .eq-slider.vertical { width: 20px; }
+  .eq-slider-track { height: 120px; }
+  .eq-slider.vertical { height: 112px; }
+}

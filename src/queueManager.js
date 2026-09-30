@@ -1,3 +1,5 @@
+import { EQ_PRESETS, migrateGains } from './services/eqMath.js';
+
 export const REPEAT_MODES = ['off', 'one', 'all'];
 
 export function queueItemKey(song = {}) {
@@ -74,6 +76,19 @@ export function serializeQueueState(state = {}) {
   return JSON.stringify({ ...restoreQueueState(state), version: 1, savedAt: new Date().toISOString() });
 }
 
+// Saved EQ settings may come from the older five-band layout. Known presets are
+// re-read from the current definitions; custom curves are migrated, never wiped.
+function restoreEqualizer(parsed) {
+  const saved = typeof parsed.eqPreset === 'string' ? parsed.eqPreset : 'flat';
+  const known = Object.hasOwn(EQ_PRESETS, saved);
+  const eqPreset = known || saved === 'custom' ? saved : 'custom';
+  return {
+    eqPreset,
+    eqGains: known ? [...EQ_PRESETS[saved].gains] : migrateGains(parsed.eqGains),
+    eqEnabled: parsed.eqEnabled !== false,
+  };
+}
+
 export function restoreQueueState(raw) {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -106,8 +121,7 @@ export function restoreQueueState(raw) {
       positionSeconds: nonnegative(parsed.positionSeconds), isPlaying: Boolean(queue.length && parsed.isPlaying),
       volume: Math.min(1, nonnegative(parsed.volume, 1)), muted: Boolean(parsed.muted),
       crossfadeSeconds: Math.min(12, nonnegative(parsed.crossfadeSeconds)), sleepTimer,
-      eqPreset: typeof parsed.eqPreset === 'string' ? parsed.eqPreset : 'flat',
-      eqGains: Array.isArray(parsed.eqGains) && parsed.eqGains.length === 5 ? parsed.eqGains.map(gain => Math.max(-12, Math.min(12, Number(gain) || 0))) : [0, 0, 0, 0, 0],
+      ...restoreEqualizer(parsed),
       djModeEnabled: Boolean(parsed.djModeEnabled),
       djHistory: { candidateKeys: uniqueStrings(parsed.djHistory?.candidateKeys, 6), timingBuckets },
     };

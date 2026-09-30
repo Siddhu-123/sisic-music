@@ -5,7 +5,7 @@ import { resolvePlaybackUrl } from '../services/playbackSource.js';
 const ACTIONS = ['loadAndPlay', 'configurePlayback', 'togglePlay', 'play', 'pause', 'seek', 'changeVolume', 'toggleMute', 'setRpm',
   'setPitchModifier', 'setPitchRange', 'beginScratch', 'setScratchAngularVelocity', 'endScratch', 'setNeedleLifted', 'clearError',
   'setPlayerError', 'stop', 'playNext', 'playPrev', 'enqueueNext', 'addToQueue', 'removeFromQueue', 'reorderQueue', 'clearQueue',
-  'setQueueAndPlay', 'playQueueItem', 'toggleShuffle', 'toggleRepeat', 'setEqPreset', 'setBandGain', 'setCrossfade', 'setSleepTimer',
+  'setQueueAndPlay', 'playQueueItem', 'toggleShuffle', 'toggleRepeat', 'setEqPreset', 'setBandGain', 'setEqGains', 'setEqEnabled', 'setCrossfade', 'setSleepTimer',
   'setDjModeEnabled', 'setDjPrediction', 'planDjTransition', 'clearDjPlan'];
 
 export function useAudioPlayer() {

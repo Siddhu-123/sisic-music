@@ -46,7 +46,7 @@ export class PlaybackController {
       sleepTimer: saved?.sleepTimer || null, sleepRemaining: 0,
       djModeEnabled: Boolean(saved?.djModeEnabled), djPrediction: null, djPlan: null,
       djHistory: saved?.djHistory || { candidateKeys: [], timingBuckets: [] },
-      eqPreset: saved?.eqPreset || 'flat', eqGains: saved?.eqGains || [...EQ_PRESETS.flat.gains],
+      eqPreset: saved?.eqPreset || 'flat', eqGains: saved?.eqGains || [...EQ_PRESETS.flat.gains], eqEnabled: saved?.eqEnabled !== false,
       rpm: 45, pitchModifier: 1, pitchRange: 0.08,
     };
     this.originalQueue = saved?.originalQueue || [];
@@ -135,6 +135,7 @@ export class PlaybackController {
     audio.setVolume(this.state.muted ? 0 : this.state.volume);
     audio.setRpm(this.state.rpm);
     audio.setPitchModifier(this.state.pitchModifier);
+    audio.setEqEnabled?.(this.state.eqEnabled);
     if (this.state.eqPreset === 'custom') this.state.eqGains.forEach((gain, i) => audio.setBandGain(i, gain));
     else audio.applyPreset(this.state.eqPreset);
   }
@@ -798,6 +799,8 @@ export class PlaybackController {
   setNeedleLifted = value => { this.finishFade(); this.audio?.setNeedleLifted(value); };
   setEqPreset = preset => { if (!EQ_PRESETS[preset]) return; this.update({ eqPreset: preset, eqGains: [...EQ_PRESETS[preset].gains] }); this.applySettings(this.audio); this.persist(); };
   setBandGain = (index, gain) => { this.audio?.setBandGain(index, gain); this.update({ eqPreset: 'custom', eqGains: this.audio.currentGains }); this.persist(); };
+  setEqGains = gains => { this.audio?.setEqGains?.(gains); this.update({ eqPreset: 'custom', eqGains: this.audio?.currentGains || [...gains] }); this.persist(); };
+  setEqEnabled = enabled => { this.audio?.setEqEnabled?.(enabled); this.update({ eqEnabled: enabled !== false }); this.persist(); };
   clearError = () => this.update({ error: '' });
   setPlayerError = message => this.update({ error: message || '', isBuffering: false });
   visibilityChanged = hidden => { this.audio?.handleVisibilityChange(hidden); this.retiring?.handleVisibilityChange(hidden); this.checkSleep(); this.persist(); };

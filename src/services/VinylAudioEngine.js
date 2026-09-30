@@ -681,6 +681,18 @@ export class VinylAudioEngine {
     this.graph.setBandGain(index, gain);
   }
 
+  // The web audio graph is only built when the EQ is doing something, so a flat EQ keeps
+  // ordinary playback on the native media path.
+  setEqGains(gains) {
+    if (gains?.some(gain => Number(gain) !== 0)) this.ensureContext();
+    this.graph.setGains(gains);
+  }
+
+  setEqEnabled(enabled) {
+    if (enabled !== false && this.graph.currentGains.some(gain => gain !== 0)) this.ensureContext();
+    this.graph.setEnabled(enabled);
+  }
+
   getFrequencyData() {
     return this.graph.isAttachedTo(this.element) ? this.graph.getFrequencyData() : new Uint8Array(32);
   }

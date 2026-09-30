@@ -2315,6 +2315,9 @@ function App() {
             onClose={() => setIsEqOpen(false)}
             eqPreset={player.eqPreset}
             eqGains={player.eqGains}
+            eqEnabled={player.eqEnabled}
+            onSetEnabled={player.setEqEnabled}
+            onSetGains={player.setEqGains}
             onSetPreset={player.setEqPreset}
             onSetGain={player.setBandGain}
           />

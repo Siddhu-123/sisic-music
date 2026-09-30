@@ -1,26 +1,35 @@
-export const EQ_FREQUENCIES = [60, 230, 910, 3600, 14000];
+import {
+  EQ_FREQUENCIES,
+  EQ_PRESETS,
+  EQ_Q,
+  bandFilterType,
+  clampGain,
+  createSoftLimiterCurve,
+  headroomDb,
+} from './eqMath.js';
 
-export const EQ_PRESETS = {
-  flat: { name: 'Flat', gains: [0, 0, 0, 0, 0] },
-  bass_boost: { name: 'Bass Boost', gains: [6, 4, 0, 0, -1] },
-  electronic: { name: 'Electronic', gains: [5, 3, -1, 3, 4] },
-  acoustic: { name: 'Acoustic', gains: [3, 2, 0, 2, 3] },
-  vocal: { name: 'Vocal Boost', gains: [-2, 1, 4, 3, 1] },
-  treble_boost: { name: 'Treble Boost', gains: [-1, 0, 1, 4, 6] },
-  rock: { name: 'Rock', gains: [5, 2, -1, 2, 5] },
-};
+export { EQ_FREQUENCIES, EQ_PRESETS };
+
+// Parameter changes glide over a few time constants instead of jumping, which
+// removes the clicks ("zipper noise") a step change makes while a slider is dragged.
+const SMOOTHING_SECONDS = 0.02;
+
+const flatGains = () => EQ_FREQUENCIES.map(() => 0);
 
 export class AudioGraphManager {
   constructor() {
     this.audioContext = null;
     this.sourceNode = null;
+    this.preampNode = null;
     this.masterGainNode = null;
     this.fadeGainNode = null;
+    this.limiterNode = null;
     this.filterNodes = [];
     this.analyserNode = null;
     this.attachedElement = null;
     this.currentPreset = 'flat';
-    this.currentGains = [0, 0, 0, 0, 0];
+    this.currentGains = flatGains();
+    this.enabled = true;
   }
 
   ensureContext() {
@@ -34,6 +43,26 @@ export class AudioGraphManager {
       this.audioContext.resume().catch(() => {});
     }
     return this.audioContext;
+  }
+
+  // Moves an AudioParam toward `value` smoothly. Falls back to a direct set where unsupported.
+  glide(param, value) {
+    if (!param || !this.audioContext) return;
+    const now = this.audioContext.currentTime;
+    if (typeof param.cancelScheduledValues === 'function') param.cancelScheduledValues(now);
+    if (typeof param.setTargetAtTime === 'function') param.setTargetAtTime(value, now, SMOOTHING_SECONDS);
+    else param.setValueAtTime(value, now);
+  }
+
+  /** Total cut, in dB (0 or negative), that keeps the current curve's strongest boost from clipping. */
+  get headroomDb() {
+    return headroomDb(this.currentGains, this.audioContext ? { sampleRate: this.audioContext.sampleRate } : undefined);
+  }
+
+  // Pushes the current gains, headroom and bypass state to the live nodes.
+  applyEq() {
+    this.filterNodes.forEach((filter, index) => this.glide(filter.gain, this.enabled ? this.currentGains[index] || 0 : 0));
+    this.glide(this.preampNode?.gain, this.enabled ? 10 ** (this.headroomDb / 20) : 1);
   }
 
   attachAudioElement(audioElement) {
@@ -50,6 +79,11 @@ export class AudioGraphManager {
     try {
       this.sourceNode = ctx.createMediaElementSource(audioElement);
 
+      // Preamp: turns the signal down by exactly the EQ's strongest boost, so boosting a band
+      // can never push a loud track past full scale.
+      this.preampNode = ctx.createGain();
+      this.preampNode.gain.setValueAtTime(this.enabled ? 10 ** (this.headroomDb / 20) : 1, ctx.currentTime);
+
       // Master Gain
       this.masterGainNode = ctx.createGain();
       this.masterGainNode.gain.setValueAtTime(1, ctx.currentTime);
@@ -59,24 +93,26 @@ export class AudioGraphManager {
       this.analyserNode.fftSize = 128;
       this.analyserNode.smoothingTimeConstant = 0.8;
 
-      // 5-Band Parametric EQ Filters
+      // Ten-band graphic EQ, an octave apart, with shelves at both ends.
       this.filterNodes = EQ_FREQUENCIES.map((freq, index) => {
         const filter = ctx.createBiquadFilter();
+        filter.type = bandFilterType(index, EQ_FREQUENCIES.length);
         filter.frequency.setValueAtTime(freq, ctx.currentTime);
-        if (index === 0) {
-          filter.type = 'lowshelf';
-        } else if (index === EQ_FREQUENCIES.length - 1) {
-          filter.type = 'highshelf';
-        } else {
-          filter.type = 'peaking';
-          filter.Q.setValueAtTime(1.0, ctx.currentTime);
-        }
-        filter.gain.setValueAtTime(this.currentGains[index] || 0, ctx.currentTime);
+        if (filter.type === 'peaking') filter.Q.setValueAtTime(EQ_Q, ctx.currentTime);
+        filter.gain.setValueAtTime(this.enabled ? this.currentGains[index] || 0 : 0, ctx.currentTime);
         return filter;
       });
 
-      // Source -> EQ -> volume -> crossfade -> analyser -> output.
+      // Safety limiter: identical to the input below -1 dBFS, a smooth knee above it. No latency,
+      // no make-up gain, so it is inaudible on normal material and only rounds off stray peaks.
+      this.limiterNode = ctx.createWaveShaper();
+      this.limiterNode.curve = createSoftLimiterCurve();
+      this.limiterNode.oversample = 'none';
+
+      // Source -> preamp -> EQ -> volume -> crossfade -> limiter -> analyser -> output.
       let currentNode = this.sourceNode;
+      currentNode.connect(this.preampNode);
+      currentNode = this.preampNode;
       for (const filter of this.filterNodes) {
         currentNode.connect(filter);
         currentNode = filter;
@@ -84,24 +120,15 @@ export class AudioGraphManager {
       currentNode.connect(this.masterGainNode);
       this.fadeGainNode = ctx.createGain();
       this.masterGainNode.connect(this.fadeGainNode);
-      this.fadeGainNode.connect(this.analyserNode);
+      this.fadeGainNode.connect(this.limiterNode);
+      this.limiterNode.connect(this.analyserNode);
       this.analyserNode.connect(ctx.destination);
       this.attachedElement = audioElement;
 
       return ctx;
     } catch (err) {
       console.warn('Web Audio Graph initialization warning:', err);
-      this.sourceNode?.disconnect?.();
-      this.filterNodes.forEach(node => node?.disconnect?.());
-      this.masterGainNode?.disconnect?.();
-      this.fadeGainNode?.disconnect?.();
-      this.analyserNode?.disconnect?.();
-      this.sourceNode = null;
-      this.filterNodes = [];
-      this.masterGainNode = null;
-      this.fadeGainNode = null;
-      this.analyserNode = null;
-      this.attachedElement = null;
+      this.disconnectNodes();
       return null;
     }
   }
@@ -110,18 +137,26 @@ export class AudioGraphManager {
     return this.attachedElement === audioElement && Boolean(this.sourceNode);
   }
 
-  detachAudioElement() {
+  disconnectNodes() {
     this.sourceNode?.disconnect?.();
+    this.preampNode?.disconnect?.();
     this.filterNodes.forEach(node => node?.disconnect?.());
     this.masterGainNode?.disconnect?.();
     this.fadeGainNode?.disconnect?.();
+    this.limiterNode?.disconnect?.();
     this.analyserNode?.disconnect?.();
     this.sourceNode = null;
+    this.preampNode = null;
     this.filterNodes = [];
     this.masterGainNode = null;
     this.fadeGainNode = null;
+    this.limiterNode = null;
     this.analyserNode = null;
     this.attachedElement = null;
+  }
+
+  detachAudioElement() {
+    this.disconnectNodes();
   }
 
   setVolume(volume) {
@@ -144,16 +179,24 @@ export class AudioGraphManager {
     return true;
   }
 
+  /** Turns the whole EQ (bands and headroom) on or off without losing the settings. */
+  setEnabled(enabled) {
+    this.enabled = enabled !== false;
+    this.applyEq();
+  }
+
   setBandGain(bandIndex, gainDb) {
     if (!Number.isInteger(bandIndex) || bandIndex < 0 || bandIndex >= EQ_FREQUENCIES.length) return;
-    const clampedGain = Math.max(-12, Math.min(12, Number(gainDb) || 0));
-    this.currentGains[bandIndex] = clampedGain;
+    this.currentGains[bandIndex] = clampGain(gainDb);
     this.currentPreset = 'custom';
+    this.applyEq();
+  }
 
-    const filter = this.filterNodes[bandIndex];
-    if (filter && this.audioContext) {
-      filter.gain.setValueAtTime(clampedGain, this.audioContext.currentTime);
-    }
+  /** Sets every band at once (used for saved custom presets). */
+  setGains(gains) {
+    this.currentGains = EQ_FREQUENCIES.map((_, index) => clampGain(gains?.[index]));
+    this.currentPreset = 'custom';
+    this.applyEq();
   }
 
   applyPreset(presetKey) {
@@ -161,13 +204,7 @@ export class AudioGraphManager {
     if (!preset) return;
     this.currentPreset = presetKey;
     this.currentGains = [...preset.gains];
-
-    this.filterNodes.forEach((filter, index) => {
-      const gain = preset.gains[index] || 0;
-      if (filter && this.audioContext) {
-        filter.gain.setValueAtTime(gain, this.audioContext.currentTime);
-      }
-    });
+    this.applyEq();
   }
 
   getFrequencyData() {
