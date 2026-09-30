@@ -104,10 +104,17 @@ The following numbers have been verified in test runs:
 - Beat This on synthetic drums: beat F-measure 0.98-0.99 at 100/128/150 bpm, tempo within 0.03 bpm.
 - 3.5 s worker time per song.
 
+On six real songs (three film songs, a rock track, a live acoustic recording; only three pairs have tempos close enough to mix):
+- The first version, with one constant tempo ratio, measured 17-179 ms mean beat error against the tracker's own beats. Part of that was the tracker: its raw beats contain double-time stretches (Anbenum: 0.36 s gaps among 0.72 s ones around the outro), which is why beats are now folded to one level before use.
+- Anbenum -> Meherbaan through the real player in Chromium with the follower running: median beat error 15.5 ms, 90th percentile 28 ms over the 205 samples where both songs were audible, playback rate steering between 1.027 and 1.048 around the 1.0375 constant ratio. A 0.35 s cluster of about 336 ms readings sits where the raw beats have a spurious extra beat, not in the mix. Anbenum -> Rex Orange County: median 16 ms, with the same kind of artifact cluster.
+- Independent of the tracker, cross-correlating the onset envelopes of the two rendered songs in 3 s windows (`mix_check.py`), the follower held the lag between the songs within about +-5 ms in the middle of Anbenum -> Meherbaan where the constant ratio wandered 10-35 ms. On the steadier pair (Anbenum -> Rex) both stayed within about 25 ms. The four mixes that leave a song far before its outro use the constant ratio (25-35 ms mean error against the tracker).
+
 ### Honest limits
 
 - Downbeat agreement was 0.30-0.74 on the five sample songs, so alignment falls back to beat level when below 0.6.
 - Rubato film songs had grid coverage 0.41-0.64 and therefore use the v1 fallback.
+- The follower only runs when the mix leaves within 8 s of the stored outro beat list (the last beats of the song). A mix that leaves earlier, before a predicted skip, uses the constant ratio.
+- Two mixes (Meherbaan -> Anbenum and Meherbaan -> Rex) measured a steady 215 ms and 134-296 ms offset between the songs' onsets even though the tracker's beats line up (27-35 ms). Either the songs' drum patterns are syncopated so the onset envelopes do not peak on the beat, or the tracker places beats at a different point of the pulse in each song. Only a listening test settles it.
 - No listening test with real people has been done.
 - `tests/browser/dj-mix.html` measures the app's own clocks, not recorded audio output.
 - The pane used for measurement throttles animation frames, so the pitch glide was seen as steps there.
