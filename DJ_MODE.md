@@ -119,3 +119,11 @@ On six real songs (three film songs, a rock track, a live acoustic recording; on
 - `tests/browser/dj-mix.html` measures the app's own clocks, not recorded audio output.
 - The pane used for measurement throttles animation frames, so the pitch glide was seen as steps there.
 
+
+## DJ mode v3: sets, voice, transition styles
+Design and measured numbers: `docs/DJ_V3_DESIGN.md`. Nothing here has been heard by a person yet.
+- **Sets.** DJ mode plans 3 to 5 songs at a time (`djSetPlanner.js`, beam search over taste, tempo step, Camelot key distance, an energy arc, an artist-repeat penalty, and the mixer's own `scoreDjTransition` so links are beat-matchable). `djSetDirector.js` follows the set and re-plans when it is used up or a song is missing; it falls back to the old greedy pick if planning fails. The hook passes the last three played artists so a set does not start on an artist just heard.
+- **Voice (off by default).** Settings > "DJ voice". Short template lines (`djCommentary.js`: 110 templates, no repeat within 12) are spoken with the browser's `speechSynthesis` only when a mix has at least 4 s of instrumental material, at set starts always and between songs 35 % of the time. The music ducks 12 dB while it talks. Nothing leaves the device.
+- **Styles.** `beat-blend`, `filter-blend`, `echo-out`, `cut`, chosen per pair and rotated so two mixes in a row rarely share a style.
+- **Checks.** `npm run simulate:dj` (seeded, 12 seeds pass), mutation gate on the planning and style code (88 % to 100 %), and a real-browser run that found and fixed a dead voice toggle.
+- **Limits.** The simulation uses synthetic data and measures mixability, variety and repetition, not sound. The voice is a synthetic system voice reading templates, not a generated host. No listening test has been run.
