@@ -1,5 +1,6 @@
 import { VinylAudioEngine } from './VinylAudioEngine.js';
 import { EQ_PRESETS } from './audioGraph.js';
+import { beatSeconds, hasBeatGrid, incomingStartPosition, phaseErrorSeconds } from './djBeatMath.js';
 import { rememberDjTransition } from './djModeService.js';
 import { dedupeQueue, insertAfter, insertAtEnd, queueItemKey, reorderQueue, restoreQueueState, serializeQueueState } from '../queueManager.js';
 
@@ -66,6 +67,10 @@ export class PlaybackController {
     this.preloadPending = null;
     this.smartNextKey = null;
     this.djPlan = null;
+    this.fadeTimer = null;
+    this.bassTimer = null;
+    this.beatMixPitchShifted = false;
+    this.bassCutApplied = false;
     this.loading = false;
     this.transitioning = false;
     this.lastPersisted = 0;
@@ -180,6 +185,18 @@ export class PlaybackController {
   finishFade = () => {
     clearTimeout(this.fadeTimer);
     this.fadeTimer = null;
+    clearTimeout(this.bassTimer);
+    this.bassTimer = null;
+    if (this.bassCutApplied) {
+      this.bassCutApplied = false;
+      this.audio?.setBassCut?.(0);
+      this.retiring?.setBassCut?.(0);
+      this.standby?.setBassCut?.(0); // A mix abandoned before it started leaves the cut on the idle engine.
+    }
+    if (this.beatMixPitchShifted) {
+      this.beatMixPitchShifted = false;
+      this.audio?.setPitchModifier?.(this.state.pitchModifier);
+    }
     if (this.retiring) {
       this.retiring.clear();
       this.standby = this.retiring;
@@ -214,7 +231,7 @@ export class PlaybackController {
     }
     return true;
   }
-  loadAndPlay = async (song, { autoplay = true, startAt = 0, signal, crossfade = 0 } = {}) => {
+  loadAndPlay = async (song, { autoplay = true, startAt = 0, signal, crossfade = 0, mix = null } = {}) => {
     if (!this.active || !song || signal?.aborted) return false;
     if (sameSource(this.loadedSong, song) && this.audio?.getAttribute('src') && !this.audio.error && !this.loading) return true;
     this.cancelLoad();
@@ -241,6 +258,7 @@ export class PlaybackController {
         this.preloaded = null;
         this.preloadSong = null;
       } else {
+        mix = null;
         crossfade = 0;
         outgoing.clear();
         const url = await this.resolveUrl(song, abort.signal);
@@ -257,6 +275,25 @@ export class PlaybackController {
         canFade = Boolean(incomingContext && outgoingContext);
         if (canFade) incoming.setFade(0);
       }
+      const isBeatMix = Boolean(canFade && mix);
+      if (isBeatMix) {
+        this.beatMixPitchShifted = true;
+        this.bassCutApplied = true;
+        const outPitch = Number.isFinite(outgoing.pitchModifier) ? outgoing.pitchModifier : (this.state.pitchModifier || 1);
+        incoming.setPitchModifier(outPitch * mix.tempoRatio);
+        const outRate = Math.max(0.05, Number(outgoing.targetMotorRate) || 1);
+        const start = incomingStartPosition(
+          mix.sourceRhythm,
+          outgoing.currentTime + 0.06 * outRate,
+          mix.candidateRhythm,
+          mix.tempoOctave || 0
+        );
+        if (start && Number.isFinite(start.position)) {
+          const maxPosition = incoming.duration ? Math.max(0, incoming.duration - 0.25) : start.position;
+          incoming.seek(Math.max(0, Math.min(maxPosition, start.position)));
+        }
+        incoming.setBassCut(-30);
+      }
       if (this.desiredPlaying) await incoming.play();
       if (!latest()) return false;
       if (!this.desiredPlaying) incoming.pause({ immediate: true });
@@ -264,8 +301,27 @@ export class PlaybackController {
         this.audio = incoming;
         this.audioRef.current = incoming;
         if (canFade && this.desiredPlaying) {
-          incoming.setFade(1, crossfade);
-          outgoing.setFade(0, crossfade);
+          if (isBeatMix) {
+            const outNow = outgoing.currentTime;
+            const inNow = incoming.currentTime;
+            const err = phaseErrorSeconds(mix.sourceRhythm, outNow, mix.candidateRhythm, inNow, mix.tempoOctave || 0);
+            const inBeat = beatSeconds(mix.candidateRhythm);
+            if (Number.isFinite(err) && Math.abs(err) > 0.004 && inBeat && Math.abs(err) < 0.75 * inBeat) {
+              incoming.seek(incoming.currentTime - err);
+            }
+            incoming.setFade(1, crossfade, { curve: 'equal-power' });
+            outgoing.setFade(0, crossfade, { curve: 'equal-power' });
+            const rate = Math.max(0.05, Number(incoming.targetMotorRate || outgoing.targetMotorRate) || 1);
+            const r = Math.max(0.25, Math.min(1.5, (inBeat || 0.5) / rate));
+            this.bassTimer = setTimeout(() => {
+              this.bassTimer = null;
+              outgoing?.setBassCut?.(-30, r);
+              incoming?.setBassCut?.(0, r);
+            }, crossfade * 500);
+          } else {
+            incoming.setFade(1, crossfade);
+            outgoing.setFade(0, crossfade);
+          }
           this.retiring = outgoing;
           this.fadeDeadline = this.now() + crossfade * 1000;
           this.fadeTimer = setTimeout(() => { this.finishFade(); this.preloadNext(); }, crossfade * 1000 + 50);
@@ -280,7 +336,7 @@ export class PlaybackController {
       this.failed.delete(keyOf(song));
       this.played.add(keyOf(song));
       const completedDjPlan = this.djPlan && keyOf(this.djPlan.candidate) === keyOf(song);
-      const djHistory = completedDjPlan ? rememberDjTransition(this.state.djHistory, keyOf(song), this.djPlan.transitionAtSeconds) : this.state.djHistory;
+      const djHistory = completedDjPlan ? rememberDjTransition(this.state.djHistory, keyOf(song), this.djPlan.transitionAtSeconds, this.djPlan.mixBars) : this.state.djHistory;
       if (completedDjPlan) this.djPlan = null;
       this.update({ currentSong: this.loadedSong, currentSongKey: keyOf(song), duration: incoming.duration,
         progress: incoming.duration ? incoming.currentTime / incoming.duration * 100 : 0,
@@ -406,7 +462,10 @@ export class PlaybackController {
       const djDue = this.djPlan
         && keyOf(this.djPlan.source) === keyOf(this.state.currentSong)
         && this.audio.currentTime >= this.djPlan.transitionAtSeconds;
-      const requestedFade = djDue ? Math.min(this.djPlan.crossfadeSeconds, remaining) : remaining;
+      const isSynced = Boolean(djDue && this.djPlan.beatSync);
+      const requestedFade = djDue
+        ? Math.min(isSynced ? this.djPlan.crossfadeSeconds / Math.max(0.0625, this.audio.targetMotorRate || 1) : this.djPlan.crossfadeSeconds, remaining)
+        : remaining;
       if (duration > 0 && remaining > 0 && (djDue || remaining <= Math.min(this.state.crossfadeSeconds, duration / 2))
         && this.preloaded && this.desiredPlaying && !this.loading && !this.transitioning && !this.audio.isScratching
         && !this.audio.needleLifted && !this.audio.element?.seeking && this.state.repeatMode !== 'one'
@@ -423,7 +482,7 @@ export class PlaybackController {
           this.event(djDue ? 'dj-transition' : 'playback-complete', this.state.currentSong, { expectedFullPlay: !djDue, message: djDue ? 'Adaptive DJ crossfaded before a predicted skip.' : 'Crossfaded into the next track.' });
           this.select(index, { keepAudio: true, autoLoad: false });
           this.transitioning = true;
-          this.loadAndPlay(song, { crossfade: requestedFade });
+          this.loadAndPlay(song, { crossfade: requestedFade, ...(isSynced ? { mix: this.djPlan } : {}) });
         }
       }
       return;
@@ -759,13 +818,30 @@ export class PlaybackController {
     const currentIndex = this.state.queueIndex;
     const current = this.state.queue[currentIndex];
     if (!current || keyOf(current) !== keyOf(source)) return false;
-    const crossfadeSeconds = Math.max(2, Math.min(7, Number(plan.crossfadeSeconds) || 4));
+    const beatSync = Boolean(plan.beatSync) && hasBeatGrid(plan.sourceRhythm) && hasBeatGrid(plan.candidateRhythm);
+    const crossfadeSeconds = beatSync
+      ? Math.max(2, Math.min(40, Number(plan.crossfadeSeconds) || 4))
+      : Math.max(2, Math.min(7, Number(plan.crossfadeSeconds) || 4));
     const transitionAtSeconds = Number(plan.transitionAtSeconds);
     if (!Number.isFinite(transitionAtSeconds) || transitionAtSeconds <= this.audio.currentTime || transitionAtSeconds > this.audio.duration - crossfadeSeconds) return false;
     this.cancelPreload();
-    this.djPlan = { ...plan, source, candidate, sourceSongKey: keyOf(source), transitionAtSeconds, crossfadeSeconds };
+    this.djPlan = {
+      ...plan,
+      source,
+      candidate,
+      sourceSongKey: keyOf(source),
+      transitionAtSeconds,
+      crossfadeSeconds,
+      beatSync,
+      mixBars: plan.mixBars,
+      tempoRatio: plan.tempoRatio,
+      tempoOctave: plan.tempoOctave,
+      sourceRhythm: plan.sourceRhythm,
+      candidateRhythm: plan.candidateRhythm,
+    };
     this.update({ djPlan: {
       candidateSongKey: keyOf(candidate), candidateTitle: candidate.track, transitionAtSeconds, crossfadeSeconds, probability: Number(plan.probability || 0), fallback: Boolean(plan.fallback),
+      beatSync,
     } });
     this.preloadNext();
     this.persist();

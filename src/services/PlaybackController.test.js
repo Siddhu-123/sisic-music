@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PlaybackController, QUEUE_STORAGE_KEY } from './PlaybackController.js';
+import { incomingStartPosition } from './djBeatMath.js';
 
 const songs = ['a', 'b', 'c', 'd'].map(songKey => ({ songKey, track: songKey, artist: 'Artist', driveFileId: songKey }));
 const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
@@ -9,7 +10,8 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
 class FakeAudio {
   constructor() {
     this.listeners = new Map(); this.duration = 0; this.currentTime = 0; this.paused = true; this.src = ''; this.error = null;
-    this.currentGains = [0, 0, 0, 0, 0]; this.fades = []; this.targetMotorRate = 1;
+    this.currentGains = [0, 0, 0, 0, 0]; this.fades = []; this.targetMotorRate = 1; this.pitchModifier = 1;
+    this.pitchModifierCalls = []; this.bassCuts = []; this.seeks = [];
     this.element = { readyState: 4, seeking: false, buffered: { length: 0 } };
   }
   addEventListener(type, cb) { const listeners = this.listeners.get(type) || []; listeners.push(cb); this.listeners.set(type, listeners); }
@@ -19,10 +21,14 @@ class FakeAudio {
   async play() { if (this.playGate) await this.playGate.promise; this.paused = false; this.emit('play'); }
   pause() { this.paused = true; this.emit('pause'); }
   clear() { this.src = ''; this.duration = 0; this.currentTime = 0; this.paused = true; this.emit('timeupdate'); }
-  seek(value) { this.currentTime = value; this.emit('timeupdate'); }
+  seek(value) { this.currentTime = value; this.seeks.push(value); this.emit('timeupdate'); }
   setVolume(value) { this.volume = value; }
-  setRpm() {} setPitchModifier() {} applyPreset() {} setBandGain() {}
-  ensureContext() { return {}; } setFade(value, seconds) { this.fades.push([value, seconds]); return true; }
+  setRpm() {}
+  setPitchModifier(value) { this.pitchModifier = value; this.pitchModifierCalls.push(value); }
+  applyPreset() {} setBandGain() {}
+  ensureContext() { return {}; }
+  setFade(value, seconds, options) { this.fades.push([value, seconds, options]); return true; }
+  setBassCut(db, seconds = 0) { this.bassCuts.push([db, seconds]); return true; }
   handleVisibilityChange() {} beginScratch() {} endScratch() {} setNeedleLifted() {}
   dispose() { this.clear(); this.disposed = true; }
 }
@@ -274,4 +280,248 @@ test('recommendations append after manual queue and stale async responses are sa
   assert.equal(c.state.currentSongKey, 'b');
   assert.equal(c.state.queue.some(s => s.songKey === 'rec-a'), false);
   assert.deepEqual(c.state.queue.map(s => s.songKey), ['b', 'm1', 'rec-b']);
+});
+
+test('beat-synced DJ mix matches pitch, seeks start, equal-power fades, cuts bass, and finishFade restores settings', async t => {
+  const outRhythm = { bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+  const inRhythm = { bpm: 125, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+  const songA = { ...songs[0], djRhythm: outRhythm };
+  const songB = { ...songs[1], djRhythm: inRhythm };
+
+  const { c } = fixture(t);
+  c.setDjModeEnabled(true);
+  c.setQueueAndPlay([songA, songB]);
+  await settle();
+
+  const outgoing = c.audio;
+  outgoing.currentTime = 10;
+
+  const plan = {
+    candidate: songB,
+    sourceSongKey: 'a',
+    transitionAtSeconds: 20,
+    crossfadeSeconds: 8,
+    beatSync: true,
+    mixBars: 4,
+    tempoRatio: 120 / 125,
+    tempoOctave: 0,
+    sourceRhythm: outRhythm,
+    candidateRhythm: inRhythm,
+  };
+  assert.equal(c.planDjTransition(plan), true);
+  await settle();
+
+  const incoming = c.standby;
+  const expectedStart = incomingStartPosition(outRhythm, 20 + 0.06 * outgoing.targetMotorRate, inRhythm, 0);
+
+  outgoing.currentTime = 20;
+  outgoing.emit('timeupdate');
+  await settle();
+
+  // (a) calls setPitchModifier(outPitch * ratio) on the incoming engine
+  assert.equal(incoming.pitchModifier, 1 * (120 / 125));
+  assert.ok(incoming.pitchModifierCalls.includes(1 * (120 / 125)));
+
+  // seeks incoming to incomingStartPosition(...)
+  assert.equal(incoming.seeks[0], expectedStart.position);
+
+  // uses curve: 'equal-power'
+  assert.ok(incoming.fades.some(([val, , opt]) => val === 1 && opt?.curve === 'equal-power'));
+  assert.ok(outgoing.fades.some(([val, , opt]) => val === 0 && opt?.curve === 'equal-power'));
+
+  // applies bass cut -30 to incoming initially
+  assert.ok(incoming.bassCuts.some(([db]) => db === -30));
+
+  // after the fade finishFade restores bass 0 and the user's pitch
+  c.finishFade();
+  assert.equal(incoming.bassCuts.at(-1)[0], 0);
+  assert.equal(outgoing.bassCuts.at(-1)[0], 0);
+  assert.equal(c.audio.pitchModifier, 1);
+});
+
+test('plan without beatSync performs no setBassCut, no pitch change and a linear fade', async t => {
+  const { c } = fixture(t);
+  c.setDjModeEnabled(true);
+  c.setQueueAndPlay(songs);
+  await settle();
+
+  const outgoing = c.audio;
+  outgoing.currentTime = 10;
+
+  const plan = {
+    candidate: songs[1],
+    sourceSongKey: 'a',
+    transitionAtSeconds: 20,
+    crossfadeSeconds: 4,
+    beatSync: false,
+  };
+  assert.equal(c.planDjTransition(plan), true);
+  await settle();
+
+  const incoming = c.standby;
+
+  outgoing.currentTime = 20;
+  outgoing.emit('timeupdate');
+  await settle();
+
+  // No setBassCut during the transition
+  assert.equal(incoming.bassCuts.length, 0);
+  assert.equal(outgoing.bassCuts.length, 0);
+
+  // No pitch change (pitch remains user setting 1)
+  assert.equal(incoming.pitchModifier, 1);
+  assert.deepEqual(incoming.pitchModifierCalls, [1]);
+
+  // Linear fade (no equal-power curve)
+  assert.ok(incoming.fades.some(([val, sec, opt]) => val === 1 && sec === 4 && (!opt || opt.curve !== 'equal-power')));
+  assert.ok(outgoing.fades.some(([val, sec, opt]) => val === 0 && sec === 4 && (!opt || opt.curve !== 'equal-power')));
+});
+
+test('planDjTransition rejects beat-synced plan whose rhythms fail hasBeatGrid by falling back to 7s clamp with beatSync false', async t => {
+  const { c } = fixture(t);
+  c.setDjModeEnabled(true);
+  c.setQueueAndPlay(songs);
+  await settle();
+
+  const badRhythm = { rhythmStatus: 'no-beats', bpm: 0 };
+  const goodRhythm = { bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+
+  const plan = {
+    candidate: songs[1],
+    sourceSongKey: 'a',
+    transitionAtSeconds: 20,
+    crossfadeSeconds: 16,
+    beatSync: true,
+    sourceRhythm: badRhythm,
+    candidateRhythm: goodRhythm,
+  };
+  assert.equal(c.planDjTransition(plan), true);
+  assert.equal(c.djPlan.beatSync, false);
+  assert.equal(c.djPlan.crossfadeSeconds, 7);
+});
+
+test('phase-correction seek only happens when measured error exceeds 4 ms', async t => {
+  const outRhythm = { bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+  const inRhythm = { bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+  const songA = { ...songs[0], djRhythm: outRhythm };
+  const songB = { ...songs[1], djRhythm: inRhythm };
+
+  // Subcase 1: error <= 4ms (no phase correction seek)
+  {
+    const { c } = fixture(t);
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+
+    const plan = {
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: inRhythm,
+    };
+    assert.equal(c.planDjTransition(plan), true);
+    await settle();
+
+    const incoming = c.standby;
+    // Advancing outgoing by 0.06 aligns it with the +0.06 lookahead used to compute start position
+    const originalPlay = incoming.play.bind(incoming);
+    incoming.play = async () => {
+      outgoing.currentTime += 0.06;
+      return originalPlay();
+    };
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    // Only 1 seek occurred (initial seek before play)
+    assert.equal(incoming.seeks.length, 1);
+  }
+
+  // Subcase 2: error > 4ms (phase correction seek occurs)
+  {
+    const { c } = fixture(t);
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+
+    const plan = {
+      candidate: songB,
+      sourceSongKey: 'a',
+      transitionAtSeconds: 20,
+      crossfadeSeconds: 8,
+      beatSync: true,
+      mixBars: 4,
+      tempoRatio: 1,
+      tempoOctave: 0,
+      sourceRhythm: outRhythm,
+      candidateRhythm: inRhythm,
+    };
+    assert.equal(c.planDjTransition(plan), true);
+    await settle();
+
+    const incoming = c.standby;
+
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+
+    // 2 seeks occurred: initial seek, then phase correction seek
+    assert.equal(incoming.seeks.length, 2);
+    // The incoming was placed for 60 ms after the outgoing's position, which it has not reached: it is
+    // 60 ms ahead, so the correction moves it back by exactly that much.
+    assert.ok(Math.abs(incoming.seeks[1] - (incoming.seeks[0] - 0.06)) < 1e-6, `expected a 60 ms step back, got ${incoming.seeks}`);
+  }
+
+  // Subcase 3: the outgoing ran 60 ms further than allowed for, so the incoming is behind: step forward.
+  {
+    const { c } = fixture(t);
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songA, songB]);
+    await settle();
+    const outgoing = c.audio;
+    outgoing.currentTime = 10;
+    assert.equal(c.planDjTransition({ candidate: songB, sourceSongKey: 'a', transitionAtSeconds: 20, crossfadeSeconds: 8, beatSync: true, mixBars: 4, tempoRatio: 1, tempoOctave: 0, sourceRhythm: outRhythm, candidateRhythm: inRhythm }), true);
+    await settle();
+    const incoming = c.standby;
+    const originalPlay = incoming.play.bind(incoming);
+    incoming.play = async () => { outgoing.currentTime += 0.12; return originalPlay(); };
+    outgoing.currentTime = 20;
+    outgoing.emit('timeupdate');
+    await settle();
+    assert.equal(incoming.seeks.length, 2);
+    assert.ok(Math.abs(incoming.seeks[1] - (incoming.seeks[0] + 0.06)) < 1e-6, `expected a 60 ms step forward, got ${incoming.seeks}`);
+  }
+});
+
+test('a beat mix that is abandoned before it starts does not leave the idle engine with its bass cut', async t => {
+  const outRhythm = { bpm: 120, firstDownbeat: 0, barBeats: 4, gridCoverage: 0.9, downbeatAgreement: 0.8, rhythmStatus: 'ready' };
+  const { c } = fixture(t);
+  c.setDjModeEnabled(true);
+  c.setQueueAndPlay([{ ...songs[0], djRhythm: outRhythm }, { ...songs[1], djRhythm: outRhythm }]);
+  await settle();
+  const outgoing = c.audio;
+  outgoing.currentTime = 10;
+  assert.equal(c.planDjTransition({ candidate: { ...songs[1], djRhythm: outRhythm }, sourceSongKey: 'a', transitionAtSeconds: 20, crossfadeSeconds: 8, beatSync: true, mixBars: 4, tempoRatio: 1, tempoOctave: 0, sourceRhythm: outRhythm, candidateRhythm: outRhythm }), true);
+  await settle();
+  const idle = c.standby;
+  idle.play = async () => { throw new Error('autoplay blocked'); };
+  outgoing.currentTime = 20;
+  outgoing.emit('timeupdate');
+  await settle();
+  assert.deepEqual(idle.bassCuts[0], [-30, 0], 'the mix did cut the incoming bass before failing');
+  c.finishFade();
+  assert.deepEqual(idle.bassCuts.at(-1), [0, 0], 'and the cut is undone for whoever uses this engine next');
 });

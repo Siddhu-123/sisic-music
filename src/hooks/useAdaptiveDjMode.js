@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { cacheDjTransitionScores, getDjTransitionScores } from '../db.js';
-import { buildSkipObservations, chooseDjCandidate, chooseDjTransitionTime, DJ_SKIP_THRESHOLD, predictSkipProbability, rankDjCandidates } from '../services/djModeService.js';
+import { buildSkipObservations, chooseDjCandidate, chooseDjTransitionTime, DJ_SKIP_THRESHOLD, planDjMix, predictSkipProbability, rankDjCandidates } from '../services/djModeService.js';
 
 export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) {
   const observations = useMemo(() => buildSkipObservations(playbackEvents), [playbackEvents]);
@@ -31,12 +31,14 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) 
         const ranked = rankDjCandidates({ source, songs: state.songs, playbackEvents: state.playbackEvents, positionSeconds: transitionAtSeconds,
           likedSongKeys: state.likedSongKeys, history: p.djHistory, transitionScores: new Map(cached.map(score => [score.cacheKey, score])) });
         const choice = chooseDjCandidate(ranked, { history: p.djHistory });
-        if (!choice || transitionAtSeconds == null || cancelled) return;
+        if (!choice || cancelled) return;
+        const plan = planDjMix({ source, candidate: choice.song, positionSeconds, duration: p.duration, prediction, transition: choice.transition, history: p.djHistory, fadeSeconds });
+        if (plan?.transitionAtSeconds == null) return;
         const current = latest.current.player;
         if (current.currentSongKey !== p.currentSongKey || current.queueRevision !== p.queueRevision
           || Math.abs(current.progress / 100 * current.duration - positionSeconds) > 4) return;
-        p.planDjTransition({ sourceSongKey: p.currentSongKey, candidate: choice.song, probability: prediction.probability,
-          fallback: choice.fallback, transitionAtSeconds, crossfadeSeconds: fadeSeconds });
+        p.planDjTransition({ ...plan, sourceSongKey: p.currentSongKey, candidate: choice.song, probability: prediction.probability,
+          fallback: choice.fallback, sourceRhythm: source.djRhythm, candidateRhythm: choice.song.djRhythm });
         cacheDjTransitionScores(ranked.map(item => item.transition)).catch(() => {});
       } catch (error) {
         console.warn('Adaptive DJ ranking failed:', error);
