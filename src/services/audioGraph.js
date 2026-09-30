@@ -30,6 +30,9 @@ export class AudioGraphManager {
     this.bassCutDb = 0;
     this.fadeLevel = 1;
     this.fadeRampEndsAt = 0;
+    this.duckGainNode = null;
+    this.duckLevel = 1;
+    this.duckRampEndsAt = 0;
     this.limiterNode = null;
     this.filterNodes = [];
     this.analyserNode = null;
@@ -116,7 +119,7 @@ export class AudioGraphManager {
       this.limiterNode.curve = createSoftLimiterCurve();
       this.limiterNode.oversample = 'none';
 
-      // Source -> preamp -> EQ -> volume -> crossfade -> DJ bass shelf -> limiter -> analyser -> output.
+      // Source -> preamp -> EQ -> volume -> crossfade -> DJ bass shelf -> duck -> limiter -> analyser -> output.
       let currentNode = this.sourceNode;
       currentNode.connect(this.preampNode);
       currentNode = this.preampNode;
@@ -133,7 +136,10 @@ export class AudioGraphManager {
       this.bassNode.frequency.setValueAtTime(BASS_SWAP_FREQUENCY, ctx.currentTime);
       this.bassNode.gain.setValueAtTime(this.bassCutDb, ctx.currentTime);
       this.fadeGainNode.connect(this.bassNode);
-      this.bassNode.connect(this.limiterNode);
+      this.duckGainNode = ctx.createGain();
+      this.duckGainNode.gain.setValueAtTime(this.duckLevel, ctx.currentTime);
+      this.bassNode.connect(this.duckGainNode);
+      this.duckGainNode.connect(this.limiterNode);
       this.limiterNode.connect(this.analyserNode);
       this.analyserNode.connect(ctx.destination);
       this.attachedElement = audioElement;
@@ -157,6 +163,7 @@ export class AudioGraphManager {
     this.masterGainNode?.disconnect?.();
     this.fadeGainNode?.disconnect?.();
     this.bassNode?.disconnect?.();
+    this.duckGainNode?.disconnect?.();
     this.limiterNode?.disconnect?.();
     this.analyserNode?.disconnect?.();
     this.sourceNode = null;
@@ -166,6 +173,9 @@ export class AudioGraphManager {
     this.fadeGainNode = null;
     this.fadeLevel = 1;
     this.fadeRampEndsAt = 0;
+    this.duckGainNode = null;
+    this.duckLevel = 1;
+    this.duckRampEndsAt = 0;
     this.bassNode = null;
     this.limiterNode = null;
     this.analyserNode = null;
@@ -218,6 +228,25 @@ export class AudioGraphManager {
     gain.setValueAtTime(gain.value, now);
     if (seconds > 0) gain.linearRampToValueAtTime(this.bassCutDb, now + seconds);
     else gain.setValueAtTime(this.bassCutDb, now);
+    return true;
+  }
+
+  /**
+   * Ducks audio gain by specified decibels (db <= 0).
+   * Ramps it, tracks its own JS level to avoid stale reads, and resets on disconnect.
+   */
+  setDuck(db, seconds = 0) {
+    if (!this.duckGainNode || !this.audioContext) return false;
+    const gain = this.duckGainNode.gain;
+    const now = this.audioContext.currentTime;
+    const target = 10 ** ((Number(db) || 0) / 20);
+    const start = now < this.duckRampEndsAt ? gain.value : this.duckLevel;
+    this.duckLevel = target;
+    this.duckRampEndsAt = seconds > 0 ? now + seconds : 0;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(start, now);
+    if (seconds <= 0) gain.setValueAtTime(target, now);
+    else gain.linearRampToValueAtTime(target, now + seconds);
     return true;
   }
 

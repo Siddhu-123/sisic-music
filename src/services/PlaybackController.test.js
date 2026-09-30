@@ -11,7 +11,7 @@ class FakeAudio {
   constructor() {
     this.listeners = new Map(); this.duration = 0; this.currentTime = 0; this.paused = true; this.src = ''; this.error = null;
     this.currentGains = [0, 0, 0, 0, 0]; this.fades = []; this.targetMotorRate = 1; this.pitchModifier = 1; this.rpm = 45;
-    this.pitchModifierCalls = []; this.bassCuts = []; this.seeks = [];
+    this.pitchModifierCalls = []; this.bassCuts = []; this.seeks = []; this.ducks = [];
     this.element = { readyState: 4, seeking: false, buffered: { length: 0 } };
   }
   addEventListener(type, cb) { const listeners = this.listeners.get(type) || []; listeners.push(cb); this.listeners.set(type, listeners); }
@@ -29,6 +29,7 @@ class FakeAudio {
   ensureContext() { return {}; }
   setFade(value, seconds, options) { this.fades.push([value, seconds, options]); return true; }
   setBassCut(db, seconds = 0) { this.bassCuts.push([db, seconds]); return true; }
+  setDuck(db, seconds = 0) { this.ducks.push([db, seconds]); return true; }
   handleVisibilityChange() {} beginScratch() {} endScratch() {} setNeedleLifted() {}
   dispose() { this.clear(); this.disposed = true; }
 }
@@ -987,3 +988,94 @@ test('the beat follower only starts on lists it can trust and applies the rate t
     assert.ok(Math.abs(incoming.targetMotorRate - outRate) < 1e-6, `engine rate ${incoming.targetMotorRate} should equal the outgoing rate ${outRate} when on the beat (rpm ${incomingRpm})`);
   }
 });
+
+test('controller voice: disabled returns "disabled" and never calls the voice', async t => {
+  let speakCalls = 0;
+  const fakeVoice = {
+    speak: async () => { speakCalls += 1; return 'done'; },
+    cancel: () => {},
+  };
+  const { c } = fixture(t, { createVoice: () => fakeVoice });
+  assert.equal(c.state.djVoiceEnabled, false);
+  const result = await c.speakDj('Testing voice');
+  assert.equal(result, 'disabled');
+  assert.equal(speakCalls, 0);
+});
+
+test('controller voice: enabling persists and survives restore', async t => {
+  const { c, storage } = fixture(t);
+  assert.equal(c.state.djVoiceEnabled, false);
+  c.setDjVoiceEnabled(true);
+  assert.equal(c.state.djVoiceEnabled, true);
+
+  const restored = new PlaybackController({
+    storage,
+    createAudio: () => new FakeAudio(),
+    createVoice: () => ({ speak: async () => 'done', cancel: () => {} }),
+  });
+  t.after(() => restored.dispose());
+  assert.equal(restored.state.djVoiceEnabled, true);
+
+  c.setDjVoiceEnabled(false);
+  assert.equal(c.state.djVoiceEnabled, false);
+  const restoredDisabled = new PlaybackController({
+    storage,
+    createAudio: () => new FakeAudio(),
+    createVoice: () => ({ speak: async () => 'done', cancel: () => {} }),
+  });
+  t.after(() => restoredDisabled.dispose());
+  assert.equal(restoredDisabled.state.djVoiceEnabled, false);
+});
+
+test('controller voice: turning off, pause, select, seek, dispose cancel speech', async t => {
+  let cancelCalls = 0;
+  const fakeVoice = {
+    speak: async () => 'done',
+    cancel: () => { cancelCalls += 1; },
+  };
+  const { c } = fixture(t, { createVoice: () => fakeVoice });
+  c.setDjVoiceEnabled(true);
+  c.setQueueAndPlay(songs);
+  await settle();
+  cancelCalls = 0;
+
+  // Turning off cancels
+  c.setDjVoiceEnabled(false);
+  assert.equal(cancelCalls, 1);
+  c.setDjVoiceEnabled(true);
+
+  // Pause cancels
+  c.pause();
+  assert.equal(cancelCalls, 2);
+
+  // Select cancels
+  c.select(1);
+  assert.equal(cancelCalls, 3);
+
+  // Seek cancels
+  c.audio.duration = 100;
+  c.seek(50);
+  assert.equal(cancelCalls, 4);
+
+  // Dispose cancels
+  c.dispose();
+  assert.equal(cancelCalls, 5);
+});
+
+test('controller setDuck applies ducking to playing and retiring engines', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs);
+  await settle();
+
+  const retiring = new FakeAudio();
+  c.retiring = retiring;
+
+  c.setDuck(-12, 0.3);
+  assert.deepEqual(c.audio.ducks, [[-12, 0.3]]);
+  assert.deepEqual(retiring.ducks, [[-12, 0.3]]);
+
+  c.setDuck(0, 0.5);
+  assert.deepEqual(c.audio.ducks, [[-12, 0.3], [0, 0.5]]);
+  assert.deepEqual(retiring.ducks, [[-12, 0.3], [0, 0.5]]);
+});
+

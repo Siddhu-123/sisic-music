@@ -4,6 +4,7 @@ import { beatFollower, beatSeconds, decodeBeatList, followerStep, hasBeatGrid, i
 import { createFollowLoop } from './followLoop.js';
 import { rememberDjTransition } from './djModeService.js';
 import { dedupeQueue, insertAfter, insertAtEnd, queueItemKey, reorderQueue, restoreQueueState, serializeQueueState } from '../queueManager.js';
+import { createDjVoice } from './djVoice.js';
 
 export const QUEUE_STORAGE_KEY = 'sisic:queue-state:v1';
 const keyOf = queueItemKey;
@@ -27,7 +28,7 @@ const shuffle = songs => {
 // One synchronous owner for transport intent, async requests and queue identity.
 // React observes snapshots; no queue mutation waits for an effect to update a ref.
 export class PlaybackController {
-  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations, followTimers } = {}) {
+  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations, followTimers, createVoice = createDjVoice } = {}) {
     this.sleep = sleep;
     this.followTimers = followTimers;
     this.resolveUrl = resolveUrl;
@@ -37,6 +38,7 @@ export class PlaybackController {
     this.getRecommendations = getRecommendations || null;
     this.recommendationSequence = 0;
     this.recommendationAbort = null;
+    this.voice = createVoice({ duck: (db, s) => this.setDuck(db, s) });
     let saved;
     try { saved = restoreQueueState(storage?.getItem(QUEUE_STORAGE_KEY)); } catch { /* storage may be disabled */ }
     this.state = {
@@ -48,7 +50,7 @@ export class PlaybackController {
       resumeOnRestore: Boolean(saved?.isPlaying), resumePosition: saved?.positionSeconds || 0,
       volume: saved?.volume ?? 1, muted: saved?.muted || false, crossfadeSeconds: saved?.crossfadeSeconds || 0,
       sleepTimer: saved?.sleepTimer || null, sleepRemaining: 0,
-      djModeEnabled: Boolean(saved?.djModeEnabled), djPrediction: null, djPlan: null,
+      djModeEnabled: Boolean(saved?.djModeEnabled), djVoiceEnabled: Boolean(saved?.djVoiceEnabled), djPrediction: null, djPlan: null,
       djHistory: saved?.djHistory || { candidateKeys: [], timingBuckets: [] },
       eqPreset: saved?.eqPreset || 'flat', eqGains: saved?.eqGains || [...EQ_PRESETS.flat.gains], eqEnabled: saved?.eqEnabled !== false,
       rpm: 45, pitchModifier: 1, pitchRange: 0.08,
@@ -236,6 +238,7 @@ export class PlaybackController {
   }
   select(index, { autoplay = true, keepAudio = false, resetPosition = true, autoLoad = true } = {}) {
     if (!Number.isInteger(index) || !this.state.queue[index]) return false;
+    this.voice?.cancel?.();
     this.invalidateSelection({ keepAudio });
     this.desiredPlaying = autoplay;
     this.smartNextKey = null;
@@ -620,6 +623,7 @@ export class PlaybackController {
     }
   };
   pause = () => {
+    this.voice?.cancel?.();
     this.desiredPlaying = false;
     this.finishFade();
     this.clearDjPlan({ persist: false });
@@ -631,6 +635,7 @@ export class PlaybackController {
   };
   togglePlay = () => this.desiredPlaying ? this.pause() : this.play();
   seek = pct => {
+    this.voice?.cancel?.();
     if (!this.audio?.duration || !Number.isFinite(Number(pct))) return;
     this.finishFade();
     this.clearDjPlan({ persist: false });
@@ -891,6 +896,20 @@ export class PlaybackController {
     this.preloadNext();
     this.persist();
   };
+  setDjVoiceEnabled = enabled => {
+    const djVoiceEnabled = Boolean(enabled);
+    if (!djVoiceEnabled) this.voice?.cancel?.();
+    this.update({ djVoiceEnabled });
+    this.persist();
+  };
+  setDuck(db, seconds = 0) {
+    this.audio?.setDuck?.(db, seconds);
+    this.retiring?.setDuck?.(db, seconds);
+  }
+  speakDj(text) {
+    if (!this.state.djVoiceEnabled) return Promise.resolve('disabled');
+    return this.voice?.speak(text) ?? Promise.resolve('unavailable');
+  }
   setDjPrediction = prediction => this.update({ djPrediction: prediction ? { ...prediction } : null });
   clearDjPlan = ({ persist = true } = {}) => {
     if (!this.djPlan && !this.state.djPlan) return;
@@ -973,6 +992,7 @@ export class PlaybackController {
   setPlayerError = message => this.update({ error: message || '', isBuffering: false });
   visibilityChanged = hidden => { this.audio?.handleVisibilityChange(hidden); this.retiring?.handleVisibilityChange(hidden); this.checkSleep(); this.persist(); };
   dispose = () => {
+    this.voice?.cancel?.();
     this.djPlan = null;
     this.recommendationAbort?.abort();
     this.update({ djPlan: null, djPrediction: null });

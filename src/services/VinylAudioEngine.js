@@ -714,6 +714,10 @@ export class VinylAudioEngine {
     return this.graph.setBassCut(db, seconds);
   }
 
+  setDuck(db, seconds = 0) {
+    return this.graph.setDuck(db, seconds);
+  }
+
   handleVisibilityChange(hidden) {
     if (hidden) {
       if (this.isStopping) this._finishPause();

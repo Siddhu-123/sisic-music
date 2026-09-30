@@ -123,6 +123,7 @@ export function restoreQueueState(raw) {
       crossfadeSeconds: Math.min(12, nonnegative(parsed.crossfadeSeconds)), sleepTimer,
       ...restoreEqualizer(parsed),
       djModeEnabled: Boolean(parsed.djModeEnabled),
+      djVoiceEnabled: Boolean(parsed.djVoiceEnabled),
       djHistory: { candidateKeys: uniqueStrings(parsed.djHistory?.candidateKeys, 6), timingBuckets },
     };
   } catch { return null; }

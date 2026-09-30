@@ -17,6 +17,10 @@ export function PlaybackSettings({ player }) {
         <span><strong>Adaptive DJ</strong><small>Predict skips and choose a smooth next recommendation.</small></span>
         <input id="dj-mode" aria-label="Adaptive DJ mode" type="checkbox" checked={player.djModeEnabled} onChange={event => player.setDjModeEnabled(event.target.checked)} />
       </label>
+      <label className="playback-settings__toggle" htmlFor="dj-voice">
+        <span><strong>DJ voice</strong><small>Spoken set intros and track transitions.</small></span>
+        <input id="dj-voice" aria-label="DJ voice" type="checkbox" checked={player.djVoiceEnabled} onChange={event => player.setDjVoiceEnabled(event.target.checked)} />
+      </label>
       {player.djModeEnabled && <p>{player.djPlan
         ? `Up next: ${player.djPlan.candidateTitle || 'DJ recommendation'}${player.djPlan.fallback ? ' · usual recommendation' : ' · smooth match'}`
         : player.djPrediction?.samples >= 4 ? 'Listening for the right moment.' : 'Learning from your listening history.'}</p>}

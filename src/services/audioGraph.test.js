@@ -50,15 +50,17 @@ function chainFrom(node) {
   return chain;
 }
 
-test('the signal path is source, preamp, ten EQ bands, volume, fade, bass shelf, limiter, analyser, output', t => {
+test('the signal path is source, preamp, ten EQ bands, volume, fade, bass shelf, duck, limiter, analyser, output', t => {
   const graph = withGraph(t);
   const chain = chainFrom(graph.sourceNode);
-  assert.deepEqual(chain.map(node => node.kind), ['source', 'gain', ...Array(10).fill('filter'), 'gain', 'gain', 'filter', 'shaper', 'analyser', 'destination']);
+  assert.deepEqual(chain.map(node => node.kind), ['source', 'gain', ...Array(10).fill('filter'), 'gain', 'gain', 'filter', 'gain', 'shaper', 'analyser', 'destination']);
   assert.equal(chain[1], graph.preampNode);
   assert.deepEqual(graph.filterNodes.map(node => node.type), ['lowshelf', ...Array(8).fill('peaking'), 'highshelf']);
   assert.deepEqual(graph.filterNodes.map(node => node.frequency.value), EQ_FREQUENCIES);
   assert.equal(graph.bassNode.type, 'lowshelf');
   assert.equal(graph.bassNode.gain.value, 0, 'the DJ bass shelf is flat unless a mix is running');
+  assert.equal(chain[chain.indexOf(graph.bassNode) + 1], graph.duckGainNode, 'the duck gain node sits between bass and limiter');
+  assert.equal(graph.duckGainNode.gain.value, 1, 'duck gain starts at unity');
   assert.equal(graph.limiterNode.oversample, 'none');
   assert.ok(graph.limiterNode.curve instanceof Float32Array && graph.limiterNode.curve.length > 1000);
 });
@@ -182,11 +184,37 @@ test('the bass shelf can be cut, restored and set before the graph exists', t =>
   assert.equal(early.bassNode.gain.value, -18, 'a pending cut is applied when the graph is created');
 });
 
+test('setDuck ramps and tracks its level, avoiding stale AudioParam reads', t => {
+  const graph = withGraph(t);
+  // Simulate stale AudioParam read like the fade test
+  Object.defineProperty(graph.duckGainNode.gain, 'value', { get: () => 1, set: () => {}, configurable: true });
+  graph.setDuck(-12, 0);
+  const duckedGain = 10 ** (-12 / 20);
+  assert.ok(Math.abs(graph.duckLevel - duckedGain) < 1e-6);
+  graph.setDuck(0, 0.5);
+  // Must have scheduled starting from the requested ducked level, not the stale 1
+  assert.ok(graph.duckGainNode.gain.calls.some(([kind, value]) => kind === 'set' && Math.abs(value - duckedGain) < 1e-6));
+  const last = graph.duckGainNode.gain.last;
+  assert.equal(last[0], 'ramp');
+  assert.ok(Math.abs(last[1] - 1) < 1e-6);
+});
+
+test('setDuck resets on disconnect', t => {
+  const graph = withGraph(t);
+  graph.setDuck(-12, 0);
+  assert.ok(graph.duckLevel < 1);
+  graph.disconnectNodes();
+  assert.equal(graph.duckGainNode, null);
+  assert.equal(graph.duckLevel, 1);
+  assert.equal(graph.duckRampEndsAt, 0);
+});
+
 test('detaching disconnects every node', t => {
   const graph = withGraph(t);
-  const nodes = [graph.sourceNode, graph.preampNode, graph.limiterNode, graph.analyserNode, graph.bassNode, ...graph.filterNodes];
+  const nodes = [graph.sourceNode, graph.preampNode, graph.limiterNode, graph.analyserNode, graph.bassNode, graph.duckGainNode, ...graph.filterNodes];
   graph.detachAudioElement();
   assert.ok(nodes.every(node => node.disconnected));
   assert.equal(graph.sourceNode, null);
+  assert.equal(graph.duckGainNode, null);
   assert.equal(graph.filterNodes.length, 0);
 });
