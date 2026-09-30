@@ -220,26 +220,6 @@ body {
 }
 
 /* ── Song List (rows) ────────────────────────────────────────────────────── */
-.songs-list { display: flex; flex-direction: column; gap: 4px; }
-
-.songs-list .song-row {
-  display: grid;
-  grid-template-columns: 40px 1fr 1fr auto;
-  align-items: center;
-  gap: 16px;
-  padding: 8px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.song-row:hover { background: var(--bg-card-hover); }
-.song-row--active { background: rgba(29,185,84,0.1); }
-.song-row--active .song-row__title { color: var(--green); }
-
-.song-row__num { color: var(--text-muted); font-size: 0.875rem; text-align: right; }
-.song-row__title { font-weight: 600; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.song-row__artist { color: var(--text-muted); font-size: 0.85rem; }
 
 /* ── Song Card ───────────────────────────────────────────────────────────── */
 .song-card {
@@ -256,7 +236,6 @@ body {
 }
 
 .song-card:hover { background: var(--bg-card-hover); }
-.song-card:hover .song-card__play-icon { opacity: 1; transform: translateY(0); }
 .song-card--active { background: rgba(29,185,84,0.12); }
 .song-card--swipeable { transition: background 0.2s, transform 0.12s; }
 
@@ -289,13 +268,6 @@ body {
   position: relative;
   overflow: hidden;
   box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-}
-
-.song-card__play-icon {
-  opacity: 0;
-  transform: translateY(8px);
-  transition: opacity 0.2s, transform 0.2s;
-  color: white;
 }
 
 .song-card__info { flex: 1; min-width: 0; }
@@ -415,7 +387,6 @@ body {
 
 .song-card__actions button:hover { background: rgba(255,255,255,0.08); }
 .song-card__actions button:disabled { color: var(--text-muted); cursor: default; }
-.song-card__actions-danger { color: #ff8f8f !important; }
 
 /* ── Now Playing Animation ───────────────────────────────────────────────── */
 .song-card__playing-bars {
@@ -1699,42 +1670,6 @@ body {
 
 .expanded-player__art-container { min-height: 0; }
 
-.record-player {
-  position: relative;
-  width: min(100%, 500px);
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-}
-
-.record-player--playing .expanded-player__art {
-  animation: record-spin 8s linear infinite;
-}
-
-.record-player__tonearm {
-  position: absolute;
-  top: 4%;
-  right: -2%;
-  width: 34%;
-  height: 9px;
-  border-radius: 999px;
-  background: #383b43;
-  box-shadow: 4px 4px 8px rgba(70, 74, 84, 0.4);
-  transform: rotate(24deg);
-  transform-origin: 100% 50%;
-}
-
-.record-player__tonearm::after {
-  content: "";
-  position: absolute;
-  right: -4px;
-  top: -8px;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #17191e;
-}
-
 @keyframes record-spin { to { transform: rotate(360deg); } }
 
 .expanded-player__details-column { min-width: 0; }
@@ -1757,7 +1692,6 @@ body {
   }
 
   .expanded-player__art-container { padding: 0; }
-  .record-player { width: min(68vw, 330px); }
 }
 
 @media (max-width: 768px) {
@@ -2184,15 +2118,6 @@ body {
   transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
-.expanded-player__art--playing {
-  transform: scale(1.02);
-}
-
-.expanded-player__art-icon {
-  font-size: 120px;
-  color: rgba(255, 255, 255, 0.5);
-}
-
 .expanded-player__info {
   margin-bottom: 24px;
 }
@@ -2243,40 +2168,6 @@ body {
 .play-btn--large {
   width: 64px;
   height: 64px;
-}
-
-.icon-btn--volume {
-  position: relative;
-}
-
-.volume-popover {
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg-card);
-  padding: 12px 8px;
-  border-radius: 8px;
-  margin-bottom: 8px;
-  opacity: 0;
-  visibility: hidden;
-  transition: all 0.2s;
-  height: 100px;
-  display: flex;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-
-.icon-btn--volume:hover .volume-popover {
-  opacity: 1;
-  visibility: visible;
-}
-
-.volume-bar--vertical {
-  appearance: none;
-  writing-mode: vertical-lr;
-  direction: rtl;
-  width: 24px;
-  height: 100%;
 }
 
 /* ── Neumorphic surface system ──────────────────────────────────────────── */
@@ -2490,14 +2381,9 @@ input:focus-visible {
   box-shadow: 5px 5px 12px rgba(93, 98, 108, 0.54), -3px -3px 7px rgba(255, 255, 255, 0.44);
 }
 
-.song-card__play-icon,
 .song-card__playing-bars {
   position: relative;
   z-index: 1;
-}
-
-.song-card__play-icon {
-  color: #f1f2f5;
 }
 
 .song-card__playing-bars span {
@@ -2974,13 +2860,6 @@ input:focus-visible {
   border-radius: 50%;
 }
 
-.expanded-player__art-icon {
-  position: relative;
-  z-index: 1;
-  color: #92959b;
-  font-size: 64px;
-}
-
 .expanded-player__title {
   color: var(--text);
 }
@@ -3442,265 +3321,14 @@ input:focus-visible {
 .expanded-player__layout { display: grid; grid-template-columns: minmax(560px, 1.1fr) minmax(360px, 0.78fr); align-items: start; gap: clamp(32px, 5vw, 88px); min-height: 100%; }
 .expanded-player__art-container { min-height: 0; display: flex; justify-content: center; align-items: flex-start; }
 .expanded-player__details-column { max-height: calc(100dvh - 112px); overflow-y: auto; padding: 12px 8px 20px 0; scrollbar-width: thin; }
-.record-player {
-  position: relative;
-  width: min(100%, 500px);
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  isolation: isolate;
-  container-type: inline-size;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.record-player__scratch-layer {
-  width: 100%;
-  aspect-ratio: 1;
-  border-radius: 50%;
-  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg));
-  cursor: grab;
-  touch-action: none;
-  will-change: transform;
-}
-
-.record-player__scratch-layer--dragging { cursor: grabbing; }
-
-.record-player .expanded-player__art {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
-  border-radius: 50%;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  background:
-    /* Layer 1: Primary Butterfly / Anisotropic Light Reflection (Opposing Beams) */
-    conic-gradient(
-      from 45deg,
-      rgba(255, 255, 255, 0) 0deg,
-      rgba(255, 255, 255, 0.15) 24deg,
-      rgba(255, 255, 255, 0) 48deg,
-      rgba(255, 255, 255, 0) 180deg,
-      rgba(255, 255, 255, 0.15) 204deg,
-      rgba(255, 255, 255, 0) 228deg,
-      rgba(255, 255, 255, 0) 360deg
-    ),
-    /* Layer 2: Secondary Softer Ambient Reflection */
-    conic-gradient(
-      from 135deg,
-      rgba(255, 255, 255, 0) 0deg,
-      rgba(255, 255, 255, 0.07) 28deg,
-      rgba(255, 255, 255, 0) 56deg,
-      rgba(255, 255, 255, 0) 180deg,
-      rgba(255, 255, 255, 0.07) 208deg,
-      rgba(255, 255, 255, 0) 236deg,
-      rgba(255, 255, 255, 0) 360deg
-    ),
-    /* Layer 3: Track Bands, Dead-wax (Run-out Groove), and Outer Edge Rim */
-    radial-gradient(
-      circle at center,
-      transparent 0%,
-      transparent 33%,
-      rgba(15, 16, 20, 0.96) 34%,
-      rgba(8, 9, 12, 0.25) 39%,
-      rgba(8, 9, 12, 0.1) 88%,
-      rgba(20, 22, 27, 0.94) 89%,
-      #07080a 97%,
-      #040506 100%
-    ),
-    /* Layer 4: Micro-Grooves (Concentric Cut Lines scaled with container size) */
-    repeating-radial-gradient(
-      circle at center,
-      #14161c 0px,
-      #14161c 0.3cqi,
-      #08090c 0.5cqi,
-      #22252e 0.7cqi,
-      #08090c 0.9cqi
-    ) !important;
-  box-shadow:
-    0 3.6cqi 8cqi rgba(0, 0, 0, 0.65),
-    0 0.8cqi 2.4cqi rgba(0, 0, 0, 0.45),
-    inset 0 0 0 0.3cqi rgba(255, 255, 255, 0.08),
-    inset 0 0 1.6cqi 0.6cqi rgba(0, 0, 0, 0.85);
-  animation: record-spin 1.333333s linear infinite;
-  animation-play-state: paused;
-  will-change: transform;
-}
-
-.record-player .expanded-player__art::before,
-.record-player .expanded-player__art::after {
-  content: none;
-}
-
-.record-player--playing .expanded-player__art { animation-play-state: running; }
 
 /* Center Album Label on Vinyl */
-.record-player__center-label {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 36%;
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  overflow: hidden;
-  display: grid;
-  place-items: center;
-  box-shadow:
-    0 0 0 0.4cqi rgba(0, 0, 0, 0.75),
-    0 0 2.4cqi rgba(0, 0, 0, 0.6),
-    inset 0 0 0 0.2cqi rgba(255, 255, 255, 0.2);
-  z-index: 2;
-}
 
 /* Album artwork image */
-.record-player__center-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: 50%;
-  display: block;
-}
 
 /* Fallback gradient if no artwork URL */
-.record-player__center-fallback {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-}
 
 /* Center Spindle Hole & Metallic Bezel */
-.record-player__spindle-hole {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 18%;
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: radial-gradient(
-    circle at center,
-    #050505 0%,
-    #0d0e12 50%,
-    #636877 78%,
-    #9aa0b0 90%,
-    #2c2f38 100%
-  );
-  box-shadow:
-    inset 0 0.4cqi 0.8cqi rgba(0, 0, 0, 0.95),
-    0 0.2cqi 0.4cqi rgba(255, 255, 255, 0.3);
-  z-index: 3;
-  pointer-events: none;
-}
-
-.record-player__tonearm {
-  position: absolute;
-  z-index: 6;
-  top: 1%;
-  right: -1%;
-  width: 62%;
-  height: 12.8cqi;
-  padding: 0;
-  border: 0;
-  border-radius: 6.4cqi;
-  color: inherit;
-  background: transparent;
-  box-shadow: none;
-  transform: rotate(var(--tonearm-angle, -14deg));
-  transform-origin: calc(100% - 3cqi) 50%;
-  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), filter 0.2s ease;
-  cursor: grab;
-  touch-action: none;
-  will-change: transform;
-}
-
-.record-player__tonearm:hover { background: transparent; box-shadow: none; }
-.record-player__tonearm::after { content: none; }
-.record-player__tonearm--dragging { transition: none; cursor: grabbing; filter: drop-shadow(0 2.4cqi 2.4cqi rgba(38, 41, 49, 0.28)); }
-.record-player__tonearm--lifted { filter: drop-shadow(0 2.6cqi 2.4cqi rgba(38, 41, 49, 0.3)); }
-
-.record-player__tonearm-pivot {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  width: 6cqi;
-  height: 6cqi;
-  border: 1cqi solid #d9dce2;
-  border-radius: 50%;
-  background: #17191e;
-  box-shadow: 0.8cqi 0.8cqi 1.8cqi rgba(95, 100, 111, 0.46), -0.6cqi -0.6cqi 1.4cqi rgba(255, 255, 255, 0.88);
-  transform: translateY(-50%);
-}
-
-.record-player__tonearm-shaft {
-  position: absolute;
-  left: 8%;
-  right: 4.8cqi;
-  top: 50%;
-  height: 1.6cqi;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #747985, #2f323a 58%, #15171c);
-  box-shadow: 0 0.6cqi 1cqi rgba(33, 35, 42, 0.34), inset 0 0.2cqi 0.2cqi rgba(255, 255, 255, 0.5);
-  transform: translateY(-50%);
-}
-
-.record-player__tonearm-head {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  width: 10.8cqi;
-  height: 4.8cqi;
-  border-radius: 1.6cqi 0.8cqi 0.8cqi 1.6cqi;
-  background: linear-gradient(145deg, #30333a, #111216);
-  box-shadow: 0.6cqi 0.8cqi 1.6cqi rgba(25, 27, 32, 0.35);
-  transform: translateY(-50%) rotate(-4deg);
-}
-
-.record-player__stylus {
-  position: absolute;
-  left: 1.8cqi;
-  bottom: -1.4cqi;
-  width: 0.8cqi;
-  height: 2cqi;
-  border-radius: 0.4cqi;
-  background: var(--green);
-  transform-origin: 50% 0;
-  transition: transform 0.2s ease, opacity 0.2s ease;
-}
-
-.record-player__tonearm--lifted .record-player__stylus {
-  opacity: 0.72;
-  transform: translateY(-1.8cqi);
-}
-
-.record-player__readout {
-  position: absolute;
-  z-index: 8;
-  left: 50%;
-  bottom: -8.4cqi;
-  width: max-content;
-  max-width: 94%;
-  padding: 1.4cqi 2.4cqi;
-  overflow: hidden;
-  border-radius: 999px;
-  color: var(--text-muted);
-  background: rgba(231, 232, 236, 0.88);
-  box-shadow: var(--shadow-soft);
-  font-size: clamp(0.68rem, 2.4cqi, 0.72rem);
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transform: translateX(-50%);
-  pointer-events: none;
-}
-
-.record-player--dragging .record-player__readout { color: var(--green); }
-.record-player--complete .record-player__readout { color: #9b5961; }
 
 @keyframes record-spin { to { transform: rotate(360deg); } }
 .expanded-player__details-column { min-width: 0; }
@@ -3809,7 +3437,8 @@ input:focus-visible {
   cursor: grab;
   touch-action: none;
   user-select: none;
-  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg));
+  /* --record-angle is written every frame by Turntable's platter physics loop. */
+  transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--record-angle, 0deg));
   background:
     radial-gradient(circle at 32% 27%, rgba(255, 255, 255, 0.08), transparent 19%, transparent 100%),
     repeating-radial-gradient(circle at center, #202229 0 0.55px, #08090d 0.9px 1.7px, #292c35 2px 2.25px),
@@ -3831,14 +3460,6 @@ input:focus-visible {
 .turntable__vinyl::after {
   inset: 16%;
   border-color: rgba(0, 0, 0, 0.72);
-}
-
-.turntable__vinyl--spinning {
-  animation: turntable-vinyl-spin 1.333333s linear infinite;
-}
-
-.turntable__vinyl--braking {
-  animation: turntable-vinyl-brake .64s cubic-bezier(.22, .74, .28, 1) forwards;
 }
 
 .turntable__vinyl:active,
@@ -4117,16 +3738,6 @@ input:focus-visible {
 
 .turntable__crate-empty { margin: 4px 0; color: #777c85; font-size: 0.68rem; line-height: 1.4; }
 
-@keyframes turntable-vinyl-spin {
-  from { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg)); }
-  to { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(calc(var(--manual-record-angle, 0deg) + 360deg)); }
-}
-
-@keyframes turntable-vinyl-brake {
-  from { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(var(--manual-record-angle, 0deg)); }
-  to { transform: translate(var(--eject-x, 0px), var(--eject-y, 0px)) rotate(calc(var(--manual-record-angle, 0deg) + 142deg)); }
-}
-
 @media (max-width: 900px) {
   .turntable-shell { grid-template-columns: 1fr; }
   .turntable__crate { display: none; }
@@ -4150,7 +3761,6 @@ input:focus-visible {
 @media (max-width: 900px) {
   .expanded-player__layout { grid-template-columns: 1fr; align-content: start; gap: 18px; }
   .expanded-player__art-container { padding: 0; }
-  .record-player { width: min(68vw, 330px); }
 }
 
 @media (max-width: 768px) {
@@ -4261,14 +3871,6 @@ input:focus-visible {
   border: 0;
   border-radius: 50%;
   background: #3b3e46;
-}
-
-.volume-bar--vertical {
-  min-height: 0;
-  height: 100%;
-  padding: 0 8px;
-  writing-mode: vertical-lr;
-  direction: rtl;
 }
 
 .songs-grid {
@@ -4988,7 +4590,6 @@ input:focus-visible {
 .progress-bar::-webkit-slider-thumb, .volume-bar::-webkit-slider-thumb { width: 20px; height: 20px; margin-top: -7px; }
 .progress-bar::-moz-range-track, .volume-bar::-moz-range-track { height: 6px; border-radius: 999px; background: var(--bg); box-shadow: var(--shadow-inset); }
 .progress-bar::-moz-range-thumb, .volume-bar::-moz-range-thumb { width: 20px; height: 20px; border: 0; border-radius: 50%; background: #3b3e46; }
-.volume-bar--vertical { min-height: 0; height: 100%; padding: 0 8px; writing-mode: vertical-lr; direction: rtl; }
 .songs-grid { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 20px; }
 .song-card { min-height: 282px; padding: 0; overflow: hidden; border: 1px solid rgba(255,255,255,.05); background: #17191f; box-shadow: 0 14px 30px rgba(0,0,0,.24); }
 .song-card__primary { position: relative; min-height: 282px; overflow: hidden; border-radius: inherit; }
@@ -5097,8 +4698,7 @@ input:focus-visible {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
-.song-action-sheet__art img,
-.song-action-sheet__art .artwork-image {
+.song-action-sheet__art img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -5539,15 +5139,6 @@ input:focus-visible {
 .expanded-player__actions .panel-action-btn--danger:hover { background: rgba(224, 68, 80, 0.08); }
 
 /* Long-press: keep the chosen tile sharp while the surrounding group recedes. */
-.song-card__focus-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(5, 7, 11, .52);
-  backdrop-filter: blur(14px) saturate(.82) brightness(.6);
-  -webkit-backdrop-filter: blur(14px) saturate(.82) brightness(.6);
-  animation: song-focus-scrim-in .18s ease-out;
-}
 
 .song-card--actions-open {
   position: relative;

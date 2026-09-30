@@ -4,14 +4,29 @@ import {
   TONEARM_END_ANGLE,
   TONEARM_START_ANGLE,
   clamp,
+  createTonearmGeometry,
+  physicalRpm,
+  stepPlatterVelocity,
   tonearmAngleFromProgress,
   tonearmProgressFromAngle,
-  vinylSecondsPerTurn,
   wrappedAngleDelta,
 } from '../vinylPhysics.js';
 
 const LONG_PRESS_MS = 420;
 const INERTIA_TIME_CONSTANT_MS = 190;
+// Direct-drive feel: quick motor start, slightly longer electronic brake.
+const SPIN_UP_SECONDS = 0.22;
+const SPIN_DOWN_SECONDS = 0.34;
+// A finger resting on the record stops it; no pointer movement for this long means "held still".
+const SCRATCH_HOLD_MS = 60;
+const RAD_TO_DEG = 180 / Math.PI;
+const FALLBACK_ARM = {
+  startAngle: TONEARM_START_ANGLE,
+  endAngle: TONEARM_END_ANGLE,
+  liftedAngle: TONEARM_LIFTED_ANGLE,
+  angleForProgress: tonearmAngleFromProgress,
+  progressForAngle: tonearmProgressFromAngle,
+};
 
 function pointerAngle(event, centerX, centerY) {
   return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
@@ -70,9 +85,14 @@ export function Turntable({
   const releasedTonearmResetRef = useRef(null);
   const previewProgressRef = useRef(null);
   const recordSwapIndexRef = useRef(null);
+  const scratchHoldRef = useRef(null);
+  // Platter state lives in refs and is written straight to the DOM each frame,
+  // so spinning never re-renders React.
+  const platterRef = useRef({ angle: 0, velocity: 0, target: 0, timeConstant: SPIN_UP_SECONDS, mode: null });
   const [dragMode, setDragMode] = useState(null);
   const [previewProgress, setPreviewProgress] = useState(null);
-  const [manualRecordAngle, setManualRecordAngle] = useState(0);
+  const [armGeometry, setArmGeometry] = useState(null);
+  const arm = armGeometry || FALLBACK_ARM;
   const [tonearmDragAngle, setTonearmDragAngle] = useState(null);
   const [releasedTonearmProgress, setReleasedTonearmProgress] = useState(null);
   const [needleLifted, setNeedleLifted] = useState(false);
@@ -84,13 +104,48 @@ export function Turntable({
   const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
   const tonearmLifted = needleLifted || dragMode === 'tonearm' || dragMode === 'lifted' || completed;
   const tonearmAngle = dragMode === 'tonearm'
-    ? (tonearmDragAngle ?? tonearmAngleFromProgress(displayedProgress))
+    ? (tonearmDragAngle ?? arm.angleForProgress(displayedProgress))
     : tonearmLifted
-      ? TONEARM_LIFTED_ANGLE
-      : tonearmAngleFromProgress(releasedTonearmProgress ?? displayedProgress);
+      ? arm.liftedAngle
+      : arm.angleForProgress(releasedTonearmProgress ?? displayedProgress);
   const pitchPercent = ((pitchModifier - 1) * 100).toFixed(1);
-  const vinylSpinDuration = `${vinylSecondsPerTurn(rpm, pitchModifier)}s`;
-  const motorIsRunning = Boolean(isPlaying && !dragMode && !isBraking);
+  const platterRpm = physicalRpm(rpm);
+  const rpmLabel = platterRpm < 40 ? '33⅓' : '45';
+  const motorDegreesPerSecond = (platterRpm * pitchModifier * 360) / 60;
+  // The platter keeps turning while the needle is lifted; only a hand on the record stops it.
+  const handOnRecord = dragMode === 'record' || dragMode === 'lifted';
+  const motorIsRunning = Boolean(isPlaying && !isBraking && !handOnRecord);
+
+  useEffect(() => {
+    const platter = platterRef.current;
+    platter.mode = dragMode;
+    platter.target = motorIsRunning ? motorDegreesPerSecond : 0;
+    platter.timeConstant = platter.target > Math.abs(platter.velocity) ? SPIN_UP_SECONDS : SPIN_DOWN_SECONDS;
+  }, [dragMode, motorIsRunning, motorDegreesPerSecond]);
+
+  useEffect(() => {
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    let frame = 0;
+    let last = performance.now();
+    const tick = now => {
+      const platter = platterRef.current;
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      // 'record' is positioned by the pointer; 'inertia' velocity is fed by the scratch settle loop.
+      if (platter.mode !== 'record') {
+        if (platter.mode !== 'inertia') {
+          const target = reduceMotion?.matches ? 0 : platter.target;
+          platter.velocity = stepPlatterVelocity(platter.velocity, target, dt, platter.timeConstant);
+          if (Math.abs(platter.velocity) < 0.05 && target === 0) platter.velocity = 0;
+        }
+        platter.angle = (platter.angle + (platter.velocity * dt)) % 360;
+      }
+      vinylRef.current?.style.setProperty('--record-angle', `${platter.angle.toFixed(2)}deg`);
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   const updatePreviewProgress = nextProgress => {
     const boundedProgress = nextProgress == null ? null : clamp(nextProgress, 0, 100);
@@ -130,13 +185,15 @@ export function Turntable({
     inertiaFrameRef.current = null;
   };
 
-  const beginInertia = initialVelocity => {
+  const beginInertia = (initialVelocity, resumeMotor) => {
     cancelInertia();
     const startTime = performance.now();
-    const targetVelocity = (rpm * 2 * Math.PI) / 60;
+    // Audio velocities are unpitched (the engine applies pitch); a paused record settles to rest.
+    const targetVelocity = resumeMotor ? (platterRpm * 2 * Math.PI) / 60 : 0;
     const tick = now => {
       const velocity = inertiaVelocity(initialVelocity, targetVelocity, now - startTime);
       onScratchVelocity?.(velocity);
+      platterRef.current.velocity = velocity * pitchModifier * RAD_TO_DEG;
       if (Math.abs(velocity - targetVelocity) < 0.025 || now - startTime > 1100) {
         onScratchVelocity?.(targetVelocity);
         onScratchEnd?.();
@@ -172,7 +229,7 @@ export function Turntable({
       startX: event.clientX,
       startY: event.clientY,
       startProgress: progress,
-      startRecordAngle: manualRecordAngle,
+      wasPlaying: isPlaying,
       lastPointerAngle: pointerAngle(event, centerX, centerY),
       lastMoveAt: performance.now(),
       accumulatedDegrees: 0,
@@ -237,10 +294,19 @@ export function Turntable({
     interaction.lastPointerAngle = nextPointerAngle;
     interaction.lastMoveAt = now;
     interaction.lastVelocity = angularVelocity;
-    setManualRecordAngle(interaction.startRecordAngle + interaction.accumulatedDegrees);
-    const secondsMoved = (interaction.accumulatedDegrees / 360) * (60 / rpm);
+    const platter = platterRef.current;
+    platter.angle += deltaDegrees;
+    platter.velocity = angularVelocity * RAD_TO_DEG;
+    const secondsMoved = (interaction.accumulatedDegrees / 360) * (60 / platterRpm);
     updatePreviewProgress(interaction.startProgress + ((secondsMoved / duration) * 100));
     onScratchVelocity?.(angularVelocity);
+    window.clearTimeout(scratchHoldRef.current);
+    scratchHoldRef.current = window.setTimeout(() => {
+      if (interactionRef.current !== interaction) return;
+      interaction.lastVelocity = 0;
+      platter.velocity = 0;
+      onScratchVelocity?.(0);
+    }, SCRATCH_HOLD_MS);
   };
 
   const finishRecordPointer = event => {
@@ -248,6 +314,7 @@ export function Turntable({
     if (!interaction || interaction.pointerId !== event.pointerId) return;
     event.preventDefault();
     clearLongPress();
+    window.clearTimeout(scratchHoldRef.current);
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 
     if (interaction.longPressed) {
@@ -269,21 +336,21 @@ export function Turntable({
     interactionRef.current = null;
     updatePreviewProgress(null);
     clearRecordDragPreview();
-    setManualRecordAngle(angle => ((angle % 360) + 360) % 360);
     if (interaction.startedScratch) {
       onSeek?.(target);
       setDragMode('inertia');
-      beginInertia(interaction.lastVelocity);
+      platterRef.current.mode = 'inertia';
+      beginInertia(interaction.lastVelocity, interaction.wasPlaying);
     } else {
       setDragMode(null);
       onTogglePlay?.();
     }
   };
 
-  const tonearmAngleFromPointer = event => {
+  const tonearmPivot = () => {
     const deck = deckRef.current;
     const rect = deck?.getBoundingClientRect();
-    if (!rect) return TONEARM_START_ANGLE;
+    if (!rect) return null;
     const deckStyle = window.getComputedStyle(deck);
     const tonearmTop = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-top'), rect.height) || (rect.height * 0.13);
     const tonearmRight = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-right'), rect.width) || (rect.width * 0.02);
@@ -291,7 +358,13 @@ export function Turntable({
     const tonearmHeight = tonearmRef.current?.offsetHeight || 32;
     const pivotX = rect.right - tonearmRight - pivotOffset;
     const pivotY = rect.top + tonearmTop + (tonearmHeight / 2);
-    const rawAngle = pointerAngle(event, pivotX, pivotY);
+    return { x: pivotX, y: pivotY };
+  };
+
+  const tonearmAngleFromPointer = event => {
+    const pivot = tonearmPivot();
+    if (!pivot) return arm.startAngle;
+    const rawAngle = pointerAngle(event, pivot.x, pivot.y);
     let angle = 180 - rawAngle;
     if (angle > 180) angle -= 360;
     if (angle < -180) angle += 360;
@@ -308,9 +381,9 @@ export function Turntable({
       mode: 'tonearm',
       pointerId: event.pointerId,
       wasPlaying: isPlaying,
-      pointerAngleOffset: tonearmAngleFromProgress(progress) - tonearmAngleFromPointer(event),
+      pointerAngleOffset: arm.angleForProgress(progress) - tonearmAngleFromPointer(event),
     };
-    setTonearmDragAngle(tonearmAngleFromProgress(progress));
+    setTonearmDragAngle(arm.angleForProgress(progress));
     clearReleasedTonearm();
     setLifted(true);
     updatePreviewProgress(progress);
@@ -323,11 +396,11 @@ export function Turntable({
     event.preventDefault();
     const nextAngle = clamp(
       tonearmAngleFromPointer(event) + interaction.pointerAngleOffset,
-      Math.min(TONEARM_START_ANGLE, TONEARM_END_ANGLE),
-      Math.max(TONEARM_START_ANGLE, TONEARM_END_ANGLE),
+      Math.min(arm.startAngle, arm.endAngle),
+      Math.max(arm.startAngle, arm.endAngle),
     );
     setTonearmDragAngle(nextAngle);
-    updatePreviewProgress(tonearmProgressFromAngle(nextAngle));
+    updatePreviewProgress(arm.progressForAngle(nextAngle));
   };
 
   const finishTonearmPointer = event => {
@@ -344,7 +417,8 @@ export function Turntable({
     setDragMode(null);
     setLifted(false);
     onSeek?.(target);
-    if (interaction.wasPlaying && target < 99.8) window.requestAnimationFrame(() => onTogglePlay?.());
+    // Lifting only mutes the needle, so playback normally continues; resume only if it actually stopped.
+    if (interaction.wasPlaying && !isPlaying && target < 99.8) window.requestAnimationFrame(() => onTogglePlay?.());
   };
 
   const handleDrop = event => {
@@ -359,7 +433,7 @@ export function Turntable({
     event.preventDefault();
     const direction = event.key === 'ArrowRight' || event.key === 'ArrowUp' ? 1 : -1;
     onSeek?.(clamp(progress + (direction * Math.max(1, Math.min(5, duration / 100)) / duration * 100), 0, 100));
-    setManualRecordAngle(angle => angle + (direction * 30));
+    platterRef.current.angle += direction * 30;
   };
 
   const handleTonearmKeyDown = event => {
@@ -373,9 +447,42 @@ export function Turntable({
     onSeek?.(target);
   };
 
+  // Solve the arm's sweep from the rendered deck so the stylus tracks the
+  // grooves at every breakpoint (layouts change arm length and pivot).
+  const hasSong = Boolean(currentSong);
+  useEffect(() => {
+    const deck = deckRef.current;
+    if (!deck) return undefined;
+    const measure = () => {
+      const vinyl = vinylRef.current;
+      const label = deck.querySelector('.turntable__label');
+      const stylus = deck.querySelector('.turntable__stylus');
+      const pivot = tonearmPivot();
+      if (!vinyl || !label || !stylus || !pivot || interactionRef.current) return;
+      const vinylRect = vinyl.getBoundingClientRect();
+      const stylusRect = stylus.getBoundingClientRect();
+      const centerX = vinylRect.left + (vinylRect.width / 2);
+      const centerY = vinylRect.top + (vinylRect.height / 2);
+      const recordRadius = vinyl.offsetWidth / 2;
+      const labelRadius = label.offsetWidth / 2;
+      setArmGeometry(createTonearmGeometry({
+        pivotToCenter: Math.hypot(pivot.x - centerX, pivot.y - centerY),
+        armLength: Math.hypot(pivot.x - (stylusRect.left + (stylusRect.width / 2)), pivot.y - (stylusRect.top + (stylusRect.height / 2))),
+        centerBearing: Math.atan2(centerY - pivot.y, pivot.x - centerX) * RAD_TO_DEG,
+        outerRadius: recordRadius * 0.93,
+        innerRadius: labelRadius + ((recordRadius - labelRadius) * 0.08),
+      }));
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    observer?.observe(deck);
+    return () => observer?.disconnect();
+  }, [hasSong]);
+
   useEffect(() => () => {
     clearLongPress();
     cancelInertia();
+    window.clearTimeout(scratchHoldRef.current);
     if (releasedTonearmResetRef.current) window.clearTimeout(releasedTonearmResetRef.current);
   }, []);
 
@@ -386,14 +493,14 @@ export function Turntable({
   const status = dragMode === 'record'
     ? `Scratching · ${formatTime((displayedProgress / 100) * duration)}`
     : dragMode === 'inertia'
-      ? ' platter settling · motor lock engaged'
+      ? 'Platter settling · motor lock engaged'
       : dragMode === 'lifted'
         ? (swapSong
           ? `Release to load ${swapSong.track}`
           : (ejectReady ? 'Release outside the deck to eject' : 'Record lifted · drag left or right to change'))
         : completed
           ? 'Playback complete · tonearm lifted'
-          : `${rpm} RPM · ${pitchPercent}% pitch · vinyl noise online`;
+          : `${rpmLabel} RPM · ${pitchPercent}% pitch${isPlaying ? '' : ' · paused'}`;
 
   return (
     <div className="turntable-shell">
@@ -408,13 +515,10 @@ export function Turntable({
           <div className="turntable__platter-rim" aria-hidden="true" />
           <div
             ref={vinylRef}
-            className={`turntable__vinyl turntable__vinyl--motor ${isBraking ? 'turntable__vinyl--braking' : ''}`}
+            className="turntable__vinyl"
             style={{
-              '--manual-record-angle': `${manualRecordAngle}deg`,
               '--eject-x': `${recordOffset.x}px`,
               '--eject-y': `${recordOffset.y}px`,
-              '--vinyl-spin-duration': vinylSpinDuration,
-              '--vinyl-animation-state': motorIsRunning ? 'running' : 'paused',
             }}
             role="slider"
             tabIndex={0}
@@ -463,8 +567,8 @@ export function Turntable({
       <div className="turntable__controls" role="group" aria-label="Turntable controls">
         <div className="turntable__rpm-control" role="group" aria-label="Turntable speed">
           <span>RPM</span>
-          <button type="button" className={rpm === 33 ? 'is-active' : ''} onClick={() => onRpmChange?.(33)}>33⅓</button>
-          <button type="button" className={rpm === 45 ? 'is-active' : ''} onClick={() => onRpmChange?.(45)}>45</button>
+          <button type="button" className={platterRpm < 40 ? 'is-active' : ''} aria-pressed={platterRpm < 40} onClick={() => onRpmChange?.(33)}>33⅓</button>
+          <button type="button" className={platterRpm >= 40 ? 'is-active' : ''} aria-pressed={platterRpm >= 40} onClick={() => onRpmChange?.(45)}>45</button>
         </div>
         <label className="turntable__pitch-control">
           <span>Pitch {pitchPercent}%</span>

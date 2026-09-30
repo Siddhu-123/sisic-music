@@ -373,7 +373,8 @@ export class VinylAudioEngine {
   }
 
   setRpm(rpm) {
-    this.rpm = Number(rpm) === 33 ? 33 : 45;
+    // The "33" setting is 33⅓ RPM; the exact ratio keeps audio and platter in sync.
+    this.rpm = Number(rpm) < 40 ? 100 / 3 : 45;
     if (!this.isScratching) this._setPlaybackRate(this.targetMotorRate);
   }
 

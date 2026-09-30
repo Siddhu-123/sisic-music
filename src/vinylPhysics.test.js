@@ -34,3 +34,24 @@ test('tonearm progress tracks from the outer groove toward the label', () => {
   assert.equal(tonearmAngleFromProgress(100), TONEARM_END_ANGLE);
   assert.equal(tonearmProgressFromAngle((TONEARM_START_ANGLE + TONEARM_END_ANGLE) / 2), 50);
 });
+
+test('platter velocity eases continuously and 33 means 33⅓', async () => {
+  const { stepPlatterVelocity, physicalRpm } = await import('./vinylPhysics.js');
+  assert.ok(Math.abs(physicalRpm(33) - 100 / 3) < 1e-9);
+  assert.equal(physicalRpm(45), 45);
+  const half = stepPlatterVelocity(0, 270, 0.2 * Math.LN2, 0.2);
+  assert.ok(Math.abs(half - 135) < 1e-6);
+  assert.equal(stepPlatterVelocity(100, 0, 10, 0.2) < 1e-6, true);
+});
+
+test('tonearm geometry keeps the stylus between the outer groove and the label', async () => {
+  const { createTonearmGeometry } = await import('./vinylPhysics.js');
+  const geometry = createTonearmGeometry({ pivotToCenter: 433, armLength: 411, centerBearing: 34.6, outerRadius: 220, innerRadius: 95 });
+  assert.ok(geometry.startAngle < geometry.endAngle);
+  assert.ok(geometry.liftedAngle < geometry.startAngle);
+  for (const progress of [0, 30, 75, 100]) {
+    const angle = geometry.angleForProgress(progress);
+    assert.ok(Math.abs(geometry.progressForAngle(angle) - progress) < 1e-6);
+  }
+  assert.equal(createTonearmGeometry({}), null);
+});
