@@ -12,3 +12,23 @@ Goal: after v2's beat-matched mixes, add what makes a DJ feel like a person: cur
 
 ## Non-goals
 Offline mode, server-side generation of speech, any use of the user's Drive beyond the existing index.
+
+## Simulation
+
+DJ Quality Simulation (200 sessions, 400 songs, 30 transitions/session)
+
+| Metric                            |       v1 |       v3 | Threshold (v3)            | Status |
+|:----------------------------------|---------:|---------:|:--------------------------|:------:|
+| Beat-syncable share                |    73.9% |    66.6% | >= v1 - 2.0% (71.9%)      |  FAIL  |
+| Mean tempo stretch                 |    0.72% |    0.94% | <= v1 + 0.30% (1.02%)     |  PASS  |
+| Key-compatible share               |    99.1% |    92.1% | >= v1 - 2.0% (97.1%)      |  FAIL  |
+| P90 energy jump                    |    0.155 |    0.119 | <= v1 (0.155)             |  PASS  |
+| Same artist within 4 share         |    48.4% |    34.1% | <= v1 * 0.5 (24.2%)       |  FAIL  |
+| Predictability (1 - norm entropy)  |    1.000 |    0.864 | >= 0.500 (taste-driven, not random) |  PASS  |
+| Template repeats within 12         |      N/A |        0 | == 0                      |  PASS  |
+| Words within limits                |      N/A |     100% | link <= 30, intro <= 45   |  PASS  |
+
+v3 Voice: 3132 spoken lines (52.2% of transitions), mean 11.0 words/line, 0 template repeats within 12.
+v1 Mix styles: {"echo-out":1567,"beat-blend":2776,"filter-blend":1657}, mean mix bars: 3.0
+v3 Mix styles: {"echo-out":2002,"beat-blend":2399,"filter-blend":1599}, mean mix bars: 2.9
+
