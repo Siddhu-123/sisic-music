@@ -1,5 +1,6 @@
 import { getSongKey } from '../songIdentity.js';
 import { barBeatsOf, beatSeconds } from './djBeatMath.js';
+import { scoreDjTransition } from './djModeService.js';
 import { planSet } from './djSetPlanner.js';
 
 export const CAMELOT_TABLE = {
@@ -105,9 +106,20 @@ export function toPlannerSong(song, options) {
   };
 }
 
+// Planner link score from the real mix scorer: what `planDjMix` will later execute, so a link the planner likes is one
+// the mixer can beat-match and key-match. Non-beat-syncable and key-clashing links lose 0.5 each (clamped to 0..1).
+export function transitionPairScore(songA, songB, scorer = scoreDjTransition) {
+  const outro = songA?.djRhythm?.outroStart ?? (Number.isFinite(songA?.duration) ? songA.duration - 20 : 0);
+  const transition = scorer(songA, songB, Math.max(0, outro - 10));
+  let score = transition?.score ?? 0.5;
+  if (!transition?.beatSync) score -= 0.5;
+  if (transition?.harmonicCompatible === false) score -= 0.5;
+  return Math.max(0, Math.min(1, score));
+}
+
 export function planNextSet(options) {
   if (!options?.source || !options?.ranked?.length) return null;
-  const { source, ranked, count, seed, rng, now = Date.now, pairScore = null } = options;
+  const { source, ranked, count, seed, rng, now = Date.now, pairScore = null, recentArtists: explicitRecentArtists = null, transitionScorer: scorer = scoreDjTransition } = options;
 
   const startSong = toPlannerSong(source, { energy: source.energy, taste: source.taste });
   if (!startSong) return null;
@@ -115,6 +127,9 @@ export function planNextSet(options) {
   const candidatePool = ranked.slice(0, 60);
   const candidateSongs = [];
   const candidateMap = new Map();
+  const rawSongById = new Map();
+
+  rawSongById.set(startSong.id, source);
 
   for (const item of candidatePool) {
     const rawSong = item?.song || item;
@@ -123,6 +138,7 @@ export function planNextSet(options) {
     if (plannerSong && plannerSong.id !== startSong.id) {
       candidateSongs.push(plannerSong);
       candidateMap.set(plannerSong.id, { item, plannerSong });
+      rawSongById.set(plannerSong.id, rawSong);
     }
   }
 
@@ -142,12 +158,27 @@ export function planNextSet(options) {
     setSeed = Math.floor(rng() * 1000000);
   }
 
+  let effectivePairScore = pairScore;
+  if (typeof effectivePairScore !== 'function') {
+    const pairCache = new Map();
+    effectivePairScore = (plannerA, plannerB) => {
+      const cacheKey = `${plannerA.id}->${plannerB.id}`;
+      if (!pairCache.has(cacheKey)) {
+        pairCache.set(cacheKey, transitionPairScore(rawSongById.get(plannerA.id), rawSongById.get(plannerB.id), scorer));
+      }
+      return pairCache.get(cacheKey);
+    };
+  }
+
+  const recentArtists = Array.isArray(explicitRecentArtists) ? explicitRecentArtists : [];
+
   const planResult = planSet({
     start: startSong,
     candidates: candidateSongs,
     count: setCount,
     seed: setSeed,
-    pairScore,
+    pairScore: effectivePairScore,
+    recentArtists,
   });
 
   if (!planResult?.items?.length) {

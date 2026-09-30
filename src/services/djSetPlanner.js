@@ -212,6 +212,10 @@ export function planSet(options) {
   const width = Math.max(1, Math.floor(beamWidth));
   const custom = typeof pairScore === 'function' ? pairScore : null;
 
+  const recentArtistsOpt = Array.isArray(options.recentArtists)
+    ? options.recentArtists.filter((a) => typeof a === 'string')
+    : [];
+
   let beam = [
     {
       score: 0,
@@ -219,7 +223,7 @@ export function planSet(options) {
       key: '',
       last: startSong,
       used: new Set(),
-      artists: [startSong.artist],
+      artists: recentArtistsOpt.concat(startSong.artist),
       links: [],
     },
   ];

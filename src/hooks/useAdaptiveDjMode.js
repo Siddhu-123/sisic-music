@@ -23,6 +23,7 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) 
   const observations = useMemo(() => buildSkipObservations(playbackEvents), [playbackEvents]);
   const latest = useRef(null);
   const djSetRef = useRef(null);
+  const playedRef = useRef([]); // { key, artist } of songs DJ mode has worked from, newest last
   const commentaryMemoryRef = useRef({ recent: [] });
 
   useEffect(() => { latest.current = { player, songs, playbackEvents, likedSongKeys, observations }; });
@@ -52,6 +53,7 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) 
           likedSongKeys: state.likedSongKeys, history: p.djHistory, transitionScores: new Map(cached.map(score => [score.cacheKey, score])) });
 
         const findSong = key => state.songs.find(s => (s.songKey || getSongKey(s)) === key);
+        if (playedRef.current.at(-1)?.key !== p.currentSongKey) playedRef.current = [...playedRef.current, { key: p.currentSongKey, artist: source.artist }].slice(-4);
 
         let candidate = null;
         let kind = null;
@@ -68,7 +70,7 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) 
 
         if (!candidate) {
           const count = 3 + Math.floor(Math.random() * 3);
-          const newSet = planNextSet({ source, ranked, count, rng: Math.random });
+          const newSet = planNextSet({ source, ranked, count, rng: Math.random, recentArtists: playedRef.current.slice(0, -1).map(entry => entry.artist) });
           if (newSet?.keys?.length) {
             djSetRef.current = newSet;
             const firstKey = nextFromSet(newSet, p.currentSongKey);

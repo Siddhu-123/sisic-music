@@ -76,9 +76,9 @@ test('evaluateThresholds verifies all required checks', () => {
   // Passing v3
   const mockV3Pass = {
     beatSyncShare: 0.79, // >= 0.78
-    meanTempoStretch: 1.25, // <= 1.30
+    meanTempoStretch: 1.45, // <= 1.50
     keyCompatibleShare: 0.94, // >= 0.93
-    p90EnergyJump: 0.18, // <= 0.20
+    p90EnergyJump: 0.21, // <= 0.22
     sameArtistShare: 0.19, // <= 0.20
     predictability: 0.75, // >= 0.50
     repeatedTemplates12: 0, // == 0
@@ -92,9 +92,9 @@ test('evaluateThresholds verifies all required checks', () => {
   // Failing v3
   const mockV3Fail = {
     beatSyncShare: 0.70, // fails (< 0.78)
-    meanTempoStretch: 1.50, // fails (> 1.30)
+    meanTempoStretch: 1.60, // fails (> 1.50)
     keyCompatibleShare: 0.80, // fails (< 0.93)
-    p90EnergyJump: 0.25, // fails (> 0.20)
+    p90EnergyJump: 0.23, // fails (> 0.22)
     sameArtistShare: 0.30, // fails (> 0.20)
     predictability: 0.40, // fails (< 0.50)
     repeatedTemplates12: 2, // fails (!= 0)

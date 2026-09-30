@@ -8,6 +8,7 @@ import {
   planNextSet,
   shouldSpeak,
   toPlannerSong,
+  transitionPairScore,
 } from './djSetDirector.js';
 
 test('Camelot table covers all 24 keys and standard names', () => {
@@ -589,4 +590,82 @@ test('shouldSpeak rules with scripted rng and window duration checks', () => {
 
   // Unknown kind returns false even with window
   assert.equal(shouldSpeak({ kind: 'other', outgoing: outgoing4s, incoming: {} }), false);
+});
+
+// ---- transition-aware planning ----
+const mk = (id, artist = id, extra = {}) => ({ songKey: id, artist, bpm: 120, musicalKey: 'C major', energy: 0.5, duration: 200, ...extra });
+const item = (song, contextualScore = 0.5) => ({ song, contextualScore });
+const good = () => ({ score: 0.8, beatSync: true, harmonicCompatible: true });
+
+test('transitionPairScore: exact value per beat-sync and key outcome, clamped to 0..1', () => {
+  const at = (t) => transitionPairScore({}, {}, () => t);
+  assert.equal(at({ score: 0.8, beatSync: true, harmonicCompatible: true }), 0.8);
+  assert.equal(at({ score: 0.8, beatSync: true }), 0.8);
+  assert.ok(Math.abs(at({ score: 0.8, beatSync: false }) - 0.3) < 1e-9);
+  assert.ok(Math.abs(at({ score: 0.8, beatSync: true, harmonicCompatible: false }) - 0.3) < 1e-9);
+  assert.equal(at({ score: 0.8, beatSync: false, harmonicCompatible: false }), 0);
+  assert.equal(at({ score: 1.4, beatSync: true }), 1);
+  assert.ok(Math.abs(at({ beatSync: true }) - 0.5) < 1e-9);
+  assert.equal(at(null), 0);
+  assert.equal(at({ score: 0.6, beatSync: true, harmonicCompatible: true }), 0.6);
+});
+
+test('transitionPairScore scores the moment 10 s before the outgoing outro', () => {
+  const positions = [];
+  const scorer = (a, b, pos) => { positions.push(pos); return good(); };
+  transitionPairScore({ djRhythm: { outroStart: 100 }, duration: 300 }, {}, scorer);
+  transitionPairScore({ duration: 200 }, {}, scorer);
+  transitionPairScore({ djRhythm: { outroStart: 5 } }, {}, scorer);
+  transitionPairScore({}, {}, scorer);
+  assert.deepEqual(positions, [90, 170, 0, 0]);
+});
+
+// planSet picks among its three best beams by seed, so preferences are checked over many seeds with three good choices.
+const picksOver = (make) => Array.from({ length: 12 }, (_, i) => make(i + 1).keys[0]);
+
+test('planNextSet prefers links the mixer can beat-match and key-match', () => {
+  const ranked = [...['bad-sync1', 'bad-sync2', 'bad-key1', 'bad-key2', 'bad-key3'].map(k => item(mk(k))), ...['ok1', 'ok2', 'ok3'].map(k => item(mk(k)))];
+  const scorer = (a, b) => b.songKey.startsWith('bad-sync') ? { score: 0.8, beatSync: false }
+    : b.songKey.startsWith('bad-key') ? { score: 0.8, beatSync: true, harmonicCompatible: false } : good();
+  const picks = picksOver(seed => planNextSet({ source: mk('src'), ranked, count: 1, seed, transitionScorer: scorer }));
+  assert.ok(picks.every(k => k.startsWith('ok')), picks.join());
+});
+
+test('planNextSet asks the scorer once per ordered pair', () => {
+  const calls = [];
+  const scorer = (a, b) => { calls.push(`${a.songKey}>${b.songKey}`); return good(); };
+  const ranked = ['a', 'b', 'c', 'd', 'e'].map(k => item(mk(k)));
+  planNextSet({ source: mk('src'), ranked, count: 3, seed: 1, transitionScorer: scorer });
+  assert.ok(calls.length > 5);
+  assert.equal(new Set(calls).size, calls.length);
+  assert.ok(calls.every(c => !c.endsWith('>src')));
+});
+
+test('planNextSet avoids the artists played just before the set (recentArtists)', () => {
+  const ranked = [...['y1', 'y2', 'y3'].map(k => item(mk(k, 'Y'))), ...['z1', 'z2', 'z3'].map(k => item(mk(k, 'Z')))];
+  const run = extra => picksOver(seed => planNextSet({ source: mk('src', 'X'), ranked, count: 1, seed, transitionScorer: good, ...extra }));
+  assert.ok(run({ recentArtists: ['Y'] }).every(k => k.startsWith('z')));
+  assert.ok(run({}).some(k => k.startsWith('y')));
+  assert.ok(run({ recentArtists: 'Y' }).some(k => k.startsWith('y')));
+});
+
+test('planNextSet only considers the top 60 ranked candidates and never the source itself', () => {
+  const ranked = Array.from({ length: 59 }, (_, i) => item(mk(`s${i}`), 0.2));
+  ranked.unshift(item(mk('src'), 1));
+  ranked.push(item(mk('late'), 1));
+  const scorer = (a, b) => b.songKey === 'late' ? { score: 1, beatSync: true, harmonicCompatible: true } : { score: 0.1, beatSync: true };
+  const set = planNextSet({ source: mk('src'), ranked, count: 5, seed: 1, transitionScorer: scorer });
+  assert.ok(!set.keys.includes('late'));
+  assert.ok(!set.keys.includes('src'));
+});
+
+test('planNextSet set size: default 4, 3..5 from rng, exactly one candidate still plans', () => {
+  const ranked = ['a', 'b', 'c', 'd', 'e', 'f'].map(k => item(mk(k)));
+  const base = { source: mk('src'), ranked, seed: 1, transitionScorer: good };
+  assert.equal(planNextSet(base).keys.length, 4);
+  assert.equal(planNextSet({ ...base, seed: undefined, rng: () => 0 }).keys.length, 3);
+  assert.equal(planNextSet({ ...base, seed: undefined, rng: () => 0.99 }).keys.length, 5);
+  assert.equal(planNextSet({ ...base, count: 2 }).keys.length, 2);
+  assert.equal(planNextSet({ ...base, ranked: [item(mk('only'))] }).keys.length, 1);
+  assert.equal(planNextSet({ ...base, ranked: [item(mk('src'))] }), null);
 });
