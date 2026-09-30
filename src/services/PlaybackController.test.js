@@ -12,6 +12,7 @@ class FakeAudio {
     this.listeners = new Map(); this.duration = 0; this.currentTime = 0; this.paused = true; this.src = ''; this.error = null;
     this.currentGains = [0, 0, 0, 0, 0]; this.fades = []; this.targetMotorRate = 1; this.pitchModifier = 1; this.rpm = 45;
     this.pitchModifierCalls = []; this.bassCuts = []; this.seeks = []; this.ducks = [];
+    this.sweeps = []; this.echos = [];
     this.element = { readyState: 4, seeking: false, buffered: { length: 0 } };
   }
   addEventListener(type, cb) { const listeners = this.listeners.get(type) || []; listeners.push(cb); this.listeners.set(type, listeners); }
@@ -30,6 +31,8 @@ class FakeAudio {
   setFade(value, seconds, options) { this.fades.push([value, seconds, options]); return true; }
   setBassCut(db, seconds = 0) { this.bassCuts.push([db, seconds]); return true; }
   setDuck(db, seconds = 0) { this.ducks.push([db, seconds]); return true; }
+  setSweep(type, hz, seconds = 0) { this.sweeps.push([type, hz, seconds]); return true; }
+  setEcho(amount, delaySeconds = 0.3, feedback = 0.4) { this.echos.push([amount, delaySeconds, feedback]); return true; }
   handleVisibilityChange() {} beginScratch() {} endScratch() {} setNeedleLifted() {}
   dispose() { this.clear(); this.disposed = true; }
 }

@@ -249,6 +249,9 @@ export class VinylAudioEngine {
     this.pendingSeek = null;
     this.needleLifted = false;
     this.graph.setFade(1);
+    this.graph.setSweep('off');
+    this.graph.setEcho(0);
+    this.graph.setBassCut(0);
     this._stopScratchTicker();
     this._stopTicker();
     this._cancelBrake();
@@ -716,6 +719,14 @@ export class VinylAudioEngine {
 
   setDuck(db, seconds = 0) {
     return this.graph.setDuck(db, seconds);
+  }
+
+  setSweep(type, hz, seconds) {
+    return this.graph.setSweep(type, hz, seconds);
+  }
+
+  setEcho(amount, delaySeconds, feedback) {
+    return this.graph.setEcho(amount, delaySeconds, feedback);
   }
 
   handleVisibilityChange(hidden) {

@@ -33,6 +33,17 @@ export class AudioGraphManager {
     this.duckGainNode = null;
     this.duckLevel = 1;
     this.duckRampEndsAt = 0;
+    this.sweepNode = null;
+    this.sweepType = 'off';
+    this.sweepHz = 20000;
+    this.sweepRampEndsAt = 0;
+    this.delayNode = null;
+    this.feedbackNode = null;
+    this.echoGainNode = null;
+    this.echoAmount = 0;
+    this.echoDelaySeconds = 0;
+    this.echoFeedback = 0;
+    this.echoConnected = false;
     this.limiterNode = null;
     this.filterNodes = [];
     this.analyserNode = null;
@@ -136,10 +147,37 @@ export class AudioGraphManager {
       this.bassNode.frequency.setValueAtTime(BASS_SWAP_FREQUENCY, ctx.currentTime);
       this.bassNode.gain.setValueAtTime(this.bassCutDb, ctx.currentTime);
       this.fadeGainNode.connect(this.bassNode);
+
+      // Swept filter stage: lowpass/highpass/off (off = bypass at 20 kHz lowpass / 10 Hz highpass)
+      this.sweepNode = ctx.createBiquadFilter();
+      this.sweepNode.type = this.sweepType === 'highpass' ? 'highpass' : 'lowpass';
+      this.sweepNode.frequency.setValueAtTime(this.sweepHz, ctx.currentTime);
+      this.bassNode.connect(this.sweepNode);
+
+      // Feedback delay send for echo tail
+      this.delayNode = ctx.createDelay(5.0);
+      this.delayNode.delayTime.setValueAtTime(this.echoDelaySeconds || 0.5, ctx.currentTime);
+      this.feedbackNode = ctx.createGain();
+      this.feedbackNode.gain.setValueAtTime(Math.min(0.55, Math.max(0, this.echoFeedback || 0)), ctx.currentTime);
+      this.echoGainNode = ctx.createGain();
+      this.echoGainNode.gain.setValueAtTime(this.echoAmount || 0, ctx.currentTime);
+
+      this.delayNode.connect(this.feedbackNode);
+      this.feedbackNode.connect(this.delayNode);
+      this.delayNode.connect(this.echoGainNode);
+
       this.duckGainNode = ctx.createGain();
       this.duckGainNode.gain.setValueAtTime(this.duckLevel, ctx.currentTime);
-      this.bassNode.connect(this.duckGainNode);
+      this.sweepNode.connect(this.duckGainNode);
+      this.sweepNode.connect(this.delayNode);
+
       this.duckGainNode.connect(this.limiterNode);
+
+      if (this.echoAmount > 0) {
+        this.echoGainNode.connect(this.limiterNode);
+        this.echoConnected = true;
+      }
+
       this.limiterNode.connect(this.analyserNode);
       this.analyserNode.connect(ctx.destination);
       this.attachedElement = audioElement;
@@ -163,7 +201,11 @@ export class AudioGraphManager {
     this.masterGainNode?.disconnect?.();
     this.fadeGainNode?.disconnect?.();
     this.bassNode?.disconnect?.();
+    this.sweepNode?.disconnect?.();
     this.duckGainNode?.disconnect?.();
+    this.delayNode?.disconnect?.();
+    this.feedbackNode?.disconnect?.();
+    this.echoGainNode?.disconnect?.();
     this.limiterNode?.disconnect?.();
     this.analyserNode?.disconnect?.();
     this.sourceNode = null;
@@ -177,6 +219,17 @@ export class AudioGraphManager {
     this.duckLevel = 1;
     this.duckRampEndsAt = 0;
     this.bassNode = null;
+    this.sweepNode = null;
+    this.sweepType = 'off';
+    this.sweepHz = 20000;
+    this.sweepRampEndsAt = 0;
+    this.delayNode = null;
+    this.feedbackNode = null;
+    this.echoGainNode = null;
+    this.echoAmount = 0;
+    this.echoDelaySeconds = 0;
+    this.echoFeedback = 0;
+    this.echoConnected = false;
     this.limiterNode = null;
     this.analyserNode = null;
     this.attachedElement = null;
@@ -247,6 +300,96 @@ export class AudioGraphManager {
     gain.setValueAtTime(start, now);
     if (seconds <= 0) gain.setValueAtTime(target, now);
     else gain.linearRampToValueAtTime(target, now + seconds);
+    return true;
+  }
+
+  /**
+   * Swept filter stage for DJ mixes: 'lowpass' | 'highpass' | 'off'.
+   * Off bypasses at 20 kHz lowpass / 10 Hz highpass so there is no audible colouring.
+   */
+  setSweep(type = 'off', hz, seconds = 0) {
+    if (type === 'lowpass' || type === 'highpass') {
+      this.sweepType = type;
+    } else {
+      this.sweepType = 'off';
+    }
+
+    let targetHz;
+    if (Number.isFinite(hz)) {
+      targetHz = hz;
+    } else if (this.sweepType === 'highpass' || (this.sweepNode && this.sweepNode.type === 'highpass')) {
+      targetHz = 10;
+    } else {
+      targetHz = 20000;
+    }
+
+    const previousHz = this.sweepHz;
+    this.sweepHz = targetHz;
+
+    if (!this.sweepNode || !this.audioContext) return false;
+
+    const param = this.sweepNode.frequency;
+    const now = this.audioContext.currentTime;
+    const start = now < this.sweepRampEndsAt ? param.value : previousHz;
+    this.sweepRampEndsAt = seconds > 0 ? now + seconds : 0;
+
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(start, now);
+
+    if (this.sweepType === 'lowpass' || this.sweepType === 'highpass') {
+      this.sweepNode.type = this.sweepType;
+    }
+
+    if (seconds <= 0) {
+      param.setValueAtTime(targetHz, now);
+      if (this.sweepType === 'off') {
+        this.sweepNode.type = targetHz <= 20 ? 'highpass' : 'lowpass';
+      }
+    } else {
+      param.linearRampToValueAtTime(targetHz, now + seconds);
+    }
+    return true;
+  }
+
+  /**
+   * Feedback delay send for the DJ echo tail.
+   * Feedback is capped at 0.55. Amount 0 is fully dry and disconnected from the output sum.
+   */
+  setEcho(amount = 0, delaySeconds = 0, feedback = 0.55) {
+    const targetAmount = Math.max(0, Number(amount) || 0);
+    this.echoAmount = targetAmount;
+    if (delaySeconds != null && Number(delaySeconds) > 0) {
+      this.echoDelaySeconds = Number(delaySeconds);
+    }
+    const fb = Math.min(0.55, Math.max(0, Number(feedback ?? 0.55) || 0));
+    this.echoFeedback = fb;
+
+    if (!this.echoGainNode || !this.delayNode || !this.feedbackNode || !this.audioContext) return false;
+
+    const now = this.audioContext.currentTime;
+    if (targetAmount > 0) {
+      if (!this.echoConnected && this.limiterNode) {
+        this.echoGainNode.connect(this.limiterNode);
+        this.echoConnected = true;
+      }
+      this.echoGainNode.gain.cancelScheduledValues(now);
+      this.echoGainNode.gain.setValueAtTime(targetAmount, now);
+
+      if (this.echoDelaySeconds > 0) {
+        this.delayNode.delayTime.cancelScheduledValues(now);
+        this.delayNode.delayTime.setValueAtTime(this.echoDelaySeconds, now);
+      }
+
+      this.feedbackNode.gain.cancelScheduledValues(now);
+      this.feedbackNode.gain.setValueAtTime(fb, now);
+    } else {
+      this.echoGainNode.gain.cancelScheduledValues(now);
+      this.echoGainNode.gain.setValueAtTime(0, now);
+      if (this.echoConnected) {
+        this.echoGainNode.disconnect();
+        this.echoConnected = false;
+      }
+    }
     return true;
   }
 

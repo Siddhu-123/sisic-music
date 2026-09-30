@@ -302,12 +302,16 @@ export function chooseDjTransitionTime(prediction, duration, fadeSeconds, histor
   return earliest;
 }
 
-export function rememberDjTransition(history = {}, candidateSongKey, transitionAtSeconds, mixBarsUsed = null) {
+export function rememberDjTransition(history = {}, candidateSongKey, transitionAtSeconds, mixBarsUsed = null, styleUsed = null) {
   const timingBucket = Math.max(0, Math.floor(Number(transitionAtSeconds || 0) / 5) * 5);
+  const styles = typeof styleUsed === 'string' && styleUsed
+    ? [styleUsed, ...(history.styles || [])].slice(0, 3)
+    : (history.styles || []).slice(0, 3);
   return {
     ...(mixBarsUsed ? { mixBars: [mixBarsUsed, ...(history.mixBars || [])].slice(0, 3) } : { mixBars: history.mixBars || [] }),
     candidateKeys: [candidateSongKey, ...(history.candidateKeys || []).filter(key => key !== candidateSongKey)].slice(0, 6),
     timingBuckets: [timingBucket, ...(history.timingBuckets || []).filter(bucket => bucket !== timingBucket)].slice(0, 4),
+    styles,
   };
 }
 
@@ -336,22 +340,46 @@ export function pickMixBars(maxBars, history = {}, random = Math.random) {
 /**
  * Plans when to leave the current song and how to blend into `candidate`.
  *
- * With a trustworthy beat grid on both songs and a tempo within a pitch-fader's reach, the mix is
- * beat-synced: it starts on a bar line of the outgoing song (its outro when it has one, or earlier if
- * a skip is predicted), runs a whole number of bars, and the incoming song is rate-matched. Otherwise
- * it falls back to the plain time-based crossfade of DJ mode v1. `transitionAtSeconds` is null when
- * there is no room left in the song.
+ * Chooses between `beat-blend`, `filter-blend`, `echo-out`, and `cut` based on compatibility,
+ * and rotates so consecutive transitions avoid repeating styles when an appropriate alternative exists.
  */
 export function planDjMix({ source, candidate, positionSeconds, duration, prediction, transition, history = {}, fadeSeconds = 4, random = Math.random }) {
   const out = source?.djRhythm;
   const incoming = candidate?.djRhythm;
   const synced = Boolean(transition?.beatSync) && hasBeatGrid(out) && hasBeatGrid(incoming);
+
   if (!synced) {
-    return { beatSync: false, transitionAtSeconds: chooseDjTransitionTime(prediction, duration, fadeSeconds, history), crossfadeSeconds: fadeSeconds };
+    const outBeat = hasBeatGrid(out) ? beatSeconds(out) : null;
+    const fadeSec = outBeat ? 2 * outBeat : 1.5;
+    let transitionAtSeconds = null;
+    if (outBeat) {
+      const predictedSkip = prediction?.predictedSkipAtSeconds;
+      const latestByEnd = duration - fadeSec - 0.5;
+      const latestBySkip = Number.isFinite(predictedSkip) ? predictedSkip - fadeSec : Infinity;
+      const abrupt = Boolean(out.abruptEnd === true || out.outroBars === 0);
+      const wanted = Math.min(Number.isFinite(out.outroStart) && !abrupt ? out.outroStart : Infinity, latestBySkip, latestByEnd);
+      const earliest = positionSeconds + 1;
+      const bars_ = downbeatsBetween(out, earliest, Math.max(earliest, wanted));
+      const recent = new Set(history.timingBuckets || []);
+      const eligible = bars_.filter(time => time <= latestByEnd);
+      const fresh = [...eligible].reverse().find(time => !recent.has(Math.floor(time / 5) * 5));
+      transitionAtSeconds = fresh ?? eligible.at(-1) ?? null;
+    }
+    if (transitionAtSeconds == null) {
+      transitionAtSeconds = chooseDjTransitionTime(prediction, duration, fadeSec, history);
+    }
+    return {
+      beatSync: false,
+      transitionAtSeconds,
+      crossfadeSeconds: fadeSec,
+      style: 'echo-out',
+      styleReason: 'tempos cannot be matched',
+    };
   }
+
   const outBeat = beatSeconds(out);
   const barSeconds = outBeat * barBeatsOf(out);
-  const abrupt = out.abruptEnd === true || out.outroBars === 0;
+  const abrupt = Boolean(out.abruptEnd === true || out.outroBars === 0);
   const bars = pickMixBars(mixBars({ outroBars: abrupt ? 0 : out.outroBars, introBars: incoming.introBars, wantedBars: 16 }), history, random);
   const mixSeconds = bars * barSeconds;
   const predictedSkip = prediction?.predictedSkipAtSeconds;
@@ -364,13 +392,63 @@ export function planDjMix({ source, candidate, positionSeconds, duration, predic
   const recent = new Set(history.timingBuckets || []);
   const eligible = bars_.filter(time => time <= latestByEnd);
   const fresh = [...eligible].reverse().find(time => !recent.has(Math.floor(time / 5) * 5));
-  const transitionAtSeconds = fresh ?? eligible.at(-1) ?? null;
+  let transitionAtSeconds = fresh ?? eligible.at(-1) ?? null;
+
   if (transitionAtSeconds == null) {
-    return { beatSync: false, transitionAtSeconds: chooseDjTransitionTime(prediction, duration, fadeSeconds, history), crossfadeSeconds: fadeSeconds };
+    if (abrupt) {
+      const cutBars = downbeatsBetween(out, earliest, duration - 0.06);
+      if (cutBars.length) {
+        const cutTime = cutBars.at(-1);
+        return {
+          beatSync: true,
+          transitionAtSeconds: cutTime,
+          crossfadeSeconds: 0.06,
+          mixBars: 0,
+          style: 'cut',
+          styleReason: 'abrupt end with no usable mix length',
+          tempoRatio: transition.tempoRatio,
+          tempoOctave: transition.tempoOctave,
+          keyShiftSemitones: transition.keyShiftSemitones,
+          outroAligned: false,
+        };
+      }
+    }
+    return {
+      beatSync: false,
+      transitionAtSeconds: chooseDjTransitionTime(prediction, duration, fadeSeconds, history),
+      crossfadeSeconds: fadeSeconds,
+      style: 'echo-out',
+      styleReason: 'tempos cannot be matched',
+    };
   }
+
+  const keysClash = transition.harmonicCompatible === false;
+  let style = keysClash ? 'filter-blend' : 'beat-blend';
+  let styleReason = keysClash ? 'keys clash' : 'keys compatible or unknown';
+
+  const previousStyle = history.styles?.[0];
+  if (style === previousStyle) {
+    if (random() < 0.7) {
+      if (style === 'beat-blend') {
+        style = 'filter-blend';
+        styleReason = 'rotation alternative to beat-blend';
+      } else {
+        style = 'beat-blend';
+        styleReason = 'rotation alternative to filter-blend';
+      }
+    }
+  }
+
   return {
-    beatSync: true, transitionAtSeconds, crossfadeSeconds: mixSeconds, mixBars: bars,
-    tempoRatio: transition.tempoRatio, tempoOctave: transition.tempoOctave, keyShiftSemitones: transition.keyShiftSemitones,
+    beatSync: true,
+    transitionAtSeconds,
+    crossfadeSeconds: mixSeconds,
+    mixBars: bars,
+    style,
+    styleReason,
+    tempoRatio: transition.tempoRatio,
+    tempoOctave: transition.tempoOctave,
+    keyShiftSemitones: transition.keyShiftSemitones,
     outroAligned: Number.isFinite(out.outroStart) && Math.abs(transitionAtSeconds - out.outroStart) < barSeconds / 2,
   };
 }

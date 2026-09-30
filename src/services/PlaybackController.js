@@ -51,7 +51,7 @@ export class PlaybackController {
       volume: saved?.volume ?? 1, muted: saved?.muted || false, crossfadeSeconds: saved?.crossfadeSeconds || 0,
       sleepTimer: saved?.sleepTimer || null, sleepRemaining: 0,
       djModeEnabled: Boolean(saved?.djModeEnabled), djVoiceEnabled: Boolean(saved?.djVoiceEnabled), djPrediction: null, djPlan: null,
-      djHistory: saved?.djHistory || { candidateKeys: [], timingBuckets: [] },
+      djHistory: saved?.djHistory || { candidateKeys: [], timingBuckets: [], styles: [] },
       eqPreset: saved?.eqPreset || 'flat', eqGains: saved?.eqGains || [...EQ_PRESETS.flat.gains], eqEnabled: saved?.eqEnabled !== false,
       rpm: 45, pitchModifier: 1, pitchRange: 0.08,
     };
@@ -74,8 +74,11 @@ export class PlaybackController {
     this.djPlan = null;
     this.fadeTimer = null;
     this.bassTimer = null;
+    this.filterTimer = null;
     this.beatMixPitchShifted = false;
     this.bassCutApplied = false;
+    this.filterSweepApplied = false;
+    this.echoApplied = false;
     this.pitchGlide = null;
     this.followLoop = null;
     this.loading = false;
@@ -173,6 +176,7 @@ export class PlaybackController {
     this.sequence += 1;
     this.loadAbort?.abort();
     this.loadAbort = null;
+    this.finishFade();
     if (this.pendingAudio && this.pendingAudio !== this.audio) {
       this.pendingAudio.clear();
       this.standby = this.pendingAudio;
@@ -209,12 +213,28 @@ export class PlaybackController {
     this.fadeTimer = null;
     clearTimeout(this.bassTimer);
     this.bassTimer = null;
+    clearTimeout(this.filterTimer);
+    this.filterTimer = null;
     if (this.bassCutApplied) {
       this.bassCutApplied = false;
       this.audio?.setBassCut?.(0);
       this.retiring?.setBassCut?.(0);
       this.standby?.setBassCut?.(0); // A mix abandoned before it started leaves the cut on the idle engine.
     }
+    if (this.filterSweepApplied) {
+      this.filterSweepApplied = false;
+    }
+    this.audio?.setSweep?.('off');
+    this.retiring?.setSweep?.('off');
+    this.standby?.setSweep?.('off');
+
+    if (this.echoApplied) {
+      this.echoApplied = false;
+    }
+    this.audio?.setEcho?.(0);
+    this.retiring?.setEcho?.(0);
+    this.standby?.setEcho?.(0);
+
     this.followLoop?.stop('finished');
     this.followLoop = null;
     clearInterval(this.pitchGlide);
@@ -320,19 +340,25 @@ export class PlaybackController {
       if (!latest()) return false;
       this.applySettings(incoming);
       if (startAt > 0) incoming.seek(bounded(startAt, Math.max(0, incoming.duration - 0.25)));
+      const style = mix ? (mix.style || 'beat-blend') : 'plain';
       let canFade = false;
       if (crossfade > 0 && this.desiredPlaying && incoming !== outgoing && !outgoing.paused) {
         const incomingContext = incoming.ensureContext();
         const outgoingContext = outgoing.ensureContext();
         canFade = Boolean(incomingContext && outgoingContext);
-        if (canFade) incoming.setFade(0);
+        if (canFade) {
+          if (style === 'cut' || style === 'echo-out') {
+            incoming.setFade(1);
+          } else {
+            incoming.setFade(0);
+          }
+        }
       }
-      const isBeatMix = Boolean(canFade && mix);
+      const isBeatMix = Boolean(canFade && mix && (style === 'beat-blend' || style === 'filter-blend'));
       if (isBeatMix) {
         this.beatMixPitchShifted = true;
-        this.bassCutApplied = true;
         const outPitch = Number.isFinite(outgoing.pitchModifier) ? outgoing.pitchModifier : (this.state.pitchModifier || 1);
-        incoming.setPitchModifier(outPitch * mix.tempoRatio);
+        incoming.setPitchModifier(outPitch * (mix.tempoRatio || 1));
         const outRate = Math.max(0.05, Number(outgoing.targetMotorRate) || 1);
         const start = incomingStartPosition(
           mix.sourceRhythm,
@@ -344,7 +370,24 @@ export class PlaybackController {
           const maxPosition = incoming.duration ? Math.max(0, incoming.duration - 0.25) : start.position;
           incoming.seek(Math.max(0, Math.min(maxPosition, start.position)));
         }
-        incoming.setBassCut(-30);
+        if (style === 'beat-blend') {
+          this.bassCutApplied = true;
+          incoming.setBassCut(-30);
+        } else if (style === 'filter-blend') {
+          this.filterSweepApplied = true;
+          incoming.setSweep('highpass', 400);
+        }
+      } else if (canFade && mix && style === 'echo-out') {
+        this.echoApplied = true;
+        const outBeat = beatSeconds(mix.sourceRhythm);
+        const delaySec = outBeat || 0.5;
+        outgoing.setEcho(1, delaySec);
+        if (mix.candidateRhythm?.firstDownbeat != null) {
+          incoming.seek(mix.candidateRhythm.firstDownbeat);
+        }
+      } else if (canFade && mix && style === 'cut') {
+        const inDownbeat = mix.candidateRhythm?.firstDownbeat != null ? mix.candidateRhythm.firstDownbeat : 0;
+        incoming.seek(inDownbeat);
       }
       if (this.desiredPlaying) await incoming.play();
       if (!latest()) return false;
@@ -353,8 +396,8 @@ export class PlaybackController {
         this.audio = incoming;
         this.audioRef.current = incoming;
         if (canFade && this.desiredPlaying) {
+          this.retiring = outgoing;
           if (isBeatMix) {
-            this.retiring = outgoing;
             await this.lockBeatPhase(mix, outgoing, incoming, latest);
             if (!latest()) return false;
             this.speakTransitionCommentary(mix);
@@ -408,21 +451,33 @@ export class PlaybackController {
             const inBeat = beatSeconds(mix.candidateRhythm);
             incoming.setFade(1, crossfade, { curve: 'equal-power' });
             outgoing.setFade(0, crossfade, { curve: 'equal-power' });
-            const rate = Math.max(0.05, Number(incoming.targetMotorRate || outgoing.targetMotorRate) || 1);
-            const r = Math.max(0.25, Math.min(1.5, (inBeat || 0.5) / rate));
-            this.bassTimer = setTimeout(() => {
-              this.bassTimer = null;
-              outgoing?.setBassCut?.(-30, r);
-              incoming?.setBassCut?.(0, r);
-            }, crossfade * 500);
+            if (style === 'beat-blend') {
+              const rate = Math.max(0.05, Number(incoming.targetMotorRate || outgoing.targetMotorRate) || 1);
+              const r = Math.max(0.25, Math.min(1.5, (inBeat || 0.5) / rate));
+              this.bassTimer = setTimeout(() => {
+                this.bassTimer = null;
+                outgoing?.setBassCut?.(-30, r);
+                incoming?.setBassCut?.(0, r);
+              }, crossfade * 500);
+            } else if (style === 'filter-blend') {
+              outgoing.setSweep('lowpass', 250, crossfade);
+              incoming.setSweep('off', 10, crossfade / 2);
+              this.filterTimer = setTimeout(() => {
+                this.filterTimer = null;
+                incoming?.setSweep?.('off');
+              }, crossfade * 500);
+            }
+          } else if (style === 'echo-out' || style === 'cut') {
+            this.speakTransitionCommentary(mix);
+            incoming.setFade(1);
+            outgoing.setFade(0, crossfade);
           } else {
             incoming.setFade(1, crossfade);
             outgoing.setFade(0, crossfade);
             this.speakTransitionCommentary(mix);
           }
-          this.retiring = outgoing;
           this.fadeDeadline = this.now() + crossfade * 1000;
-          this.fadeTimer = setTimeout(() => { this.finishFade({ glide: true }); this.preloadNext(); }, crossfade * 1000 + 50);
+          this.fadeTimer = setTimeout(() => { this.finishFade({ glide: isBeatMix }); this.preloadNext(); }, crossfade * 1000 + 50);
         } else {
           outgoing.clear();
           this.standby = outgoing;
@@ -437,7 +492,7 @@ export class PlaybackController {
       if (completedDjPlan && !this.commentarySpoken) {
         this.speakTransitionCommentary(mix);
       }
-      const djHistory = completedDjPlan ? rememberDjTransition(this.state.djHistory, keyOf(song), this.djPlan.transitionAtSeconds, this.djPlan.mixBars) : this.state.djHistory;
+      const djHistory = completedDjPlan ? rememberDjTransition(this.state.djHistory, keyOf(song), this.djPlan.transitionAtSeconds, this.djPlan.mixBars, this.djPlan.style) : this.state.djHistory;
       if (completedDjPlan) this.djPlan = null;
       this.update({ currentSong: this.loadedSong, currentSongKey: keyOf(song), duration: incoming.duration,
         progress: incoming.duration ? incoming.currentTime / incoming.duration * 100 : 0,
@@ -583,7 +638,7 @@ export class PlaybackController {
           this.event(djDue ? 'dj-transition' : 'playback-complete', this.state.currentSong, { expectedFullPlay: !djDue, message: djDue ? 'Adaptive DJ crossfaded before a predicted skip.' : 'Crossfaded into the next track.' });
           this.select(index, { keepAudio: true, autoLoad: false });
           this.transitioning = true;
-          this.loadAndPlay(song, { crossfade: requestedFade, ...(isSynced ? { mix: this.djPlan } : {}) });
+          this.loadAndPlay(song, { crossfade: requestedFade, ...(djDue ? { mix: this.djPlan } : (isSynced ? { mix: this.djPlan } : {})) });
         }
       }
       return;
@@ -936,9 +991,13 @@ export class PlaybackController {
     const current = this.state.queue[currentIndex];
     if (!current || keyOf(current) !== keyOf(source)) return false;
     const beatSync = Boolean(plan.beatSync) && hasBeatGrid(plan.sourceRhythm) && hasBeatGrid(plan.candidateRhythm);
-    const crossfadeSeconds = beatSync
-      ? Math.max(2, Math.min(40, Number(plan.crossfadeSeconds) || 4))
-      : Math.max(2, Math.min(7, Number(plan.crossfadeSeconds) || 4));
+    const style = plan.style || (beatSync ? 'beat-blend' : 'plain');
+    const isCut = style === 'cut';
+    const crossfadeSeconds = isCut
+      ? Math.max(0.05, Math.min(1, Number(plan.crossfadeSeconds) || 0.06))
+      : beatSync
+        ? Math.max(2, Math.min(40, Number(plan.crossfadeSeconds) || 4))
+        : Math.max(0.05, Math.min(7, Number(plan.crossfadeSeconds) || 4));
     const transitionAtSeconds = Number(plan.transitionAtSeconds);
     if (!Number.isFinite(transitionAtSeconds) || transitionAtSeconds <= this.audio.currentTime || transitionAtSeconds > this.audio.duration - crossfadeSeconds) return false;
     this.cancelPreload();
@@ -950,6 +1009,8 @@ export class PlaybackController {
       transitionAtSeconds,
       crossfadeSeconds,
       beatSync,
+      style,
+      styleReason: plan.styleReason || null,
       mixBars: plan.mixBars,
       tempoRatio: plan.tempoRatio,
       tempoOctave: plan.tempoOctave,
@@ -960,6 +1021,7 @@ export class PlaybackController {
     this.update({ djPlan: {
       candidateSongKey: keyOf(candidate), candidateTitle: candidate.track, transitionAtSeconds, crossfadeSeconds, probability: Number(plan.probability || 0), fallback: Boolean(plan.fallback),
       beatSync,
+      style,
     } });
     this.preloadNext();
     this.persist();

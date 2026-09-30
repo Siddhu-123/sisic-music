@@ -21,8 +21,8 @@ class FakeParam {
   get last() { return this.calls.at(-1); }
 }
 class FakeNode {
-  constructor(kind) { this.kind = kind; this.outputs = []; this.gain = new FakeParam(1); this.frequency = new FakeParam(); this.Q = new FakeParam(); this.disconnected = false; }
-  connect(node) { this.outputs.push(node); return node; }
+  constructor(kind) { this.kind = kind; this.outputs = []; this.gain = new FakeParam(1); this.frequency = new FakeParam(); this.Q = new FakeParam(); this.delayTime = new FakeParam(0); this.disconnected = false; }
+  connect(node) { this.outputs.push(node); this.disconnected = false; return node; }
   disconnect() { this.outputs = []; this.disconnected = true; }
 }
 class FakeContext {
@@ -31,6 +31,7 @@ class FakeContext {
   createGain() { return new FakeNode('gain'); }
   createBiquadFilter() { return new FakeNode('filter'); }
   createWaveShaper() { return new FakeNode('shaper'); }
+  createDelay() { return new FakeNode('delay'); }
   createAnalyser() { return Object.assign(new FakeNode('analyser'), { fftSize: 0, smoothingTimeConstant: 0, frequencyBinCount: 64 }); }
   close() { return Promise.resolve(); }
 }
@@ -50,16 +51,17 @@ function chainFrom(node) {
   return chain;
 }
 
-test('the signal path is source, preamp, ten EQ bands, volume, fade, bass shelf, duck, limiter, analyser, output', t => {
+test('the signal path is source, preamp, ten EQ bands, volume, fade, bass shelf, sweep, duck, limiter, analyser, output', t => {
   const graph = withGraph(t);
   const chain = chainFrom(graph.sourceNode);
-  assert.deepEqual(chain.map(node => node.kind), ['source', 'gain', ...Array(10).fill('filter'), 'gain', 'gain', 'filter', 'gain', 'shaper', 'analyser', 'destination']);
+  assert.deepEqual(chain.map(node => node.kind), ['source', 'gain', ...Array(10).fill('filter'), 'gain', 'gain', 'filter', 'filter', 'gain', 'shaper', 'analyser', 'destination']);
   assert.equal(chain[1], graph.preampNode);
   assert.deepEqual(graph.filterNodes.map(node => node.type), ['lowshelf', ...Array(8).fill('peaking'), 'highshelf']);
   assert.deepEqual(graph.filterNodes.map(node => node.frequency.value), EQ_FREQUENCIES);
   assert.equal(graph.bassNode.type, 'lowshelf');
   assert.equal(graph.bassNode.gain.value, 0, 'the DJ bass shelf is flat unless a mix is running');
-  assert.equal(chain[chain.indexOf(graph.bassNode) + 1], graph.duckGainNode, 'the duck gain node sits between bass and limiter');
+  assert.equal(chain[chain.indexOf(graph.bassNode) + 1], graph.sweepNode, 'the sweep filter sits between bass and duck');
+  assert.equal(chain[chain.indexOf(graph.sweepNode) + 1], graph.duckGainNode, 'the duck gain node sits between sweep and limiter');
   assert.equal(graph.duckGainNode.gain.value, 1, 'duck gain starts at unity');
   assert.equal(graph.limiterNode.oversample, 'none');
   assert.ok(graph.limiterNode.curve instanceof Float32Array && graph.limiterNode.curve.length > 1000);
@@ -211,10 +213,76 @@ test('setDuck resets on disconnect', t => {
 
 test('detaching disconnects every node', t => {
   const graph = withGraph(t);
-  const nodes = [graph.sourceNode, graph.preampNode, graph.limiterNode, graph.analyserNode, graph.bassNode, graph.duckGainNode, ...graph.filterNodes];
+  const nodes = [graph.sourceNode, graph.preampNode, graph.limiterNode, graph.analyserNode, graph.bassNode, graph.sweepNode, graph.duckGainNode, graph.delayNode, graph.feedbackNode, graph.echoGainNode, ...graph.filterNodes];
   graph.detachAudioElement();
   assert.ok(nodes.every(node => node.disconnected));
   assert.equal(graph.sourceNode, null);
   assert.equal(graph.duckGainNode, null);
+  assert.equal(graph.sweepNode, null);
+  assert.equal(graph.delayNode, null);
+  assert.equal(graph.feedbackNode, null);
+  assert.equal(graph.echoGainNode, null);
   assert.equal(graph.filterNodes.length, 0);
+});
+
+test('setSweep sweeps frequency, tracks levels, and off bypasses at 20 kHz / 10 Hz', t => {
+  const graph = withGraph(t);
+  // lowpass sweep
+  graph.setSweep('lowpass', 250, 4);
+  assert.equal(graph.sweepNode.type, 'lowpass');
+  assert.equal(graph.sweepNode.frequency.last[0], 'ramp');
+  assert.equal(graph.sweepNode.frequency.last[1], 250);
+  assert.equal(graph.sweepHz, 250);
+
+  // highpass sweep
+  graph.setSweep('highpass', 400, 0);
+  assert.equal(graph.sweepNode.type, 'highpass');
+  assert.equal(graph.sweepNode.frequency.last[0], 'set');
+  assert.equal(graph.sweepNode.frequency.last[1], 400);
+
+  // highpass swept to off (10 Hz)
+  graph.setSweep('off', 10, 2);
+  assert.equal(graph.sweepNode.frequency.last[0], 'ramp');
+  assert.equal(graph.sweepNode.frequency.last[1], 10);
+
+  // off resets immediately to bypass without colouring
+  graph.setSweep('off');
+  assert.equal(graph.sweepType, 'off');
+
+  // disconnect resets sweep state
+  graph.disconnectNodes();
+  assert.equal(graph.sweepNode, null);
+  assert.equal(graph.sweepType, 'off');
+  assert.equal(graph.sweepHz, 20000);
+});
+
+test('setEcho controls delay time, feedback, and disconnects output sum when dry', t => {
+  const graph = withGraph(t);
+  assert.equal(graph.echoConnected, false);
+
+  // setEcho with amount > 0 connects to output sum (limiterNode)
+  graph.setEcho(1, 0.5, 0.5);
+  assert.equal(graph.echoConnected, true);
+  assert.equal(graph.echoGainNode.outputs.includes(graph.limiterNode), true);
+  assert.equal(graph.echoGainNode.gain.last[1], 1);
+  assert.equal(graph.delayNode.delayTime.last[1], 0.5);
+  assert.equal(graph.feedbackNode.gain.last[1], 0.5);
+
+  // feedback is capped at 0.55
+  graph.setEcho(0.8, 0.25, 0.9);
+  assert.equal(graph.feedbackNode.gain.last[1], 0.55);
+
+  // amount 0 disconnects from output sum
+  graph.setEcho(0);
+  assert.equal(graph.echoConnected, false);
+  assert.equal(graph.echoGainNode.gain.last[1], 0);
+
+  // disconnect resets echo state
+  graph.setEcho(0.8, 0.5, 0.5);
+  graph.disconnectNodes();
+  assert.equal(graph.delayNode, null);
+  assert.equal(graph.feedbackNode, null);
+  assert.equal(graph.echoGainNode, null);
+  assert.equal(graph.echoAmount, 0);
+  assert.equal(graph.echoConnected, false);
 });

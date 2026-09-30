@@ -155,8 +155,10 @@ test('a track that ends abruptly gets a short blend, and a mix that cannot fit f
 
   const plain = planDjMix({ source, candidate: compatible, positionSeconds: 30, duration: 180, prediction: { positionSeconds: 30, predictedSkipAtSeconds: 60 }, transition: scoreDjTransition(source, compatible), fadeSeconds: 4 });
   assert.equal(plain.beatSync, false);
-  assert.equal(plain.crossfadeSeconds, 4);
-  assert.equal(plain.transitionAtSeconds, chooseDjTransitionTime({ positionSeconds: 30, predictedSkipAtSeconds: 60 }, 180, 4, {}));
+  assert.equal(plain.crossfadeSeconds, 1.5);
+  assert.equal(plain.style, 'echo-out');
+  assert.equal(plain.styleReason, 'tempos cannot be matched');
+  assert.equal(plain.transitionAtSeconds, chooseDjTransitionTime({ positionSeconds: 30, predictedSkipAtSeconds: 60 }, 180, 1.5, {}));
 });
 
 test('mix length rotates so consecutive transitions are not predictable, and never exceeds what fits', () => {
@@ -335,6 +337,207 @@ test('the hook plans a set then follows it, falls back to greedy when the set is
   } finally {
     if (typeof cleanup === 'function') cleanup();
   }
+});
+
+test('rememberDjTransition keeps the last 3 styles in history.styles', () => {
+  const h0 = rememberDjTransition({}, 'k1', 20, 4, 'beat-blend');
+  assert.deepEqual(h0.styles, ['beat-blend']);
+
+  const h1 = rememberDjTransition(h0, 'k2', 40, 8, 'filter-blend');
+  assert.deepEqual(h1.styles, ['filter-blend', 'beat-blend']);
+
+  const h2 = rememberDjTransition(h1, 'k3', 60, 2, 'cut');
+  assert.deepEqual(h2.styles, ['cut', 'filter-blend', 'beat-blend']);
+
+  const h3 = rememberDjTransition(h2, 'k4', 80, 4, 'echo-out');
+  assert.deepEqual(h3.styles, ['echo-out', 'cut', 'filter-blend']);
+
+  // Call without style preserves styles up to 3
+  const hNoStyle = rememberDjTransition(h3, 'k5', 100, 4);
+  assert.deepEqual(hNoStyle.styles, ['echo-out', 'cut', 'filter-blend']);
+});
+
+test('style choice table: beat-blend for compatible or unknown keys, filter-blend for clashing keys', () => {
+  const out = gridded('out', 120, 'C major');
+  const compIn = gridded('in_comp', 120, 'C major');
+  const clashIn = gridded('in_clash', 124, 'F# minor');
+  const unknownKeyIn = { ...gridded('in_unk', 124, 'F# minor'), keyConfidence: 0.1 };
+
+  // Beat-blend: compatible keys
+  const transComp = scoreDjTransition(out, compIn, 60);
+  assert.equal(transComp.harmonicCompatible, true);
+  const planComp = planDjMix({ source: out, candidate: compIn, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 }, transition: transComp });
+  assert.equal(planComp.style, 'beat-blend');
+  assert.equal(planComp.styleReason, 'keys compatible or unknown');
+
+  // Beat-blend: unknown keys
+  const transUnk = scoreDjTransition(out, unknownKeyIn, 60);
+  assert.equal(transUnk.harmonicCompatible, null);
+  const planUnk = planDjMix({ source: out, candidate: unknownKeyIn, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 }, transition: transUnk });
+  assert.equal(planUnk.style, 'beat-blend');
+  assert.equal(planUnk.styleReason, 'keys compatible or unknown');
+
+  // Filter-blend: clashing keys
+  const transClash = scoreDjTransition(out, clashIn, 60);
+  assert.equal(transClash.harmonicCompatible, false);
+  const planClash = planDjMix({ source: out, candidate: clashIn, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 }, transition: transClash });
+  assert.equal(planClash.style, 'filter-blend');
+  assert.equal(planClash.styleReason, 'keys clash');
+});
+
+test('style choice table: cut only when outgoing ends abruptly and plan has no usable mix length', () => {
+  const incoming = gridded('in', 120, 'C major');
+
+  // 1. abruptEnd: true with no room for 2-bar mix (4s) before duration (98s in a 100s song, downbeat at 98.5)
+  const abruptWithNoRoom = gridded('abrupt1', 120, 'C major', { abruptEnd: true, outroBars: 0, firstDownbeat: 0.5 });
+  const trans1 = scoreDjTransition(abruptWithNoRoom, incoming, 96);
+  // duration 100, positionSeconds 96: earliest = 97.
+  // 2-bar mix takes 4s: latestByEnd = 100 - 4 - 0.5 = 95.5 < 97, so eligible length is 0!
+  // But a downbeat cut (0.06s) can land on downbeats up to 100 - 0.06 = 99.94 (e.g. 98.5).
+  const cutPlan1 = planDjMix({ source: abruptWithNoRoom, candidate: incoming, positionSeconds: 96, duration: 100, prediction: { positionSeconds: 96, predictedSkipAtSeconds: 200 }, transition: trans1 });
+  assert.equal(cutPlan1.style, 'cut');
+  assert.equal(cutPlan1.styleReason, 'abrupt end with no usable mix length');
+  assert.equal(cutPlan1.crossfadeSeconds, 0.06);
+  assert.equal(cutPlan1.transitionAtSeconds, 98.5);
+
+  // 2. outroBars: 0 with no room for 2-bar mix also cuts
+  const outroZeroWithNoRoom = gridded('abrupt2', 120, 'C major', { abruptEnd: false, outroBars: 0, firstDownbeat: 0.5 });
+  const trans2 = scoreDjTransition(outroZeroWithNoRoom, incoming, 96);
+  const cutPlan2 = planDjMix({ source: outroZeroWithNoRoom, candidate: incoming, positionSeconds: 96, duration: 100, prediction: { positionSeconds: 96, predictedSkipAtSeconds: 200 }, transition: trans2 });
+  assert.equal(cutPlan2.style, 'cut');
+  assert.equal(cutPlan2.styleReason, 'abrupt end with no usable mix length');
+  assert.equal(cutPlan2.crossfadeSeconds, 0.06);
+  assert.equal(cutPlan2.beatSync, true);
+  assert.equal(cutPlan2.mixBars, 0);
+  assert.equal(cutPlan2.outroAligned, false);
+
+  // Outgoing with two downbeats before duration - 0.06 picks the last one:
+  const cutPlanMulti = planDjMix({ source: outroZeroWithNoRoom, candidate: incoming, positionSeconds: 96, duration: 101, prediction: { positionSeconds: 96, predictedSkipAtSeconds: 200 }, transition: trans2 });
+  assert.equal(cutPlanMulti.transitionAtSeconds, 100.5);
+
+  // If the last downbeat is at 98.5 and duration is 98.55, 98.55 - 0.06 = 98.49 < 98.5, so it cannot cut and falls back:
+  const cutPlanTooClose = planDjMix({ source: outroZeroWithNoRoom, candidate: incoming, positionSeconds: 96, duration: 98.55, prediction: { positionSeconds: 96, predictedSkipAtSeconds: 200 }, transition: trans2 });
+  assert.notEqual(cutPlanTooClose.style, 'cut');
+
+  // Boundary 1: When outgoing has abruptEnd/outroBars:0 BUT there IS usable mix length, it blends, does NOT cut
+  const abruptWithRoom = gridded('abrupt3', 120, 'C major', { abruptEnd: true, outroBars: 0, outroStart: 180 });
+  const trans3 = scoreDjTransition(abruptWithRoom, incoming, 60);
+  const blendPlan = planDjMix({ source: abruptWithRoom, candidate: incoming, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 }, transition: trans3 });
+  assert.notEqual(blendPlan.style, 'cut');
+  assert.equal(blendPlan.style, 'beat-blend');
+
+  // Boundary 2: When outgoing does NOT end abruptly (abruptEnd: false, outroBars: 8) and mix cannot fit, does NOT cut
+  const nonAbrupt = gridded('normal', 120, 'C major', { abruptEnd: false, outroBars: 8 });
+  const trans4 = scoreDjTransition(nonAbrupt, incoming, 96);
+  const nonCutPlan = planDjMix({ source: nonAbrupt, candidate: incoming, positionSeconds: 96, duration: 100, prediction: { positionSeconds: 96, predictedSkipAtSeconds: 200 }, transition: trans4 });
+  assert.notEqual(nonCutPlan.style, 'cut');
+});
+
+test('style choice table: echo-out when tempos cannot be matched', () => {
+  const out120 = gridded('out', 120, 'C major');
+  const fast180 = gridded('fast', 180, 'C major'); // stretch 120/180 or 120/90 = 33% > 8%, cannot match
+  const transMismatched = scoreDjTransition(out120, fast180, 60);
+  assert.equal(transMismatched.beatSync, false);
+
+  // With beat grid on outgoing song: crossfades over 2 beats (1.0s for 120 bpm) and starts at next bar line
+  const echoWithGrid = planDjMix({ source: out120, candidate: fast180, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 100 }, transition: transMismatched });
+  assert.equal(echoWithGrid.style, 'echo-out');
+  assert.equal(echoWithGrid.styleReason, 'tempos cannot be matched');
+  assert.equal(echoWithGrid.beatSync, false);
+  assert.equal(echoWithGrid.crossfadeSeconds, 2 * (60 / 120)); // 1.0s
+  assert.ok(echoWithGrid.transitionAtSeconds >= 61);
+  // Bar line check: downbeat on out120
+  assert.ok(Math.abs(((echoWithGrid.transitionAtSeconds - 0.5) / 2) % 1) < 1e-6);
+
+  // Without beat grid on outgoing song: crossfades over 1.5s
+  const noGridOut = { songKey: 'nogrid', bpm: 120, musicalKey: 'C major' };
+  const echoNoGrid = planDjMix({ source: noGridOut, candidate: fast180, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 100 }, transition: { beatSync: false } });
+  assert.equal(echoNoGrid.style, 'echo-out');
+  assert.equal(echoNoGrid.crossfadeSeconds, 1.5);
+  assert.equal(echoNoGrid.styleReason, 'tempos cannot be matched');
+});
+
+test('rotation with scripted rng rotates between beat-blend and filter-blend with probability 0.7', () => {
+  const out = gridded('out', 120, 'C major');
+  const compIn = gridded('in_comp', 120, 'C major'); // default: beat-blend
+  const clashIn = gridded('in_clash', 124, 'F# minor'); // default: filter-blend
+  const transComp = scoreDjTransition(out, compIn, 60);
+  const transClash = scoreDjTransition(out, clashIn, 60);
+
+  // 1. Previous was beat-blend, chosen is beat-blend:
+  // pickMixBars consumes 1st draw, rotation consumes 2nd draw
+  // Scripted rng: 2nd draw = 0.69 (< 0.70) -> rotates to filter-blend
+  let rngCalls = [0.1, 0.69];
+  const rot1 = planDjMix({
+    source: out, candidate: compIn, positionSeconds: 60, duration: 200,
+    prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 },
+    transition: transComp,
+    history: { styles: ['beat-blend'] },
+    random: () => rngCalls.shift(),
+  });
+  assert.equal(rot1.style, 'filter-blend');
+  assert.equal(rot1.styleReason, 'rotation alternative to beat-blend');
+
+  // Scripted rng: 2nd draw = 0.70 (>= 0.70) -> stays beat-blend
+  rngCalls = [0.1, 0.70];
+  const noRot1 = planDjMix({
+    source: out, candidate: compIn, positionSeconds: 60, duration: 200,
+    prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 },
+    transition: transComp,
+    history: { styles: ['beat-blend'] },
+    random: () => rngCalls.shift(),
+  });
+  assert.equal(noRot1.style, 'beat-blend');
+  assert.equal(noRot1.styleReason, 'keys compatible or unknown');
+
+  // 2. Previous was filter-blend, chosen is filter-blend:
+  // Scripted rng: 2nd draw = 0.1 (< 0.70) -> rotates to beat-blend
+  rngCalls = [0.1, 0.1];
+  const rot2 = planDjMix({
+    source: out, candidate: clashIn, positionSeconds: 60, duration: 200,
+    prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 },
+    transition: transClash,
+    history: { styles: ['filter-blend'] },
+    random: () => rngCalls.shift(),
+  });
+  assert.equal(rot2.style, 'beat-blend');
+  assert.equal(rot2.styleReason, 'rotation alternative to filter-blend');
+
+  // Scripted rng: 2nd draw = 0.85 (>= 0.70) -> stays filter-blend
+  rngCalls = [0.1, 0.85];
+  const noRot2 = planDjMix({
+    source: out, candidate: clashIn, positionSeconds: 60, duration: 200,
+    prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 },
+    transition: transClash,
+    history: { styles: ['filter-blend'] },
+    random: () => rngCalls.shift(),
+  });
+  assert.equal(noRot2.style, 'filter-blend');
+  assert.equal(noRot2.styleReason, 'keys clash');
+
+  // 3. Chosen does not match previous: no rotation attempted
+  rngCalls = [0.1, 0.1];
+  const diffStyle = planDjMix({
+    source: out, candidate: compIn, positionSeconds: 60, duration: 200,
+    prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 },
+    transition: transComp,
+    history: { styles: ['filter-blend'] },
+    random: () => rngCalls.shift(),
+  });
+  assert.equal(diffStyle.style, 'beat-blend');
+  assert.equal(rngCalls.length, 1); // 2nd draw was not even consumed!
+
+  // 4. Never invent cut or echo-out for songs that do not qualify:
+  // echo-out does not rotate to cut or blend
+  const transMismatched = scoreDjTransition(out, gridded('fast', 180, 'C major'), 60);
+  const echoPlan = planDjMix({
+    source: out, candidate: gridded('fast', 180, 'C major'), positionSeconds: 60, duration: 200,
+    prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 },
+    transition: transMismatched,
+    history: { styles: ['echo-out'] },
+    random: () => 0.01,
+  });
+  assert.equal(echoPlan.style, 'echo-out');
 });
 
 
