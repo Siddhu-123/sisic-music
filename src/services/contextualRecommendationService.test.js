@@ -433,11 +433,11 @@ test('buildUpNextRecommendations with 200D MusiCNN embeddings ranks nearest acou
   } else {
     // Isolated reproducible fixture with 200D unit vectors reflecting the distinct acoustic profiles
     rawEmbeddings = [
-      { songKey: 'Raga of Madness [2vQmfswjGrY]', filename: 'Raga of Madness.mp3', fileHash: 'hash-raga', vector: basis(10), model: 'msd-musicnn-1', dimensions: 200 },
-      { songKey: 'Abbo Neeyamma Full Song', filename: 'Abbo Neeyamma.mp3', fileHash: 'hash-abbo', vector: basis(10, 0.75), model: 'msd-musicnn-1', dimensions: 200 },
-      { songKey: 'Anbenum (From "Leo")', filename: 'Anbenum.mp3', fileHash: 'hash-anb', vector: basis(10, 0.55), model: 'msd-musicnn-1', dimensions: 200 },
-      { songKey: 'Meherbaan', filename: 'Meherbaan.mp3', fileHash: 'hash-meh', vector: basis(10, 0.48), model: 'msd-musicnn-1', dimensions: 200 },
-      { songKey: 'Emitemitemito Video Song', filename: 'Emitemitemito.mp3', fileHash: 'hash-emi', vector: basis(50, 0.99), model: 'msd-musicnn-1', dimensions: 200 },
+      { songKey: 'Raga of Madness [2vQmfswjGrY]', filename: 'Raga of Madness.mp3', fileHash: 'hash-raga', vector: basis200(10), model: 'msd-musicnn-1', dimensions: 200 },
+      { songKey: 'Abbo Neeyamma Full Song', filename: 'Abbo Neeyamma.mp3', fileHash: 'hash-abbo', vector: basis200(10, 0.75), model: 'msd-musicnn-1', dimensions: 200 },
+      { songKey: 'Anbenum (From "Leo")', filename: 'Anbenum.mp3', fileHash: 'hash-anb', vector: basis200(10, 0.55), model: 'msd-musicnn-1', dimensions: 200 },
+      { songKey: 'Meherbaan', filename: 'Meherbaan.mp3', fileHash: 'hash-meh', vector: basis200(10, 0.48), model: 'msd-musicnn-1', dimensions: 200 },
+      { songKey: 'Emitemitemito Video Song', filename: 'Emitemitemito.mp3', fileHash: 'hash-emi', vector: basis200(50, 0.99), model: 'msd-musicnn-1', dimensions: 200 },
     ];
   }
   assert.ok(rawEmbeddings.length >= 5, 'Must contain at least 5 audio embeddings');
@@ -596,4 +596,35 @@ test('buildUpNextRecommendations respects AbortSignal for rapid track switching'
   });
 
   assert.deepEqual(recs, [], 'Aborted request must immediately return empty array');
+});
+test('liked songs shape the taste vector without any playback history', () => {
+  const songs = [
+    { songKey: 'liked', track: 'Liked', artist: 'A', vector: basis(0) },
+    { songKey: 'near', track: 'Near', artist: 'B', vector: basis(0, 0.9).map((v, i) => (i === 1 ? 0.1 : v)) },
+    { songKey: 'far', track: 'Far', artist: 'C', vector: basis(5) },
+  ];
+  const profile = buildContextualTasteProfile(songs, [], { now: baseTime, likedSongKeys: ['liked'] });
+  assert.equal(profile.hasSignal, true);
+  const ranked = rankContextualSongs(songs, { profile, now: baseTime, excludeSongKeys: ['liked'] });
+  assert.equal(ranked[0].songKey, 'near');
+});
+
+test('stale sessions fade and recently skipped songs are penalised', () => {
+  const songs = [
+    { songKey: 'played', track: 'Played', artist: 'A', vector: basis(0) },
+    { songKey: 'skipped', track: 'Skipped', artist: 'B', vector: basis(0) },
+  ];
+  const events = [
+    playbackEvent('played', 'playback-start', 0),
+    playbackEvent('played', 'playback-complete', 200_000, { positionSeconds: 200 }),
+    playbackEvent('skipped', 'playback-start', 210_000),
+    playbackEvent('skipped', 'user-skip', 215_000, { positionSeconds: 5 }),
+  ];
+  const fresh = buildContextualTasteProfile(songs, events, { now: baseTime + 300_000 });
+  const stale = buildContextualTasteProfile(songs, events, { now: baseTime + 3 * 24 * 60 * 60 * 1000 });
+  assert.ok(fresh.sequenceWeight > 0.9);
+  assert.ok(stale.sequenceWeight < 0.01);
+  const [skipped] = rankContextualSongs(songs, { profile: fresh, now: baseTime + 300_000, excludeSongKeys: ['played'] });
+  const [unskipped] = rankContextualSongs([{ ...songs[1], songKey: 'other' }], { profile: fresh, now: baseTime + 300_000 });
+  assert.ok(skipped.recommendationScore < unskipped.recommendationScore);
 });
