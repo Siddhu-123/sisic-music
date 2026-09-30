@@ -46,7 +46,7 @@ test('queue persistence restores a safe bounded state', () => {
   assert.equal(restored.positionSeconds, 12.5);
   assert.equal(restored.isPlaying, true);
   assert.equal(restored.djModeEnabled, true);
-  assert.deepEqual(restored.djHistory, { candidateKeys: ['a', 'b'], timingBuckets: [15, 20] });
+  assert.deepEqual(restored.djHistory, { candidateKeys: ['a', 'b'], timingBuckets: [15, 20], styles: [] });
 });
 
 
@@ -105,4 +105,12 @@ test('the equalizer bypass survives a save and restore', () => {
   assert.equal(off.eqEnabled, false);
   const on = restoreQueueState(serializeQueueState({ queue: [{ songKey: 'a', track: 'A' }], eqEnabled: true }));
   assert.equal(on.eqEnabled, true);
+});
+
+test('the last three known mix styles survive a save and restore, in order, repeats included', () => {
+  const save = styles => restoreQueueState(serializeQueueState({ queue: [{ songKey: 'a' }], djHistory: { candidateKeys: [], timingBuckets: [], styles } }));
+  assert.deepEqual(save(['cut', 'cut', 'echo-out', 'beat-blend']).djHistory.styles, ['cut', 'cut', 'echo-out']);
+  assert.deepEqual(save(['filter-blend', 'nonsense', 7, 'beat-blend']).djHistory.styles, ['filter-blend', 'beat-blend']);
+  assert.deepEqual(save(undefined).djHistory.styles, []);
+  assert.deepEqual(save('cut').djHistory.styles, []);
 });

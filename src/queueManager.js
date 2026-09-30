@@ -72,6 +72,10 @@ function nonnegative(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : fallback;
 }
 
+const MIX_STYLES = ['beat-blend', 'filter-blend', 'echo-out', 'cut'];
+// The last 3 mix styles, newest first (repeats allowed: only the order matters), so the next mix can rotate.
+const restoreMixStyles = value => (Array.isArray(value) ? value.filter(style => MIX_STYLES.includes(style)).slice(0, 3) : []);
+
 export function serializeQueueState(state = {}) {
   return JSON.stringify({ ...restoreQueueState(state), version: 1, savedAt: new Date().toISOString() });
 }
@@ -124,7 +128,7 @@ export function restoreQueueState(raw) {
       ...restoreEqualizer(parsed),
       djModeEnabled: Boolean(parsed.djModeEnabled),
       djVoiceEnabled: Boolean(parsed.djVoiceEnabled),
-      djHistory: { candidateKeys: uniqueStrings(parsed.djHistory?.candidateKeys, 6), timingBuckets },
+      djHistory: { candidateKeys: uniqueStrings(parsed.djHistory?.candidateKeys, 6), timingBuckets, styles: restoreMixStyles(parsed.djHistory?.styles) },
     };
   } catch { return null; }
 }
