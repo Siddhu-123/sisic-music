@@ -4,6 +4,7 @@ import {
   alignmentUnit, downbeatAtOrBefore, downbeatsBetween, equalPowerCurve, hasBeatGrid, incomingStartPosition,
   mixBars, phaseErrorSeconds, semitonesForRate, tempoMatch,
   decodeBeatList, beatIndexAt, timeAtBeatIndex, beatFollower, followerStep, MAX_FOLLOW_RATE_STEP, sanitizeRhythm,
+  barBeatsOf, barPhaseBeats, localPeriodAt,
 } from './djBeatMath.js';
 
 
@@ -348,3 +349,142 @@ test('sanitizer keeps valid lists, drops invalid ones, keeps records valid witho
   assert.equal(sanitizedNoLists.outroBeats, undefined);
 });
 
+
+// ---- boundary and guard pins (each asserts one behaviour a mutation run showed was unpinned) ----
+test('decodeBeatList accepts gaps of exactly 200 and 3000 ms and rejects 199 and 3001', () => {
+  assert.deepEqual(decodeBeatList([0, 200, 200]), [0, 0.2, 0.4]);
+  assert.deepEqual(decodeBeatList([0, 3000, 3000]), [0, 3, 6]);
+  assert.equal(decodeBeatList([0, 199, 200]), null);
+  assert.equal(decodeBeatList([0, 200, 3001]), null);
+});
+
+test('beatIndexAt and timeAtBeatIndex at the ends, with zero gaps and on long lists', () => {
+  const beats = [0, 1, 2];
+  assert.equal(beatIndexAt(beats, 2), 2);
+  assert.equal(beatIndexAt(beats, 3), 3);
+  assert.equal(beatIndexAt(beats, -1), -1);
+  assert.equal(beatIndexAt([1, 1, 2], 0.5), 0);
+  assert.equal(beatIndexAt([0, 1, 1], 5), 2);
+  const long = Array.from({ length: 10 }, (_, i) => i);
+  assert.equal(beatIndexAt(long, 6.5), 6.5);
+  assert.equal(beatIndexAt(long, 3.25), 3.25);
+  assert.equal(timeAtBeatIndex(beats, 2), 2);
+  assert.equal(timeAtBeatIndex(beats, 0), 0);
+  assert.equal(timeAtBeatIndex(long, 8.5), 8.5);
+});
+
+test('localPeriodAt clamps the interval at the last beat and averages the window', () => {
+  const beats = [0, 1, 2, 3, 4, 5, 6, 7, 9, 12];
+  assert.equal(localPeriodAt(beats, 12), 1.75);
+  assert.equal(localPeriodAt(beats, 12, 2), 2.5);
+  assert.equal(localPeriodAt(beats, 0), 1);
+});
+
+test('followerStep returns null unless both beat lists exist', () => {
+  const beats = [0, 0.5, 1, 1.5, 2];
+  const args = { outTime: 1, inTime: 1 };
+  assert.equal(followerStep({ outBeats: beats, octave: 0, k0: 0 }, args), null);
+  assert.equal(followerStep({ inBeats: beats, octave: 0, k0: 0 }, args), null);
+  assert.equal(followerStep(null, args), null);
+  assert.ok(followerStep({ outBeats: beats, inBeats: beats, octave: 0, k0: 0 }, args));
+});
+
+test('barBeatsOf accepts 2 to 12 whole beats and falls back to 4', () => {
+  assert.equal(barBeatsOf({ barBeats: 2 }), 2);
+  assert.equal(barBeatsOf({ barBeats: 12 }), 12);
+  assert.equal(barBeatsOf({ barBeats: 3 }), 3);
+  assert.equal(barBeatsOf({ barBeats: 13 }), 4);
+  assert.equal(barBeatsOf({ barBeats: 1 }), 4);
+  assert.equal(barBeatsOf({ barBeats: 4.5 }), 4);
+  assert.equal(barBeatsOf(null), 4);
+});
+
+test('barPhaseBeats gives the position in the bar and null without a tempo or time', () => {
+  const r = grid(120, 1);
+  assert.equal(barPhaseBeats(r, 1), 0);
+  assert.equal(barPhaseBeats(r, 2.25), 2.5);
+  assert.equal(barPhaseBeats(r, 0.5), 3);
+  assert.equal(barPhaseBeats(r, NaN), null);
+  assert.equal(barPhaseBeats({ firstDownbeat: 1 }, 2), null);
+});
+
+test('alignmentUnit trusts downbeats at exactly 0.6 agreement and not below', () => {
+  assert.equal(alignmentUnit(grid(120, 0, { downbeatAgreement: 0.6 }), grid(120, 0, { downbeatAgreement: 0.6 })), 'bar');
+  assert.equal(alignmentUnit(grid(120, 0, { downbeatAgreement: 0.59 }), grid(120, 0, { downbeatAgreement: 0.9 })), 'beat');
+  assert.equal(alignmentUnit(grid(120, 0), grid(120, 0, { downbeatAgreement: 0.59 })), 'beat');
+});
+
+test('incomingStartPosition and phaseErrorSeconds return null for each unusable argument', () => {
+  const ok = grid(120, 0);
+  const noTempo = { rhythmStatus: 'ready', firstDownbeat: 0 };
+  assert.equal(incomingStartPosition(noTempo, 4, ok), null);
+  assert.equal(incomingStartPosition(ok, 4, noTempo), null);
+  assert.equal(incomingStartPosition(ok, NaN, ok), null);
+  assert.ok(incomingStartPosition(ok, 4, ok));
+  assert.equal(phaseErrorSeconds(noTempo, 4, ok, 4), null);
+  assert.equal(phaseErrorSeconds(ok, 4, noTempo, 4), null);
+  assert.equal(phaseErrorSeconds(ok, NaN, ok, 4), null);
+  assert.equal(phaseErrorSeconds(ok, 4, ok, NaN), null);
+  assert.equal(phaseErrorSeconds(ok, 4, ok, 4), 0);
+});
+
+test('phaseErrorSeconds only wraps past half an alignment unit', () => {
+  const beatOnly = grid(120, 0, { downbeatAgreement: 0.1 });
+  assert.ok(Math.abs(phaseErrorSeconds(beatOnly, 0, beatOnly, 0.2) - 0.2) < 1e-9); // 0.4 beat: stays ahead
+  assert.ok(Math.abs(phaseErrorSeconds(beatOnly, 0, beatOnly, 0.3) - -0.2) < 1e-9); // 0.6 beat: wraps to -0.4 beat
+  assert.ok(Math.abs(phaseErrorSeconds(beatOnly, 0.3, beatOnly, 0) - 0.2) < 1e-9);
+  assert.equal(phaseErrorSeconds(beatOnly, 0, beatOnly, 0.25), 0.25); // exactly half a beat ahead stays ahead
+  assert.equal(phaseErrorSeconds(beatOnly, 0.25, beatOnly, 0), -0.25); // exactly half behind stays behind
+});
+
+test('downbeatsBetween and downbeatAtOrBefore include exact bar lines and reject bad input', () => {
+  const r = grid(120, 1); // bar = 2 s
+  assert.deepEqual(downbeatsBetween(r, 0, 10), [1, 3, 5, 7, 9]);
+  assert.deepEqual(downbeatsBetween(r, 1, 5), [1, 3, 5]);
+  assert.deepEqual(downbeatsBetween(r, 5, 1), []);
+  assert.deepEqual(downbeatsBetween(r, NaN, 5), []);
+  assert.deepEqual(downbeatsBetween(r, 0, NaN), []);
+  assert.deepEqual(downbeatsBetween({ firstDownbeat: 1 }, 0, 10), []);
+  assert.equal(downbeatAtOrBefore(r, 1), 1);
+  assert.equal(downbeatAtOrBefore(r, 4.9), 3);
+  assert.equal(downbeatAtOrBefore(r, 0.9), null);
+  assert.equal(downbeatAtOrBefore(r, NaN), null);
+  assert.equal(downbeatAtOrBefore({ firstDownbeat: 1 }, 5), null);
+});
+
+test('mixBars never returns less than 2 and the default curve has 128 points', () => {
+  assert.equal(mixBars({ outroBars: 8, introBars: 8, wantedBars: 1 }), 2);
+  assert.equal(equalPowerCurve('in').length, 128);
+  assert.equal(equalPowerCurve('out', 5).length, 5);
+});
+
+test('sanitizeRhythm bounds: every numeric field accepts its min and max and rejects just outside', () => {
+  const bounds = {
+    rhythmVersion: [0, 100], bpm: [30, 300], firstBeat: [0, 3600], firstDownbeat: [0, 3600], barBeats: [2, 12], beatCount: [0, 100000],
+    gridDeviationMs: [0, 5000], gridCoverage: [0, 1], downbeatAgreement: [0, 1], introEnd: [0, 7200], introBars: [0, 512],
+    outroStart: [0, 7200], outroBars: [0, 512], duration: [0, 7200], introBpm: [30, 300], outroBpm: [30, 300],
+    startBpm: [30, 300], beatListVersion: [0, 64], introVirtual: [0, 64], outroVirtual: [0, 64],
+  };
+  const base = { rhythmStatus: 'ready', bpm: 120, firstDownbeat: 1 };
+  for (const [field, [min, max]] of Object.entries(bounds)) {
+    for (const value of [min, max]) {
+      assert.equal(sanitizeRhythm({ ...base, [field]: value })?.[field], value, `${field}=${value} accepted`);
+    }
+    for (const value of [min - 0.5, max + 0.5, min - 1, max + 1]) {
+      const record = sanitizeRhythm({ ...base, [field]: value });
+      assert.ok(record == null || record[field] === undefined, `${field}=${value} rejected`);
+    }
+  }
+});
+
+test('sanitizeRhythm keeps only real booleans for abruptEnd and needs ready, a tempo and a downbeat', () => {
+  const base = { rhythmStatus: 'ready', bpm: 120, firstDownbeat: 1 };
+  assert.equal(sanitizeRhythm({ ...base, abruptEnd: true }).abruptEnd, true);
+  assert.equal(sanitizeRhythm({ ...base, abruptEnd: false }).abruptEnd, false);
+  assert.equal('abruptEnd' in sanitizeRhythm({ ...base, abruptEnd: 'yes' }), false);
+  assert.equal(sanitizeRhythm({ rhythmStatus: 'ready', bpm: 120 }), null);
+  assert.equal(sanitizeRhythm({ rhythmStatus: 'ready', firstDownbeat: 1 }), null);
+  assert.equal(sanitizeRhythm({ rhythmStatus: 'no-beats', bpm: 120, firstDownbeat: 1 }), null);
+  assert.equal(sanitizeRhythm([]), null);
+  assert.equal(sanitizeRhythm('x'), null);
+});
