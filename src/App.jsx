@@ -2055,7 +2055,7 @@ function App() {
               const filtered = searchQuery.trim().length >= 1
                 ? librarySongs.filter(song => {
                     const q = searchQuery.toLowerCase();
-                    return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
+                    return String(song.track || '').toLowerCase().includes(q) || String(song.artist || '').toLowerCase().includes(q);
                   })
                 : librarySongs;
 
@@ -2100,7 +2100,7 @@ function App() {
               const filtered = searchQuery.trim().length >= 1
                 ? duplicateSongs.filter(song => {
                     const q = searchQuery.toLowerCase();
-                    return song.track.toLowerCase().includes(q) || song.artist.toLowerCase().includes(q);
+                    return String(song.track || '').toLowerCase().includes(q) || String(song.artist || '').toLowerCase().includes(q);
                   })
                 : duplicateSongs;
               return filtered.length === 0 ? (

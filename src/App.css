@@ -2001,6 +2001,7 @@ body {
   text-transform: uppercase;
 }
 
+.mac-worker-task__status[data-tone="queued"] { color: var(--text-muted); }
 .mac-worker-task__status[data-tone="active"] { color: #3f74a6; }
 .mac-worker-task__status[data-tone="attention"] { color: #a53e49; }
 

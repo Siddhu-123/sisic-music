@@ -840,7 +840,7 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
 .app-shell:has(.expanded-player) .mobile-nav { visibility: hidden; }
 .song-card__playing-bars--paused span { animation-play-state: paused; }
 .queue-panel { width: min(420px, 100vw); }
-.queue-list .queue-item { display: grid; grid-template-columns: 32px minmax(0, 1fr) 108px; gap: 4px 8px; padding: 12px; }
+.queue-list .queue-item { display: grid; grid-template-columns: 32px minmax(0, 1fr) max-content; gap: 4px 8px; padding: 12px; }
 .queue-list .queue-item__num { display: none; }
 .queue-list .queue-drag-handle { grid-column: 1; grid-row: 1 / 3; width: 32px; min-width: 32px; }
 .queue-list .queue-item__info { grid-column: 2; grid-row: 1; }
