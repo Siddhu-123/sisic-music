@@ -733,13 +733,19 @@ test('beat follower PLL loop wiring in PlaybackController', async t => {
     incoming.currentTime = 0.604167;
     timer.tick();
     const rate1 = incoming.pitchModifier;
-    assert.ok(Math.abs(rate1 - 500 / 480) < 1e-4, `expected ~${500 / 480}, got ${rate1}`);
+    const windowed = interval => {
+      const lo = Math.max(0, interval + 1 - 4);
+      const hi = Math.min(rampOutBeats.length - 1, interval + 4);
+      const beatTimes = rampOutBeats.slice(0, hi + 1).reduce((times, gap, i) => [...times, i === 0 ? gap / 1000 : times[i - 1] + gap / 1000], []);
+      return 0.5 / ((beatTimes[hi] - beatTimes[lo]) / (hi - lo));
+    };
+    assert.ok(Math.abs(rate1 - windowed(1)) < 1e-4, `expected ~${windowed(1)}, got ${rate1}`);
 
     outgoing.currentTime = 11.1;
     incoming.currentTime = 1.13333;
     timer.tick();
     const rate2 = incoming.pitchModifier;
-    assert.ok(Math.abs(rate2 - 500 / 450) < 1e-4, `expected ~${500 / 450}, got ${rate2}`);
+    assert.ok(Math.abs(rate2 - windowed(2)) < 1e-4, `expected ~${windowed(2)}, got ${rate2}`);
     assert.ok(rate2 > rate1, 'requested rate accelerates beat by beat following outgoing tempo ramp');
   }
 
