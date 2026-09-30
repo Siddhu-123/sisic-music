@@ -1,11 +1,18 @@
-const DEFAULT_CHUNK_BYTES = 256 * 1024;
-const MAX_RANGE_BYTES = 8 * 1024 * 1024;
-const APP_SHELL_CACHE = 'sisic-app-shell-v2';
+const MAX_FILE_METADATA_ENTRIES = 128;
 
 let driveAccessToken = '';
 let driveTokenVersion = '';
 const fileMetadataCache = new Map();
 const tokenWaiters = new Set();
+
+function rememberFileMetadata(fileId, metadata) {
+  fileMetadataCache.delete(fileId);
+  fileMetadataCache.set(fileId, metadata);
+  while (fileMetadataCache.size > MAX_FILE_METADATA_ENTRIES) {
+    fileMetadataCache.delete(fileMetadataCache.keys().next().value);
+  }
+  return metadata;
+}
 
 async function requestDriveToken() {
   if (driveAccessToken) return true;
@@ -24,59 +31,31 @@ async function requestDriveToken() {
   return await result;
 }
 
-async function notifyDriveAuthFailure(message) {
+async function notifyDriveAuthFailure(message, failedVersion = driveTokenVersion) {
+  // An old in-flight request must not revoke a freshly refreshed token.
+  if (failedVersion !== driveTokenVersion) return;
   driveAccessToken = '';
   fileMetadataCache.clear();
   const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
   clients.forEach(client => client.postMessage({
     type: 'SISIC_DRIVE_AUTH_ERROR',
     message,
-    tokenVersion: driveTokenVersion,
+    tokenVersion: failedVersion,
   }));
 }
 
 self.addEventListener('install', event => {
-  event.waitUntil((async () => {
-    self.skipWaiting();
-    await precacheAppShell();
-  })());
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const cacheNames = await caches.keys();
-    await Promise.all(cacheNames
-      .filter(name => name.startsWith('sisic-app-shell-') && name !== APP_SHELL_CACHE)
-      .map(name => caches.delete(name)));
+    await Promise.all(cacheNames.filter(name => name.startsWith('sisic-app-shell-')).map(name => caches.delete(name)));
+    fileMetadataCache.clear();
     await self.clients.claim();
   })());
 });
-
-async function precacheAppShell() {
-  const cache = await caches.open(APP_SHELL_CACHE);
-  const indexUrl = new URL('index.html', self.registration.scope);
-  try {
-    const response = await fetch(indexUrl, { cache: 'no-cache' });
-    if (!response.ok) return;
-    await cache.put(indexUrl, response.clone());
-    const html = await response.text();
-    const assetUrls = [...html.matchAll(/(?:src|href)=["']([^"']+)["']/g)]
-      .map(match => match[1])
-      .filter(value => !value.startsWith('http') && !value.startsWith('//'))
-      .map(value => new URL(value, indexUrl).toString())
-      .filter(value => value.startsWith(self.location.origin));
-    await Promise.all(assetUrls.map(async assetUrl => {
-      try {
-        const asset = await fetch(assetUrl, { cache: 'no-cache' });
-        if (asset.ok) await cache.put(assetUrl, asset);
-      } catch {
-        // A single optional asset should not prevent offline launch.
-      }
-    }));
-  } catch {
-    // Runtime caching below can populate the shell on the next online visit.
-  }
-}
 
 function isTrustedMessage(event) {
   if (event.origin && event.origin !== self.location.origin) return false;
@@ -104,10 +83,15 @@ self.addEventListener('message', event => {
     driveAccessToken = nextToken;
     driveTokenVersion = nextVersion;
     tokenWaiters.forEach(resolve => resolve(Boolean(driveAccessToken)));
+    event.source?.postMessage?.({
+      type: 'SISIC_DRIVE_TOKEN_READY',
+      tokenVersion: driveTokenVersion,
+    });
   } else if (event.data?.type === 'SISIC_DRIVE_CLEAR_TOKEN') {
     driveAccessToken = '';
     driveTokenVersion = '';
     fileMetadataCache.clear();
+    tokenWaiters.forEach(resolve => resolve(false));
   }
 });
 
@@ -115,44 +99,32 @@ function streamFileId(url) {
   const parts = url.pathname.split('/').filter(Boolean);
   const streamIndex = parts.lastIndexOf('stream');
   if (streamIndex < 0 || !parts[streamIndex + 1]) return '';
-  return decodeURIComponent(parts[streamIndex + 1]);
+  try { return decodeURIComponent(parts[streamIndex + 1]); } catch { return ''; }
 }
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+  const streamBase = new URL('./stream/', self.location.href).pathname;
+  if (!url.pathname.startsWith(streamBase)) return;
   const fileId = streamFileId(url);
   if (fileId) {
     event.respondWith(streamDriveFile(fileId, event.request));
-    return;
   }
-  if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
-  event.respondWith(handleAppRequest(event.request));
 });
 
-async function handleAppRequest(request) {
-  const cache = await caches.open(APP_SHELL_CACHE);
-  const isDocument = request.mode === 'navigate' || request.destination === 'document';
-  if (isDocument) {
-    try {
-      const response = await fetch(request);
-      if (response.ok) await cache.put(request, response.clone());
-      return response;
-    } catch {
-      return (await cache.match(request)) || (await cache.match(new URL('index.html', self.registration.scope))) || new Response('Sisic Music is not available offline yet.', { status: 503 });
-    }
+function partialContentRange(start, end, totalSize) {
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(end)
+    || !Number.isSafeInteger(totalSize)
+    || start < 0
+    || end < start
+    || end >= totalSize
+  ) {
+    throw new Error('Invalid partial-content byte range.');
   }
-
-  const cached = await cache.match(request);
-  if (cached) return cached;
-  try {
-    const response = await fetch(request);
-    if (response.ok && ['script', 'style', 'image', 'font', 'manifest'].includes(request.destination)) {
-      await cache.put(request, response.clone());
-    }
-    return response;
-  } catch {
-    return cached || new Response('', { status: 504 });
-  }
+  return `bytes ${start}-${end}/${totalSize}`;
 }
 
 async function streamDriveFile(fileId, request) {
@@ -168,59 +140,65 @@ async function streamDriveFile(fileId, request) {
   }
 
   try {
-    const metadata = await getFileMetadata(fileId);
-    const { start, end } = requestedRange(request.headers.get('Range'), metadata.size);
-    const upstream = await fetchDriveRange(fileId, start, end);
+    const metadata = await getFileMetadata(fileId, request.signal);
+    const rangeHeader = request.headers.get('Range');
+    const range = requestedRange(rangeHeader, metadata.size);
+    if (!range) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${metadata.size}`, 'Cache-Control': 'no-store' } });
+    const { start, end } = range;
+    const requestVersion = driveTokenVersion;
+    const upstream = await fetchDriveRange(fileId, start, end, request.signal);
 
     if (!upstream.ok && upstream.status !== 206) {
       const message = await upstream.text();
-      if (upstream.status === 401) await notifyDriveAuthFailure(message || 'Google Drive access expired.');
+      if (upstream.status === 401) await notifyDriveAuthFailure(message || 'Google Drive access expired.', requestVersion);
       return streamError(message || `Drive stream failed: ${upstream.status}`, upstream.status, upstream.statusText);
     }
 
-    const upstreamBody = await upstream.arrayBuffer();
-    const body = sliceRangeBody(upstreamBody, upstream, start, end);
-    if (body.byteLength === 0) {
-      throw new Error(`Drive returned an empty range for bytes ${start}-${end}.`);
-    }
-    const actualEnd = start + body.byteLength - 1;
+    if (!upstream.body) throw new Error(`Drive returned an empty range for bytes ${start}-${end}.`);
+    const contentLength = upstream.headers.get('Content-Length')
+      || String(upstream.status === 206 ? end - start + 1 : metadata.size);
+    const responseStatus = upstream.status === 206 && rangeHeader ? 206 : 200;
     const responseHeaders = new Headers({
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store',
-      'Content-Length': String(body.byteLength),
-      'Content-Range': `bytes ${start}-${actualEnd}/${metadata.size}`,
+      'Content-Length': contentLength,
       'Content-Type': metadata.mimeType || 'audio/mpeg',
     });
+    // Google Drive does return Content-Range, but does not expose it to a
+    // cross-origin browser fetch. Construct the required header from the
+    // request we sent and the verified Drive file size instead.
+    if (responseStatus === 206) {
+      responseHeaders.set('Content-Range', partialContentRange(start, end, metadata.size));
+    }
 
-    return new Response(body, {
-      status: 206,
-      statusText: 'Partial Content',
+    return new Response(upstream.body, {
+      status: responseStatus,
+      statusText: responseStatus === 206 ? 'Partial Content' : 'OK',
       headers: responseHeaders,
     });
   } catch (error) {
-    const status = Number(error?.status) === 401 ? 401 : 502;
-    return streamError(error instanceof Error ? error.message : 'Drive stream failed.', status, status === 401 ? 'Unauthorized' : 'Bad Gateway');
+    const candidateStatus = Number(error?.status);
+    const status = Number.isInteger(candidateStatus) && candidateStatus >= 400 && candidateStatus <= 599
+      ? candidateStatus
+      : 502;
+    return streamError(
+      error instanceof Error ? error.message : 'Drive stream failed.',
+      status,
+      status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : 'Bad Gateway',
+    );
   }
 }
 
-function sliceRangeBody(buffer, response, requestedStart, requestedEnd) {
-  const bytes = new Uint8Array(buffer);
-  const requestedLength = requestedEnd - requestedStart + 1;
-  const contentRange = response.headers.get('Content-Range') || '';
-  const rangeMatch = /^bytes\s+(\d+)-(\d+)\//i.exec(contentRange);
-  const upstreamStart = rangeMatch ? Number(rangeMatch[1]) : (response.status === 200 ? 0 : requestedStart);
-  const offset = Math.max(0, requestedStart - upstreamStart);
-  return bytes.slice(offset, offset + requestedLength);
-}
-
-async function getFileMetadata(fileId) {
+async function getFileMetadata(fileId, signal) {
+  const requestVersion = driveTokenVersion;
   const cached = fileMetadataCache.get(fileId);
-  if (cached) return cached;
+  if (cached) return rememberFileMetadata(fileId, cached);
 
   const response = await fetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=size,mimeType`,
     {
       cache: 'no-store',
+      signal,
       headers: {
         Authorization: `Bearer ${driveAccessToken}`,
       },
@@ -230,7 +208,7 @@ async function getFileMetadata(fileId) {
   if (!response.ok) {
     const message = await response.text();
     if (response.status === 401) {
-      await notifyDriveAuthFailure(message || 'Google Drive access expired.');
+      await notifyDriveAuthFailure(message || 'Google Drive access expired.', requestVersion);
     }
     const error = new Error(message || `Drive metadata failed: ${response.status}`);
     error.status = response.status;
@@ -256,55 +234,33 @@ async function getFileMetadata(fileId) {
     mimeType,
     size,
   };
-  fileMetadataCache.set(fileId, normalized);
+  if (requestVersion === driveTokenVersion) rememberFileMetadata(fileId, normalized);
   return normalized;
 }
 
 function requestedRange(rangeHeader, fileSize) {
-  if (!rangeHeader) {
-    return {
-      start: 0,
-      end: Math.min(fileSize - 1, DEFAULT_CHUNK_BYTES - 1),
-    };
-  }
-
+  if (!rangeHeader) return { start: 0, end: fileSize - 1 };
   const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
-  if (!match) {
-    return {
-      start: 0,
-      end: Math.min(fileSize - 1, DEFAULT_CHUNK_BYTES - 1),
-    };
-  }
-
-  let start;
-  let end;
-
+  if (!match || (!match[1] && !match[2])) return null;
   if (match[1] === '') {
-    const suffixLength = Math.min(Number(match[2] || DEFAULT_CHUNK_BYTES), fileSize);
-    start = fileSize - suffixLength;
-    end = fileSize - 1;
-  } else {
-    start = Number(match[1]);
-    end = match[2] === '' ? start + DEFAULT_CHUNK_BYTES - 1 : Number(match[2]);
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    return { start: Math.max(0, fileSize - suffix), end: fileSize - 1 };
   }
-
-  if (!Number.isFinite(start) || start < 0) start = 0;
-  if (!Number.isFinite(end) || end < start) end = start + DEFAULT_CHUNK_BYTES - 1;
-  if (!Number.isSafeInteger(start)) start = 0;
-  if (!Number.isSafeInteger(end)) end = start + DEFAULT_CHUNK_BYTES - 1;
-  const boundedStart = Math.min(start, fileSize - 1);
-  return {
-    start: boundedStart,
-    end: Math.min(end, boundedStart + MAX_RANGE_BYTES - 1, fileSize - 1),
-  };
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : fileSize - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= fileSize || end < start) return null;
+  return { start, end: Math.min(end, fileSize - 1) };
 }
 
-async function fetchDriveRange(fileId, start, end, attempt = 0) {
+async function fetchDriveRange(fileId, start, end, signal, attempt = 0) {
   try {
+    signal?.throwIfAborted();
     const response = await fetch(
       `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
       {
         cache: 'no-store',
+        signal,
         headers: {
           Authorization: `Bearer ${driveAccessToken}`,
           Range: `bytes=${start}-${end}`,
@@ -312,14 +268,15 @@ async function fetchDriveRange(fileId, start, end, attempt = 0) {
       }
     );
     if (response.status >= 500 && attempt < 2) {
+      await response.body?.cancel();
       await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
-      return fetchDriveRange(fileId, start, end, attempt + 1);
+      return fetchDriveRange(fileId, start, end, signal, attempt + 1);
     }
     return response;
   } catch (error) {
-    if (attempt >= 2) throw error;
+    if (signal?.aborted || error.name === 'AbortError' || attempt >= 2) throw error;
     await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
-    return fetchDriveRange(fileId, start, end, attempt + 1);
+    return fetchDriveRange(fileId, start, end, signal, attempt + 1);
   }
 }
 
