@@ -4,7 +4,8 @@ export const VINYL_SECONDS_PER_TURN = 60 / VINYL_RPM;
 // These angles keep the stylus strictly on the vinyl grooves instead of swinging off the deck.
 export const TONEARM_START_ANGLE = 2;
 export const TONEARM_END_ANGLE = 21;
-export const TONEARM_LIFTED_ANGLE = 10;
+// Rest position just outside the record edge, so a lifted arm never hovers over the grooves.
+export const TONEARM_LIFTED_ANGLE = -9;
 
 export const MOTOR_ACCEL_TIME_CONSTANT_MS = 180;
 export const MOTOR_BRAKE_TIME_CONSTANT_MS = 150;
@@ -16,8 +17,14 @@ export function inertiaVelocity(initial, target, elapsed, timeConstantMs = INERT
   return target + ((initial - target) * Math.exp(-elapsedMs / timeConstant));
 }
 
+/** Physical platter speed for an RPM selector value (the "33" setting is 33⅓). */
+export function physicalRpm(rpm = VINYL_RPM) {
+  const value = Number(rpm) || VINYL_RPM;
+  return value === 33 ? 100 / 3 : value;
+}
+
 export function vinylSecondsPerTurn(rpm = VINYL_RPM, pitchModifier = 1) {
-  const safeRpm = Math.max(1, Number(rpm) || VINYL_RPM);
+  const safeRpm = Math.max(1, physicalRpm(rpm));
   const safePitch = Math.max(0.01, Number(pitchModifier) || 1);
   return 60 / (safeRpm * safePitch);
 }
