@@ -4664,6 +4664,9 @@ input:focus-visible {
 .constellation-now-playing strong { color: #fff; }
 .constellation-cluster-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; color: var(--text-muted); font-size: .7rem; }
 .constellation-cluster-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.constellation-cluster-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 4px 10px; border: 1px solid transparent; border-radius: 999px; background: var(--bg); color: inherit; font: inherit; cursor: pointer; box-shadow: var(--shadow-soft); transition: color .15s ease, border-color .15s ease; }
+.constellation-cluster-chip:hover:not(:disabled), .constellation-cluster-chip:focus-visible { color: var(--text); border-color: var(--green); }
+.constellation-cluster-chip:disabled { cursor: default; box-shadow: none; }
 .constellation-cluster-legend i { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
 .constellation-cluster-legend small { color: var(--text-muted); }
 .constellation-fallback { position: absolute; inset: 50% auto auto 50%; width: min(360px, calc(100% - 32px)); transform: translate(-50%, -50%); padding: 16px; border-radius: 16px; color: var(--text-muted); background: rgba(12,14,22,.86); text-align: center; }

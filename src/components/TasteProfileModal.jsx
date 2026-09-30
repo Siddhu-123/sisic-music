@@ -1,15 +1,26 @@
 import { Compass, Download, X, Music, Radio, Disc } from 'lucide-react';
-import { computeTasteCentroid } from '../services/tasteEmbeddingService.js';
+import { useMemo } from 'react';
+import { buildContextualTasteProfile, rankContextualSongs } from '../services/contextualRecommendationService.js';
+import { getExploreFacets } from '../services/exploreService.js';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
-export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] }) {
+export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [], likedSongKeys = [] }) {
   const dialogRef = useDialogFocus(isOpen, onClose);
 
   const metrics = librarySummary?.metrics || {};
-  const tasteSignals = (librarySummary?.playbackEvents || [])
-    .filter(event => ['playback-start', 'playback-resume'].includes(event.eventType));
-  const tasteVector = computeTasteCentroid(songs, tasteSignals);
-  const tasteSignalCount = tasteSignals.filter(event => event.songKey).length;
+  const playbackEvents = librarySummary?.playbackEvents;
+  // Same profile Explore ranks with: recency-weighted plays, skips, likes.
+  const { tasteVector, tasteSignalCount, sound } = useMemo(() => {
+    const profile = buildContextualTasteProfile(songs, playbackEvents || [], { likedSongKeys });
+    const topMatches = profile.hasSignal ? rankContextualSongs(songs, { profile, likedSongKeys, limit: 40 }) : [];
+    const facets = [...getExploreFacets(topMatches, 'mood', 3), ...getExploreFacets(topMatches, 'genre', 3)]
+      .filter(facet => !['Open format', 'Discovery'].includes(facet.label));
+    return {
+      tasteVector: profile.vector,
+      tasteSignalCount: profile.positiveSignalCount + profile.negativeSignalCount + profile.explicitSignalCount,
+      sound: facets.slice(0, 5).map(facet => facet.label),
+    };
+  }, [songs, playbackEvents, likedSongKeys]);
 
   const topArtists = (() => {
     if (metrics.topArtistsByStarts && metrics.topArtistsByStarts.length > 0) {
@@ -118,9 +129,22 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [] 
           </div>
         </div>
 
+        {sound.length > 0 && (
+          <div className="top-artists-section">
+            <h3 className="section-heading">Your Sound</h3>
+            <div className="artist-chips-container">
+              {sound.map(label => (
+                <div key={label} className="artist-affinity-chip">
+                  <span className="chip-name">{label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="taste-profile-status" role="status">
           <span className="taste-profile-status__dot" />
-          <span>{tasteVector?.length ? `Profile ready · ${tasteVector.length}-dimension vector` : 'Profile waiting for library data'}</span>
+          <span>{tasteVector?.length ? `Profile ready · ${tasteVector.length}-dimension vector` : 'Play or like a few songs to build your profile'}</span>
           <small>{tasteSignalCount.toLocaleString()} listening signal{tasteSignalCount === 1 ? '' : 's'}</small>
         </div>
 

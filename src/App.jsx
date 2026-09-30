@@ -655,6 +655,13 @@ function App() {
     return [...byKey.values()].sort((a, b) => String(a.track || '').localeCompare(String(b.track || '')));
   }, [catalogue, deletedSongKeySet, duplicateSongKeySet, exploreLibrarySongs, jobBySongKey]);
 
+  // Stable, de-duplicated list for the cluster map and "more like this" so they
+  // don't recompute embeddings/k-means on every player tick.
+  const uniqueSongs = useMemo(
+    () => allSongs.filter(song => !duplicateSongKeySet.has(song.songKey)),
+    [allSongs, duplicateSongKeySet],
+  );
+
   const likedSongKeys = useMemo(() => {
     if (!likedPlaylist) return [];
     return exploreLibrarySongs
@@ -1798,9 +1805,10 @@ function App() {
         {view === VIEWS.CONSTELLATION && (
           <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
             <ConstellationView
-              songs={allSongs.filter(song => !duplicateSongKeySet.has(song.songKey))}
+              songs={uniqueSongs}
               currentSong={player.currentSong}
-              onPlaySong={(song) => handlePlaySong(song, allSongs.filter(item => !duplicateSongKeySet.has(item.songKey)))}
+              onPlaySong={(song) => handlePlaySong(song, uniqueSongs)}
+              onPlayCluster={(clusterSongs) => clusterSongs.length && handlePlaySong(clusterSongs[0], clusterSongs)}
               onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
             />
           </Suspense>
@@ -1988,8 +1996,8 @@ function App() {
             isOpen
             onClose={() => setRecommendationTarget(null)}
             targetSong={recommendationTarget}
-            librarySongs={allSongs}
-            onPlaySong={song => handlePlaySong(song, allSongs)}
+            librarySongs={uniqueSongs}
+            onPlaySong={song => handlePlaySong(song, uniqueSongs)}
             onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
           />
         </Suspense>
@@ -2001,7 +2009,8 @@ function App() {
             isOpen
             onClose={() => setIsTasteProfileOpen(false)}
             librarySummary={librarySummary}
-            songs={allSongs}
+            songs={uniqueSongs}
+            likedSongKeys={likedSongKeys}
           />
         </Suspense>
       )}

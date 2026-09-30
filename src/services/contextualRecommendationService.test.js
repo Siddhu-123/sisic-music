@@ -106,3 +106,35 @@ test('contextual ranking penalizes skipped and recently played songs while diver
   assert.equal(ranked[0].songKey, 'd');
   assert.ok(ranked.findIndex(song => song.songKey === 'a') > 0);
 });
+
+test('liked songs shape the taste vector without any playback history', () => {
+  const songs = [
+    { songKey: 'liked', track: 'Liked', artist: 'A', vector: basis(0) },
+    { songKey: 'near', track: 'Near', artist: 'B', vector: basis(0, 0.9).map((v, i) => (i === 1 ? 0.1 : v)) },
+    { songKey: 'far', track: 'Far', artist: 'C', vector: basis(5) },
+  ];
+  const profile = buildContextualTasteProfile(songs, [], { now: baseTime, likedSongKeys: ['liked'] });
+  assert.equal(profile.hasSignal, true);
+  const ranked = rankContextualSongs(songs, { profile, now: baseTime, excludeSongKeys: ['liked'] });
+  assert.equal(ranked[0].songKey, 'near');
+});
+
+test('stale sessions fade and recently skipped songs are penalised', () => {
+  const songs = [
+    { songKey: 'played', track: 'Played', artist: 'A', vector: basis(0) },
+    { songKey: 'skipped', track: 'Skipped', artist: 'B', vector: basis(0) },
+  ];
+  const events = [
+    playbackEvent('played', 'playback-start', 0),
+    playbackEvent('played', 'playback-complete', 200_000, { positionSeconds: 200 }),
+    playbackEvent('skipped', 'playback-start', 210_000),
+    playbackEvent('skipped', 'user-skip', 215_000, { positionSeconds: 5 }),
+  ];
+  const fresh = buildContextualTasteProfile(songs, events, { now: baseTime + 300_000 });
+  const stale = buildContextualTasteProfile(songs, events, { now: baseTime + 3 * 24 * 60 * 60 * 1000 });
+  assert.ok(fresh.sequenceWeight > 0.9);
+  assert.ok(stale.sequenceWeight < 0.01);
+  const [skipped] = rankContextualSongs(songs, { profile: fresh, now: baseTime + 300_000, excludeSongKeys: ['played'] });
+  const [unskipped] = rankContextualSongs([{ ...songs[1], songKey: 'other' }], { profile: fresh, now: baseTime + 300_000 });
+  assert.ok(skipped.recommendationScore < unskipped.recommendationScore);
+});

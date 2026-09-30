@@ -3,62 +3,111 @@ import { saveSongEmbedding } from '../db.js';
 import { hashString } from './artworkService.js';
 
 export const EMBEDDING_DIMENSIONS = 64;
+export const EMBEDDING_PROVIDER = 'sisic-client-v2';
+
+// Block layout: lexical title n-grams [0, 32), mood/style markers [32, 48),
+// signed artist identity [48, 64). Each block is normalised on its own and then
+// weighted, so a long title can no longer drown out who the artist is.
+const LEXICAL_DIMS = 32;
+const MOOD_OFFSET = 32;
+const ARTIST_OFFSET = 48;
+const ARTIST_DIMS = 16;
+const BLOCK_WEIGHTS = { lexical: 0.6, mood: 0.5, artist: 0.62 };
+
+const MOOD_MARKERS = [
+  ['live', 'concert', 'tour'],
+  ['remix', 'club', 'mix', 'dj', 'edit', 'bootleg'],
+  ['slowed', 'reverb', 'chill', 'lofi'],
+  ['sped', 'speed', 'nightcore'],
+  ['acoustic', 'unplugged', 'piano', 'guitar'],
+  ['funk', 'montagem', 'phonk', 'bass', 'brazilian'],
+  ['rock', 'metal', 'punk', 'grunge'],
+  ['hip hop', 'rap', 'trap', 'drill'],
+  ['pop', 'dance', 'synth', 'disco'],
+  ['instrumental', 'soundtrack', 'theme', 'ost', 'score'],
+  ['love', 'heart', 'romance'],
+  ['sad', 'cry', 'lonely', 'tears'],
+  ['night', 'midnight', 'moon', 'dream'],
+  ['electronic', 'edm', 'house', 'techno', 'trance'],
+  ['jazz', 'blues', 'soul', 'rnb'],
+  ['classical', 'orchestral', 'symphony', 'opera'],
+];
+
+function splitArtists(artist = '') {
+  return String(artist)
+    .split(/\s*(?:,|&|\/|;|\bfeat\.?|\bft\.?|\bfeaturing\b|\bx\b|\bwith\b)\s*/i)
+    .map(name => normalizeText(name))
+    .filter(Boolean);
+}
+
+function addBlock(vector, block, offset, weight) {
+  let sumSq = 0;
+  for (const value of block) sumSq += value * value;
+  const norm = Math.sqrt(sumSq);
+  if (!norm) return;
+  for (let i = 0; i < block.length; i++) vector[offset + i] = (block[i] / norm) * weight;
+}
 
 /**
- * Generates a 64-dimensional feature vector for a song.
- * Uses semantic token hashing, metadata attributes, and acoustic markers.
+ * Generates a 64-dimensional feature vector for a song from three weighted
+ * blocks: title/album n-grams, whole-word mood markers and artist identity.
  */
 export function computeSongEmbedding(song = {}) {
   const vector = new Float32Array(EMBEDDING_DIMENSIONS);
-  const artist = normalizeText(song.artist || '');
   const track = normalizeText(song.track || '');
   const album = normalizeText(song.album || '');
-  const combined = `${artist} ${track} ${album}`.trim();
+  const title = `${track} ${album}`.trim();
 
-  // 1. Semantic N-gram Hashing (Dimensions 0..27)
-  for (let i = 0; i < combined.length - 1; i++) {
-    const bigram = combined.slice(i, i + 2);
-    const hash = hashString(bigram);
-    const dim = hash % 28;
-    vector[dim] += 1.0;
-  }
-  for (let i = 0; i < combined.length - 2; i++) {
-    const trigram = combined.slice(i, i + 3);
-    const hash = hashString(trigram);
-    const dim = 28 + (hash % 16);
-    vector[dim] += 1.2;
-  }
+  // Title n-grams, sqrt-dampened so repeated common bigrams don't dominate.
+  const lexical = new Float32Array(LEXICAL_DIMS);
+  for (let i = 0; i < title.length - 1; i++) lexical[hashString(title.slice(i, i + 2)) % 20] += 1;
+  for (let i = 0; i < title.length - 2; i++) lexical[20 + (hashString(title.slice(i, i + 3)) % 12)] += 1.2;
+  addBlock(vector, lexical.map(Math.sqrt), 0, BLOCK_WEIGHTS.lexical);
 
-  // 2. Music/Acoustic Mood Markers (Dimensions 44..55)
-  const text = combined.toLowerCase();
-  if (text.includes('live') || text.includes('concert') || text.includes('tour')) vector[44] += 2.0;
-  if (text.includes('remix') || text.includes('club') || text.includes('mix') || text.includes('dj')) vector[45] += 2.0;
-  if (text.includes('slowed') || text.includes('reverb') || text.includes('chill') || text.includes('lofi')) vector[46] += 2.0;
-  if (text.includes('acoustic') || text.includes('unplugged') || text.includes('piano')) vector[47] += 2.0;
-  if (text.includes('funk') || text.includes('montagem') || text.includes('phonk') || text.includes('bass')) vector[48] += 2.0;
-  if (text.includes('rock') || text.includes('metal') || text.includes('punk')) vector[49] += 2.0;
-  if (text.includes('hip hop') || text.includes('rap') || text.includes('trap')) vector[50] += 2.0;
-  if (text.includes('pop') || text.includes('dance') || text.includes('synth')) vector[51] += 2.0;
-  if (text.includes('instrumental') || text.includes('soundtrack') || text.includes('theme')) vector[52] += 2.0;
+  // Whole-word mood markers ("rap" must not match "therapy", "live" not "oliver").
+  const words = ` ${normalizeText([song.artist, track, album, song.genre].filter(Boolean).join(' '))} `;
+  const mood = new Float32Array(MOOD_MARKERS.length);
+  MOOD_MARKERS.forEach((terms, index) => {
+    if (terms.some(term => words.includes(` ${term} `))) mood[index] = 1;
+  });
+  addBlock(vector, mood, MOOD_OFFSET, BLOCK_WEIGHTS.mood);
 
-  // 3. Artist Cluster Seed Hash (Dimensions 56..63)
-  const artistHash = hashString(artist || 'unknown');
-  for (let d = 0; d < 8; d++) {
-    const val = ((artistHash >> (d * 4)) & 0x0f) / 15.0;
-    vector[56 + d] += val * 1.5;
-  }
+  // Signed artist hash: unrelated artists land near-orthogonal, shared artists
+  // (including features) pull songs together.
+  const artist = new Float32Array(ARTIST_DIMS);
+  const artists = splitArtists(song.artist);
+  (artists.length ? artists : ['unknown']).forEach((name, index) => {
+    const weight = index === 0 ? 1 : 0.6;
+    for (let half = 0; half < 2; half++) {
+      const hash = hashString(half ? `${name}#` : name);
+      for (let d = 0; d < 8; d++) artist[half * 8 + d] += ((((hash >> (d * 4)) & 0x0f) / 7.5) - 1) * weight;
+    }
+  });
+  addBlock(vector, artist, ARTIST_OFFSET, BLOCK_WEIGHTS.artist);
 
-  // L2 Normalize to Unit Length: ||vector|| = 1.0
+  // L2 normalise to unit length so cosine similarity is a plain dot product.
   let sumSq = 0;
-  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) {
-    sumSq += vector[i] * vector[i];
-  }
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) sumSq += vector[i] * vector[i];
   const norm = Math.sqrt(sumSq) || 1.0;
-  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) {
-    vector[i] /= norm;
-  }
+  for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) vector[i] /= norm;
 
   return Array.from(vector);
+}
+
+const embeddingCache = new Map();
+const EMBEDDING_CACHE_LIMIT = 5000;
+
+/** Returns a stored vector when present, otherwise a memoised local embedding. */
+export function getSongEmbedding(song = {}) {
+  if (song.vector?.length === EMBEDDING_DIMENSIONS) return song.vector;
+  const cacheKey = `${song.artist || ''}\u0000${song.track || ''}\u0000${song.album || ''}\u0000${song.genre || ''}`;
+  let vector = embeddingCache.get(cacheKey);
+  if (!vector) {
+    vector = computeSongEmbedding(song);
+    if (embeddingCache.size >= EMBEDDING_CACHE_LIMIT) embeddingCache.delete(embeddingCache.keys().next().value);
+    embeddingCache.set(cacheKey, vector);
+  }
+  return vector;
 }
 
 /**
@@ -81,13 +130,13 @@ export function findSimilarSongs(targetSong, librarySongs = [], options = {}) {
   if (!targetSong || librarySongs.length === 0) return [];
 
   const targetKey = targetSong.songKey || getSongKey(targetSong);
-  const targetVector = targetSong.vector || computeSongEmbedding(targetSong);
+  const targetVector = getSongEmbedding(targetSong);
 
   const scored = [];
   for (const song of librarySongs) {
     const key = song.songKey || getSongKey(song);
     if (excludeCurrent && key === targetKey) continue;
-    const songVec = song.vector || computeSongEmbedding(song);
+    const songVec = getSongEmbedding(song);
     const score = cosineSimilarity(targetVector, songVec);
     scored.push({ song, score });
   }
@@ -116,7 +165,7 @@ export function computeTasteCentroid(songs = [], playbackStarts = []) {
     const key = song.songKey || getSongKey(song);
     const plays = Math.max(Number(song.playCount || 0), playCountByKey.get(key) || 0);
     const weight = 1.0 + Math.min(5.0, plays * 0.5);
-    const vec = song.vector || computeSongEmbedding(song);
+    const vec = getSongEmbedding(song);
 
     for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) {
       centroid[i] += vec[i] * weight;
@@ -173,7 +222,7 @@ export function projectEmbeddingsTo2D(songs = []) {
   // Compute Mean Vector
   const mean = new Float32Array(D);
   const matrix = songs.map(song => {
-    const vec = song.vector || computeSongEmbedding(song);
+    const vec = getSongEmbedding(song);
     for (let j = 0; j < D; j++) mean[j] += vec[j];
     return vec;
   });
@@ -266,7 +315,7 @@ function principalAxis(centered, seedMultiplier, previousAxes = []) {
 /** Projects vectors to three PCA axes for the lightweight WebGL cluster view. */
 export function projectEmbeddingsTo3D(songs = []) {
   if (songs.length === 0) return [];
-  const vectors = songs.map(song => song.vector || computeSongEmbedding(song));
+  const vectors = songs.map(song => getSongEmbedding(song));
   const mean = new Float32Array(EMBEDDING_DIMENSIONS);
   vectors.forEach(vector => vector.forEach((value, index) => { mean[index] += value; }));
   for (let j = 0; j < EMBEDDING_DIMENSIONS; j++) mean[j] /= vectors.length;
@@ -289,7 +338,7 @@ export function projectEmbeddingsTo3D(songs = []) {
  */
 export function kMeansCluster(songs = [], options = {}) {
   if (songs.length === 0) return [];
-  const vectors = songs.map(song => song.vector || computeSongEmbedding(song));
+  const vectors = songs.map(song => getSongEmbedding(song));
   const requestedClusters = Number(options.k) || Math.round(Math.sqrt(songs.length / 2));
   const k = Math.min(songs.length, Math.max(1, Math.min(Number(options.maxClusters) || 8, requestedClusters)));
   const dimensions = EMBEDDING_DIMENSIONS;
@@ -344,9 +393,9 @@ export function kMeansCluster(songs = [], options = {}) {
 export async function defaultSisicEmbeddingProvider({ song }) {
   const vector = computeSongEmbedding(song);
   const songKey = song.songKey || getSongKey(song);
-  await saveSongEmbedding(songKey, { vector, provider: 'sisic-client' });
+  await saveSongEmbedding(songKey, { vector, provider: EMBEDDING_PROVIDER });
   return {
-    provider: 'sisic-client',
+    provider: EMBEDDING_PROVIDER,
     embeddingId: `sisic-vec-${songKey}`,
     vector,
   };

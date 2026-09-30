@@ -91,3 +91,15 @@ test('cluster view projects songs to 3D and assigns bounded k-means groups', () 
     assert.ok(item.clusterSize >= 1);
   }
 });
+
+test('artist identity outweighs unrelated titles and mood markers match whole words', () => {
+  const a = computeSongEmbedding({ artist: 'Artist One', track: 'Morning Light' });
+  const b = computeSongEmbedding({ artist: 'Artist One', track: 'Completely Different' });
+  const c = computeSongEmbedding({ artist: 'Someone Else', track: 'Morning Lights' });
+  assert.ok(cosineSimilarity(a, b) > cosineSimilarity(a, computeSongEmbedding({ artist: 'Third', track: 'Completely Different' })));
+  assert.ok(cosineSimilarity(a, c) > 0);
+  const therapy = computeSongEmbedding({ artist: 'Z', track: 'Therapy' });
+  const rap = computeSongEmbedding({ artist: 'Q', track: 'Rap Song' });
+  const rap2 = computeSongEmbedding({ artist: 'W', track: 'Another Rap' });
+  assert.ok(cosineSimilarity(rap, rap2) > cosineSimilarity(therapy, rap2));
+});

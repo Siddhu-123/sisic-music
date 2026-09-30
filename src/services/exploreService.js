@@ -160,7 +160,7 @@ export function buildExploreMixes(songs = [], {
   for (const event of starts) {
     if (event.songKey) playCountByKey.set(event.songKey, (playCountByKey.get(event.songKey) || 0) + 1);
   }
-  const profile = buildContextualTasteProfile(pool, playbackEvents, { now, currentContext });
+  const profile = buildContextualTasteProfile(pool, playbackEvents, { now, currentContext, likedSongKeys: liked });
   const ranked = rankContextualSongs(pool, {
     profile,
     likedSongKeys: liked,

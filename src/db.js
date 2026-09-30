@@ -779,7 +779,8 @@ export async function getLibrarySnapshot() {
         playlists: playlistNames,
         playlistName: playlistNames[0] || '',
         downloadJob: jobsBySong.get(song.songKey) || null,
-        ...(embedding?.vector?.length === 64 ? {
+        // Local 'sisic-client' (v1) vectors used an older layout; recompute those on the fly.
+        ...(embedding?.vector?.length === 64 && embedding.provider !== 'sisic-client' ? {
           vector: embedding.vector,
           embeddingProvider: embedding.provider || '',
           embeddingUpdatedAt: embedding.updatedAt || '',

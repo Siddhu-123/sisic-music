@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Play, Rotate3d, Sparkles } from 'lucide-react';
 import { kMeansCluster, projectEmbeddingsTo3D } from '../../services/tasteEmbeddingService.js';
+import { getSongGenres, getSongMoods } from '../../services/exploreService.js';
 
 const MAX_CLUSTER_SONGS = 1200;
 const CLUSTER_COLORS = ['#78a7ff', '#c48cff', '#55d6be', '#ffb86b', '#ff7f9f', '#e7df78', '#74d99f', '#a7a7ff'];
@@ -11,6 +12,26 @@ function normalisePoints(songs) {
   return songs.map(song => ({ ...song, x: (song.coordX || 0) / max, y: (song.coordY || 0) / max, z: (song.coordZ || 0) / max }));
 }
 
+const GENERIC_LABELS = new Set(['Open format', 'Discovery']);
+
+/** Names a cluster after its most common mood/genre, falling back to its top artist. */
+function clusterLabel(clusterSongs) {
+  const counts = new Map();
+  const artists = new Map();
+  for (const song of clusterSongs) {
+    for (const label of [...getSongMoods(song), ...getSongGenres(song)]) {
+      if (!GENERIC_LABELS.has(label)) counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    if (song.artist) artists.set(song.artist, (artists.get(song.artist) || 0) + 1);
+  }
+  const top = entries => [...entries].sort((a, b) => b[1] - a[1])[0];
+  const [facet, facetCount = 0] = top(counts.entries()) || [];
+  const [artist] = top(artists.entries()) || [];
+  if (facet && facetCount >= Math.max(2, clusterSongs.length * 0.25)) return artist ? `${facet} · ${artist}` : facet;
+  return artist || 'Mixed';
+}
+
+// Matches the vertex shader: a square viewport of min(width, height) keeps the map undistorted.
 function screenPosition(point, width, height, zoom, rotation) {
   const cosY = Math.cos(rotation.y);
   const sinY = Math.sin(rotation.y);
@@ -21,7 +42,8 @@ function screenPosition(point, width, height, zoom, rotation) {
   const rotatedY = point.y * cosX - rotatedZ * sinX;
   const finalZ = point.y * sinX + rotatedZ * cosX;
   const perspective = 2.7 / (2.7 + finalZ);
-  return { x: (width / 2) + rotatedX * width * 0.36 * zoom * perspective, y: (height / 2) - rotatedY * height * 0.36 * zoom * perspective, depth: finalZ };
+  const scale = Math.min(width, height) * 0.36 * zoom * perspective;
+  return { x: (width / 2) + rotatedX * scale, y: (height / 2) - rotatedY * scale, depth: finalZ };
 }
 
 function shader(gl, type, source) {
@@ -54,7 +76,8 @@ function createPointProgram(gl) {
       float sinX = sin(u_rotation_x);
       p = vec3(p.x, p.y * cosX - p.z * sinX, p.y * sinX + p.z * cosX);
       float perspective = 2.7 / (2.7 + p.z);
-      gl_Position = vec4(p.x * perspective * u_zoom * 0.72, p.y * perspective * u_zoom * 0.72, p.z * 0.2, 1.0);
+      float s = perspective * u_zoom * 0.72;
+      gl_Position = vec4(p.x * s * min(1.0, 1.0 / u_aspect), p.y * s * min(1.0, u_aspect), p.z * 0.2, 1.0);
       gl_PointSize = a_size * (0.8 + perspective * 0.8);
       v_color = a_color;
     }
@@ -77,7 +100,7 @@ function createPointProgram(gl) {
   return program;
 }
 
-export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddToQueue }) {
+export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddToQueue, onPlayCluster }) {
   const canvasRef = useRef(null);
   const wrapperRef = useRef(null);
   const rotationRef = useRef({ x: 0.36, y: 0.55 });
@@ -86,6 +109,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
   const [hoveredSong, setHoveredSong] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(zoom);
   const [filterMode, setFilterMode] = useState('all');
   const [webglReady, setWebglReady] = useState(true);
 
@@ -103,10 +127,18 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
 
   const points = useMemo(() => normalisePoints(projectEmbeddingsTo3D(kMeansCluster(filteredSongs, { maxClusters: 8 }))), [filteredSongs]);
   const clusterSummary = useMemo(() => {
-    const summary = new Map();
-    points.forEach(point => summary.set(point.clusterId, (summary.get(point.clusterId) || 0) + 1));
-    return [...summary.entries()].sort((a, b) => a[0] - b[0]);
+    const byCluster = new Map();
+    points.forEach(point => {
+      if (!byCluster.has(point.clusterId)) byCluster.set(point.clusterId, []);
+      byCluster.get(point.clusterId).push(point);
+    });
+    return [...byCluster.entries()]
+      .map(([clusterId, clusterSongs]) => ({ clusterId, songs: clusterSongs, label: clusterLabel(clusterSongs) }))
+      .sort((a, b) => b.songs.length - a.songs.length);
   }, [points]);
+
+  // Zoom is read per frame from a ref so zooming doesn't rebuild the WebGL program.
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -156,7 +188,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
         gl.useProgram(program);
         gl.uniform1f(uniforms.rotationX, rotationRef.current.x);
         gl.uniform1f(uniforms.rotationY, rotationRef.current.y);
-        gl.uniform1f(uniforms.zoom, zoom);
+        gl.uniform1f(uniforms.zoom, zoomRef.current);
         gl.uniform1f(uniforms.aspect, width / Math.max(1, height));
         gl.drawArrays(gl.POINTS, 0, points.length);
         if (!dragRef.current) rotationRef.current.y += 0.0014;
@@ -175,7 +207,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       window.setTimeout(() => setWebglReady(false), 0);
       return undefined;
     }
-  }, [currentSong?.songKey, points, zoom]);
+  }, [currentSong?.songKey, points]);
 
   useEffect(() => {
     const updateSize = () => {
@@ -235,12 +267,16 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
   const handleClick = event => {
-    if (movedRef.current || !hoveredSong) return;
-    if (event.shiftKey) onAddToQueue?.(hoveredSong);
-    else onPlaySong?.(hoveredSong);
+    if (movedRef.current) return;
+    // Resolve the target at click time so taps on touch screens (no hover) work.
+    const target = findHovered(event);
+    if (!target) return;
+    if (event.shiftKey) onAddToQueue?.(target);
+    else onPlaySong?.(target);
   };
 
   const currentPoint = points.find(point => point.songKey === currentSong?.songKey);
+  const currentCluster = currentPoint && clusterSummary.find(cluster => cluster.clusterId === currentPoint.clusterId);
 
   return (
     <div className="constellation-view">
@@ -249,7 +285,7 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
           <Sparkles className="constellation-icon" size={22} />
           <div>
             <h2 className="constellation-title">Music clusters</h2>
-            <p className="constellation-subtitle">K-means groups your local library by music profile. Drag to orbit; click a point to play.</p>
+            <p className="constellation-subtitle">Songs that sound alike orbit together. Drag to orbit, click a star to play, or tap a cluster to play it as a mix.</p>
           </div>
         </div>
         <div className="constellation-controls">
@@ -264,9 +300,20 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
           </div>
         </div>
       </div>
-      {currentPoint && <div className="constellation-now-playing"><Rotate3d size={15} /><span>Now playing: <strong>{currentPoint.track}</strong> · cluster {currentPoint.clusterId + 1} of {clusterSummary.length}</span></div>}
+      {currentPoint && <div className="constellation-now-playing"><Rotate3d size={15} /><span>Now playing: <strong>{currentPoint.track}</strong> · in {currentCluster?.label || 'this cluster'}</span></div>}
       <div className="constellation-cluster-legend" role="region" aria-label="Music clusters">
-        {clusterSummary.map(([clusterId, count]) => <span key={clusterId}><i style={{ background: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length] }} />Cluster {clusterId + 1} · {count}</span>)}
+        {clusterSummary.map(({ clusterId, songs: clusterSongs, label }) => (
+          <button
+            type="button"
+            key={clusterId}
+            className="constellation-cluster-chip"
+            onClick={() => onPlayCluster?.(clusterSongs)}
+            disabled={!onPlayCluster}
+            title={onPlayCluster ? `Play all ${clusterSongs.length} songs in ${label}` : undefined}
+          >
+            <i style={{ background: CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length] }} />{label} · {clusterSongs.length}
+          </button>
+        ))}
         {filteredSongs.length < songs.length && <small>Showing the first {filteredSongs.length.toLocaleString()} songs for a smooth map.</small>}
       </div>
       <div className="constellation-canvas-wrapper" ref={wrapperRef} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerLeave={() => { dragRef.current = null; setHoveredSong(null); }} onClick={handleClick}>
