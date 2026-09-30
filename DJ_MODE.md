@@ -62,3 +62,52 @@ Review of `feature/backend-dj-galaxy` found and fixed: tempo-biased fallback; re
 Regression coverage includes scorer/history behavior, fallback/sampling, timing, controller races, queue cancellation, metadata retention, retry propagation, Python signal extraction, silence, and backfill checkpoints. `scripts/verify-player.mjs` covers the existing player; `scripts/verify-dj.mjs` exercises real browser audio, synthetic skip history, IndexedDB cache, early crossfade, telemetry, and desktop/mobile settings.
 
 Audio analysis API reference: [librosa beat tracking](https://librosa.org/doc/0.11.0/generated/librosa.beat.beat_track.html).
+
+## DJ mode v2
+
+DJ mode v1 executed simple time-based crossfades between songs without beat matching or tempo alignment. DJ mode v2 introduces beat-synced mixing, locking the tempos, musical bars, and beat phases of compatible tracks while managing bass energy during transitions.
+
+### Pipeline
+
+The v2 pipeline consists of five stages:
+
+1. **Worker analysis**: During ingestion or backfill on the Mac worker, `analyze_beat_rhythm` runs the Beat This! deep learning model (Foscarin, Schlueter & Widmer, ISMIR 2024) on the track audio decoded at 22050 Hz mono. It fits a regular tempo grid, votes on the bar grid meter and phase, and computes phrase cue points from bar energy envelopes.
+2. **Metadata storage (`djRhythm`)**: The extracted rhythm record `djRhythm` is stored in `sisic-songs.json` and cached in Drive song metadata. It includes fitted tempo (`bpm`), meter (`barBeats`), grid quality metrics (`gridCoverage`, `gridDeviationMs`, `downbeatAgreement`), cue points (`introEnd`, `introBars`, `outroStart`, `outroBars`, `abruptEnd`), and local tempos (`introBpm`, `outroBpm`).
+3. **Candidate ranking**: `rankDjCandidates` scores candidate tracks using `scoreDjTransition`. When both tracks have usable beat grids (`hasBeatGrid`), candidate tempo is compared against the source using `tempoMatch`. Candidate key compatibility (`harmonicCompatibility`) is judged after applying the pitch shift (`keyShiftSemitones`) caused by the rate adjustment.
+4. **Mix planning**: `planDjMix` schedules the transition point and duration. The transition aligns to an outgoing downbeat (`downbeatsBetween`) near the outro or before a predicted skip. Mix length is selected in whole bars (2, 4, 8, or 16 bars) via `mixBars` and rotated via `pickMixBars`.
+5. **Execution**: `PlaybackController.loadAndPlay` preloads the incoming track, matches its playback rate to the outgoing tempo, offsets its initial seek position to match beat phase (`incomingStartPosition`), mutes incoming bass, locks phase before unmuting (`lockBeatPhase`), applies equal-power crossfades (`equalPowerCurve`), performs a bass swap at the midpoint (`setBassCut`), and glides the pitch home (`glidePitchHome`).
+
+### Mix steps in order
+
+When transitioning between two beat-synced tracks, the playback controller executes the following sequence:
+
+1. **Leave on a bar line**: The mix starts on a downbeat at the beginning of the outgoing song's outro (`outroStart`) or earlier if a skip is predicted before the outro (`downbeatsBetween`).
+2. **Select mix length**: Mix length is set to 2, 4, 8, or 16 whole bars based on the quiet margins allowed by both tracks (`outroBars` and `introBars`) using `mixBars`. To prevent predictability, `pickMixBars` rotates away from the bar length used in the previous transition.
+3. **Rate-match with octave folding**: The incoming track's playback rate is adjusted by `tempoMatch` to match the outgoing tempo within `MAX_TEMPO_STRETCH` (±8%). If the tempos differ by approximately a factor of two, octave folding matches the tracks at double or half speed. Harmonic key compatibility is evaluated after this pitch shift (`semitonesForRate`).
+4. **Start on beat phase and lock**: The incoming track starts playback at gain 0, positioned by `incomingStartPosition` to match the outgoing track's beat or bar phase. Once playing, `lockBeatPhase` measures the actual timing difference with `phaseErrorSeconds` over up to four micro-seeks to eliminate startup latency and lock alignment within ~8 ms before audible fading starts. Incoming low-end frequencies below 200 Hz are cut by 30 dB (`setBassCut`).
+5. **Equal-power fade**: Gains are ramped using `setFade` with `curve: 'equal-power'` over the mix duration. Gains follow sine (fade-in) and cosine (fade-out) curves from `equalPowerCurve`, preventing the 3 dB power dip typical of linear fades.
+6. **Bass swap at the midpoint**: Halfway through the crossfade (`crossfade * 0.5`), the bass roles swap. Over the duration of one beat, the incoming deck's low shelf restores to flat (0 dB) while the outgoing deck's low shelf drops to -30 dB (`setBassCut`), avoiding low-frequency phase cancellation or mud.
+7. **Pitch eases home**: Once the crossfade finishes and the outgoing track is retired, `glidePitchHome` eases the incoming track's pitch modifier back to the user's base pitch setting over 6 seconds using a smoothstep curve, avoiding an abrupt pitch step.
+
+### Fallbacks
+
+- **Grid fallback**: If either track lacks a rhythm record or has `gridCoverage < 0.6` (`MIN_GRID_COVERAGE`), beat syncing is disabled and `planDjMix` falls back to the v1 timed crossfade (`chooseDjTransitionTime`).
+- **Downbeat alignment fallback**: If either track has `downbeatAgreement < 0.6` (`MIN_DOWNBEAT_AGREEMENT`) or meters differ, `alignmentUnit` falls back from bar-level alignment to beat-level alignment.
+- **Abrupt end fallback**: If the outgoing song ends at full energy (`abruptEnd` is true or `outroBars === 0`), `mixBars` constrains the transition to a short blend (a minimum of 2 bars).
+
+### Measured
+
+The following numbers have been verified in test runs:
+- On a synthetic 120 -> 126 bpm mix in Chromium, the incoming track's beat-phase error was 69.5 ms before the phase lock and 0.5 ms mean / 5 ms max after.
+- The fade-in was stuck at full volume before a fix and follows sin/cos afterwards (power sum 0.9999 at the midpoint).
+- Beat This on synthetic drums: beat F-measure 0.98-0.99 at 100/128/150 bpm, tempo within 0.03 bpm.
+- 3.5 s worker time per song.
+
+### Honest limits
+
+- Downbeat agreement was 0.30-0.74 on the five sample songs, so alignment falls back to beat level when below 0.6.
+- Rubato film songs had grid coverage 0.41-0.64 and therefore use the v1 fallback.
+- No listening test with real people has been done.
+- `tests/browser/dj-mix.html` measures the app's own clocks, not recorded audio output.
+- The pane used for measurement throttles animation frames, so the pitch glide was seen as steps there.
+

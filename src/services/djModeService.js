@@ -20,6 +20,9 @@ export const DJ_METADATA_VERSION = 2;
 export const DJ_SKIP_HORIZON_SECONDS = 18;
 export const DJ_SKIP_THRESHOLD = 0.62;
 export const DJ_MAX_TEMPO_DELTA = 8;
+// Key estimates from chroma templates are unreliable: on six real songs their confidence ranged 0.05-0.75.
+// Below this a key is treated as unknown instead of gating (or approving) a mix on a guess.
+export const DJ_MIN_KEY_CONFIDENCE = 0.35;
 export const DJ_NEAR_TIE_DELTA = 0.055;
 export const DJ_RANDOMIZATION_BUDGET = 0.55;
 
@@ -212,8 +215,8 @@ export function scoreDjTransition(source = {}, candidate = {}, positionSeconds, 
   const tempoScore = tempoDelta == null ? 0 : match ? clamp(1 - Math.abs(match.stretch) / MAX_TEMPO_STRETCH) : clamp(1 - tempoDelta / DJ_MAX_TEMPO_DELTA);
   const tempoAcceptable = match ? match.matchable : tempoDelta != null && tempoDelta <= DJ_MAX_TEMPO_DELTA;
   const shift = match?.matchable ? semitonesForRate(match.ratio) : 0;
-  const key = harmonicCompatibility(source.keyConfidence != null && source.keyConfidence < .1 ? null : source.musicalKey,
-    candidate.keyConfidence != null && candidate.keyConfidence < .1 ? null : candidate.musicalKey, shift);
+  const key = harmonicCompatibility(source.keyConfidence != null && source.keyConfidence < DJ_MIN_KEY_CONFIDENCE ? null : source.musicalKey,
+    candidate.keyConfidence != null && candidate.keyConfidence < DJ_MIN_KEY_CONFIDENCE ? null : candidate.musicalKey, shift);
   const sourceEnergy = energyAt(source, positionSeconds);
   const candidateEnergy = energyAt(candidate, 0);
   const sourceLoudness = numberOrNull(source.loudnessLufs);

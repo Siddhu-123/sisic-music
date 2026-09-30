@@ -168,3 +168,14 @@ test('mix length rotates so consecutive transitions are not predictable, and nev
   assert.deepEqual(history.mixBars, [8]);
   assert.deepEqual(rememberDjTransition(history, 'z', 70, 4).mixBars, [4, 8]);
 });
+
+test('a low-confidence key estimate is treated as unknown, so it neither blocks nor approves a mix', () => {
+  const a = { ...gridded('a', 120, 'C major'), keyConfidence: 0.2 };
+  const clash = { ...gridded('b', 120, 'F# minor'), keyConfidence: 0.9 };
+  const unknown = scoreDjTransition(a, clash);
+  assert.equal(unknown.harmonicCompatible, null, 'the shaky source key is ignored');
+  assert.equal(unknown.acceptable, true);
+  const sure = scoreDjTransition({ ...a, keyConfidence: 0.8 }, clash);
+  assert.equal(sure.harmonicCompatible, false, 'two confident, clashing keys still reject the mix');
+  assert.equal(sure.acceptable, false);
+});
