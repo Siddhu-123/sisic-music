@@ -96,3 +96,74 @@ test('33 RPM runs at 33⅓ and the lifted arm rests off the record', async () =>
   assert.equal(vinylSecondsPerTurn(45), 60 / 45);
   assert.ok(TONEARM_LIFTED_ANGLE < TONEARM_START_ANGLE);
 });
+
+// Coordinates measured from the pivot: x to the left, y downward, matching the tonearm's angle convention.
+function stylusDistanceFromCentre({ pivotToCenter, armLength, centerBearing }, angle) {
+  const rad = degrees => (degrees * Math.PI) / 180;
+  const centre = [pivotToCenter * Math.cos(rad(centerBearing)), pivotToCenter * Math.sin(rad(centerBearing))];
+  const stylus = [armLength * Math.cos(rad(angle)), armLength * Math.sin(rad(angle))];
+  return Math.hypot(centre[0] - stylus[0], centre[1] - stylus[1]);
+}
+
+test('tonearm geometry puts the stylus on the outer groove at 0% and the run-out at 100%, on any layout', async () => {
+  const { createTonearmGeometry } = await import('./vinylPhysics.js');
+  // A wide desktop deck and a narrow phone deck: different arm length, pivot distance and record size.
+  const layouts = [
+    { pivotToCenter: 433, armLength: 411, centerBearing: 34.6, outerRadius: 220, innerRadius: 95 },
+    { pivotToCenter: 180, armLength: 172, centerBearing: 28, outerRadius: 89, innerRadius: 38 },
+  ];
+  for (const layout of layouts) {
+    const arm = createTonearmGeometry(layout);
+    assert.ok(Math.abs(stylusDistanceFromCentre(layout, arm.angleForProgress(0)) - layout.outerRadius) < 1e-6, 'outer groove at 0%');
+    assert.ok(Math.abs(stylusDistanceFromCentre(layout, arm.angleForProgress(100)) - layout.innerRadius) < 1e-6, 'run-out at 100%');
+    const halfway = (layout.outerRadius + layout.innerRadius) / 2;
+    assert.ok(Math.abs(stylusDistanceFromCentre(layout, arm.angleForProgress(50)) - halfway) < 1e-6, 'halfway across the grooves at 50%');
+    assert.ok(arm.startAngle < arm.endAngle, 'the arm sweeps inward as the song plays');
+    // A lifted arm rests off the record, never over the grooves.
+    assert.ok(stylusDistanceFromCentre(layout, arm.liftedAngle) >= layout.outerRadius, 'lifted arm is outside the record');
+    for (const progress of [0, 12.5, 40, 77, 100]) {
+      assert.ok(Math.abs(arm.progressForAngle(arm.angleForProgress(progress)) - progress) < 1e-6, `round trip at ${progress}%`);
+    }
+    // Angles beyond the sweep clamp to 0% / 100% instead of extrapolating.
+    assert.equal(arm.progressForAngle(arm.startAngle - 40), 0);
+    assert.equal(arm.progressForAngle(arm.endAngle + 40), 100);
+  }
+});
+
+test('the two layouts really do need different angles, which is why they cannot be constants', async () => {
+  const { createTonearmGeometry } = await import('./vinylPhysics.js');
+  const desktop = createTonearmGeometry({ pivotToCenter: 433, armLength: 411, centerBearing: 34.6, outerRadius: 220, innerRadius: 95 });
+  const phone = createTonearmGeometry({ pivotToCenter: 180, armLength: 172, centerBearing: 28, outerRadius: 89, innerRadius: 38 });
+  assert.ok(Math.abs(desktop.startAngle - phone.startAngle) > 1 || Math.abs(desktop.endAngle - phone.endAngle) > 1);
+});
+
+test('impossible measurements fall back instead of producing NaN angles', async () => {
+  const { createTonearmGeometry } = await import('./vinylPhysics.js');
+  assert.equal(createTonearmGeometry(), null);
+  assert.equal(createTonearmGeometry({ pivotToCenter: 0, armLength: 100, centerBearing: 30, outerRadius: 50, innerRadius: 10 }), null);
+  assert.equal(createTonearmGeometry({ pivotToCenter: 100, armLength: 100, centerBearing: 30, outerRadius: 10, innerRadius: 50 }), null, 'inner radius larger than outer');
+  assert.equal(createTonearmGeometry({ pivotToCenter: NaN, armLength: 100, centerBearing: 30, outerRadius: 50, innerRadius: 10 }), null);
+  // Grooves the arm cannot reach at all (nothing between its minimum and maximum reach) fall back too.
+  assert.equal(createTonearmGeometry({ pivotToCenter: 100, armLength: 20, centerBearing: 30, outerRadius: 500, innerRadius: 400 }), null);
+});
+
+test('an arm too short to reach the run-out keeps moving to 100% instead of stalling', async () => {
+  const { createTonearmGeometry } = await import('./vinylPhysics.js');
+  // Measured on the desktop deck: pivot 177.7 px from the record centre, arm only 137.3 px long,
+  // so the stylus can never get closer than 40.4 px even though the run-out is at 36.6 px.
+  const layout = { pivotToCenter: 177.7, armLength: 137.3, centerBearing: 26.6, outerRadius: 82.3, innerRadius: 36.6 };
+  const arm = createTonearmGeometry(layout);
+  const reach = Math.abs(layout.pivotToCenter - layout.armLength);
+  assert.ok(Math.abs(stylusDistanceFromCentre(layout, arm.angleForProgress(100)) - reach) < 1e-6, '100% lands at the closest reachable point');
+  // No dead zone: every step of progress moves the arm, right up to the end.
+  let previous = arm.angleForProgress(0);
+  for (let progress = 5; progress <= 100; progress += 5) {
+    const angle = arm.angleForProgress(progress);
+    assert.ok(angle - previous > 0.3, `arm still moving at ${progress}% (moved ${(angle - previous).toFixed(2)} deg)`);
+    previous = angle;
+  }
+  assert.ok(arm.angleForProgress(100) - arm.angleForProgress(95) > 0.5);
+  // A record that fits within reach is unaffected by the clamp.
+  const roomy = createTonearmGeometry({ pivotToCenter: 433, armLength: 411, centerBearing: 34.6, outerRadius: 220, innerRadius: 95 });
+  assert.ok(Math.abs(stylusDistanceFromCentre({ pivotToCenter: 433, armLength: 411, centerBearing: 34.6 }, roomy.angleForProgress(100)) - 95) < 1e-6);
+});

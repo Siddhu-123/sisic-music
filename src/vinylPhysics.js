@@ -90,3 +90,43 @@ export function tonearmAngleFromProgress(progress) {
   const boundedProgress = clamp(progress, 0, 100);
   return TONEARM_START_ANGLE + ((TONEARM_END_ANGLE - TONEARM_START_ANGLE) * (boundedProgress / 100));
 }
+
+const DEG = Math.PI / 180;
+
+/**
+ * Tonearm geometry solved from the rendered deck. Angles use the tonearm's own
+ * convention (degrees below horizontal-left of the pivot). Progress maps
+ * linearly to groove radius (outer lead-in to inner run-out), and the law of
+ * cosines turns a radius into the arm angle that puts the stylus on it. Fixed
+ * angles cannot work at every breakpoint because layouts change the arm length
+ * and pivot, so the stylus would miss the grooves on some screens.
+ */
+export function createTonearmGeometry({ pivotToCenter, armLength, centerBearing, outerRadius: wantedOuter, innerRadius: wantedInner } = {}) {
+  const numbersOk = [pivotToCenter, armLength, centerBearing, wantedOuter, wantedInner].every(Number.isFinite)
+    && pivotToCenter > 0 && armLength > 0 && wantedOuter > wantedInner && wantedInner >= 0;
+  if (!numbersOk) return null;
+  const D = pivotToCenter;
+  const L = armLength;
+  // A rigid arm can only reach radii between |D - L| and D + L from the record centre. If the
+  // grooves extend past that, spread progress over the reachable span so the arm keeps moving
+  // all the way to 100% instead of stalling at its limit while the song plays on.
+  const outerRadius = Math.min(wantedOuter, D + L);
+  const innerRadius = Math.max(wantedInner, Math.abs(D - L));
+  if (!(outerRadius > innerRadius)) return null;
+  const angleForRadius = radius => {
+    const cosine = clamp(((D * D) + (L * L) - (radius * radius)) / (2 * D * L), -1, 1);
+    return centerBearing - (Math.acos(cosine) / DEG);
+  };
+  const radiusForAngle = angle => Math.sqrt(Math.max(0, (D * D) + (L * L) - (2 * D * L * Math.cos((centerBearing - angle) * DEG))));
+  const startAngle = angleForRadius(outerRadius);
+  const endAngle = angleForRadius(innerRadius);
+  // Rest position: just outside the record edge, never hovering over the grooves.
+  const restAngle = angleForRadius(outerRadius * 1.14);
+  return {
+    startAngle,
+    endAngle,
+    liftedAngle: Math.min(startAngle - 3, restAngle),
+    angleForProgress: progress => angleForRadius(outerRadius - ((outerRadius - innerRadius) * clamp(progress, 0, 100) / 100)),
+    progressForAngle: angle => clamp(((outerRadius - radiusForAngle(clamp(angle, startAngle, endAngle))) / (outerRadius - innerRadius)) * 100, 0, 100),
+  };
+}

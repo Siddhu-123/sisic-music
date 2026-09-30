@@ -4,6 +4,7 @@ import {
   TONEARM_END_ANGLE,
   TONEARM_START_ANGLE,
   clamp,
+  createTonearmGeometry,
   tonearmAngleFromProgress,
   tonearmProgressFromAngle,
   vinylSecondsPerTurn,
@@ -15,6 +16,20 @@ import {
 
 const LONG_PRESS_MS = 420;
 const RADIANS_TO_DEGREES = 180 / Math.PI;
+// A finger resting on the record stops it. Pointer events stop firing when the hand holds still,
+// so no movement for this long means "held still" and the scratch velocity drops to zero.
+const SCRATCH_HOLD_MS = 90;
+// Used until the deck has been measured (and if measuring is impossible).
+const FALLBACK_ARM = {
+  startAngle: TONEARM_START_ANGLE,
+  endAngle: TONEARM_END_ANGLE,
+  liftedAngle: TONEARM_LIFTED_ANGLE,
+  angleForProgress: tonearmAngleFromProgress,
+  progressForAngle: tonearmProgressFromAngle,
+};
+const sameAngle = (a, b) => Math.abs(a - b) < 0.05;
+// The deck may lengthen the arm by at most this fraction to reach the run-out grooves.
+const MAX_ARM_STRETCH = 0.25;
 
 function pointerAngle(event, centerX, centerY) {
   return Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
@@ -70,6 +85,7 @@ export function Turntable({
   const releasedTonearmResetRef = useRef(null);
   const previewProgressRef = useRef(null);
   const recordSwapIndexRef = useRef(null);
+  const scratchHoldRef = useRef(null);
   const recordRotationRef = useRef(0);
   const motorVelocityRef = useRef(0);
   const motorFrameRef = useRef(null);
@@ -91,6 +107,8 @@ export function Turntable({
   const motorCallbacksRef = useRef({ onScratchVelocity, onScratchEnd });
   const [dragMode, setDragMode] = useState(null);
   const [previewProgress, setPreviewProgress] = useState(null);
+  const [armGeometry, setArmGeometry] = useState(null);
+  const arm = armGeometry || FALLBACK_ARM;
   const [tonearmDragAngle, setTonearmDragAngle] = useState(null);
   const [releasedTonearmProgress, setReleasedTonearmProgress] = useState(null);
   const [needleLifted, setNeedleLifted] = useState(false);
@@ -102,10 +120,10 @@ export function Turntable({
   const completed = duration > 0 && displayedProgress >= 99.8 && !dragMode;
   const tonearmLifted = needleLifted || dragMode === 'tonearm' || dragMode === 'lifted' || completed;
   const tonearmAngle = dragMode === 'tonearm'
-    ? (tonearmDragAngle ?? tonearmAngleFromProgress(displayedProgress))
+    ? (tonearmDragAngle ?? arm.angleForProgress(displayedProgress))
     : tonearmLifted
-      ? TONEARM_LIFTED_ANGLE
-      : tonearmAngleFromProgress(releasedTonearmProgress ?? displayedProgress);
+      ? arm.liftedAngle
+      : arm.angleForProgress(releasedTonearmProgress ?? displayedProgress);
   const pitchPercent = ((pitchModifier - 1) * 100).toFixed(1);
   const rpmLabel = Number(rpm) === 33 ? '33⅓' : String(rpm);
 
@@ -453,6 +471,15 @@ export function Turntable({
     const secondsMoved = (interaction.accumulatedDegrees / 360) * (60 / rpm);
     updatePreviewProgress(interaction.startProgress + ((secondsMoved / duration) * 100));
     onScratchVelocity?.(angularVelocity);
+    // No pointer events arrive once the hand stops, so without this the audio would keep
+    // "scratching" at the last speed. A record held still is silent.
+    window.clearTimeout(scratchHoldRef.current);
+    scratchHoldRef.current = window.setTimeout(() => {
+      if (interactionRef.current !== interaction) return;
+      interaction.lastVelocity = 0;
+      motorVelocityRef.current = 0;
+      onScratchVelocity?.(0);
+    }, SCRATCH_HOLD_MS);
   };
 
   const finishRecordPointer = event => {
@@ -460,6 +487,7 @@ export function Turntable({
     if (!interaction || interaction.pointerId !== event.pointerId) return;
     event.preventDefault();
     clearLongPress();
+    window.clearTimeout(scratchHoldRef.current);
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
 
     if (interaction.longPressed) {
@@ -491,18 +519,33 @@ export function Turntable({
     }
   };
 
-  const tonearmAngleFromPointer = event => {
+  // Where the tonearm pivots, in viewport pixels. Prefer the arm's real transform origin, which
+  // stays right whatever the CSS does, and fall back to the layout variables.
+  const tonearmPivot = () => {
+    const arm = tonearmRef.current;
+    const parent = arm?.offsetParent;
+    if (arm && parent) {
+      const origin = window.getComputedStyle(arm).transformOrigin.split(' ').map(Number.parseFloat);
+      if (origin.length >= 2 && origin.every(Number.isFinite)) {
+        const parentRect = parent.getBoundingClientRect();
+        return { x: parentRect.left + parent.clientLeft + arm.offsetLeft + origin[0], y: parentRect.top + parent.clientTop + arm.offsetTop + origin[1] };
+      }
+    }
     const deck = deckRef.current;
     const rect = deck?.getBoundingClientRect();
-    if (!rect) return TONEARM_START_ANGLE;
+    if (!rect) return null;
     const deckStyle = window.getComputedStyle(deck);
     const tonearmTop = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-top'), rect.height) || (rect.height * 0.13);
     const tonearmRight = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-right'), rect.width) || (rect.width * 0.02);
     const pivotOffset = cssLengthToPixels(deckStyle.getPropertyValue('--tonearm-pivot-offset'), rect.width) || 16;
     const tonearmHeight = tonearmRef.current?.offsetHeight || 32;
-    const pivotX = rect.right - tonearmRight - pivotOffset;
-    const pivotY = rect.top + tonearmTop + (tonearmHeight / 2);
-    const rawAngle = pointerAngle(event, pivotX, pivotY);
+    return { x: rect.right - tonearmRight - pivotOffset, y: rect.top + tonearmTop + (tonearmHeight / 2) };
+  };
+
+  const tonearmAngleFromPointer = event => {
+    const pivot = tonearmPivot();
+    if (!pivot) return arm.startAngle;
+    const rawAngle = pointerAngle(event, pivot.x, pivot.y);
     let angle = 180 - rawAngle;
     if (angle > 180) angle -= 360;
     if (angle < -180) angle += 360;
@@ -519,9 +562,9 @@ export function Turntable({
       mode: 'tonearm',
       pointerId: event.pointerId,
       wasPlaying: isPlaying,
-      pointerAngleOffset: tonearmAngleFromProgress(progress) - tonearmAngleFromPointer(event),
+      pointerAngleOffset: arm.angleForProgress(progress) - tonearmAngleFromPointer(event),
     };
-    setTonearmDragAngle(tonearmAngleFromProgress(progress));
+    setTonearmDragAngle(arm.angleForProgress(progress));
     clearReleasedTonearm();
     setLifted(true);
     updatePreviewProgress(progress);
@@ -534,11 +577,11 @@ export function Turntable({
     event.preventDefault();
     const nextAngle = clamp(
       tonearmAngleFromPointer(event) + interaction.pointerAngleOffset,
-      Math.min(TONEARM_START_ANGLE, TONEARM_END_ANGLE),
-      Math.max(TONEARM_START_ANGLE, TONEARM_END_ANGLE),
+      Math.min(arm.startAngle, arm.endAngle),
+      Math.max(arm.startAngle, arm.endAngle),
     );
     setTonearmDragAngle(nextAngle);
-    updatePreviewProgress(tonearmProgressFromAngle(nextAngle));
+    updatePreviewProgress(arm.progressForAngle(nextAngle));
   };
 
   const finishTonearmPointer = event => {
@@ -561,7 +604,7 @@ export function Turntable({
   const cancelPointer = event => {
     if (interactionRef.current?.pointerId !== event.pointerId) return;
     interactionRef.current = null;
-    clearLongPress(); cancelInertia(); clearRecordDragPreview();
+    clearLongPress(); cancelInertia(); clearRecordDragPreview(); window.clearTimeout(scratchHoldRef.current);
     updatePreviewProgress(null); setTonearmDragAngle(null); setDragMode(null); setLifted(false);
     onScratchEnd?.();
   };
@@ -592,8 +635,75 @@ export function Turntable({
     onSeek?.(target);
   };
 
+  // Solve the arm's sweep from the rendered deck so the stylus tracks the grooves at every
+  // breakpoint. Layouts change the arm length, pivot and record size, so fixed angles land the
+  // stylus short of the outer groove or well before the label.
+  useEffect(() => {
+    const deck = deckRef.current;
+    if (!deck) return undefined;
+    // Reads the deck's real geometry. Returns null if anything needed is missing.
+    const read = () => {
+      const vinyl = vinylRef.current;
+      const label = deck.querySelector('.turntable__label');
+      const stylus = deck.querySelector('.turntable__stylus');
+      const pivot = tonearmPivot();
+      if (!vinyl || !label || !stylus || !pivot) return null;
+      const vinylRect = vinyl.getBoundingClientRect();
+      const stylusRect = stylus.getBoundingClientRect();
+      const centerX = vinylRect.left + (vinylRect.width / 2);
+      const centerY = vinylRect.top + (vinylRect.height / 2);
+      const recordRadius = vinyl.offsetWidth / 2;
+      const labelRadius = label.offsetWidth / 2;
+      const stylusX = stylusRect.left + (stylusRect.width / 2);
+      const stylusY = stylusRect.top + (stylusRect.height / 2);
+      // The stylus is mounted on the headshell, slightly off the arm's own axis. Compare the
+      // arm's rendered rotation with the stylus's actual bearing and fold the difference in;
+      // otherwise the needle lands a few percent of the radius away from the requested groove.
+      const rendered = new DOMMatrixReadOnly(window.getComputedStyle(tonearmRef.current || deck).transform);
+      const renderedAngle = Math.atan2(-rendered.b, rendered.a) * RADIANS_TO_DEGREES;
+      const stylusBearing = Math.atan2(stylusY - pivot.y, pivot.x - stylusX) * RADIANS_TO_DEGREES;
+      return {
+        pivotToCenter: Math.hypot(pivot.x - centerX, pivot.y - centerY),
+        armLength: Math.hypot(pivot.x - stylusX, pivot.y - stylusY),
+        centerBearing: (Math.atan2(centerY - pivot.y, pivot.x - centerX) * RADIANS_TO_DEGREES) - (stylusBearing - renderedAngle),
+        outerRadius: recordRadius * 0.93,
+        innerRadius: labelRadius + ((recordRadius - labelRadius) * 0.08),
+      };
+    };
+    const measure = () => {
+      if (interactionRef.current) return;
+      // Start from the stylesheet's arm length so a resize never compounds an earlier adjustment.
+      deck.style.removeProperty('--tonearm-width');
+      let inputs = read();
+      const arm = tonearmRef.current;
+      if (inputs && arm) {
+        // A rigid arm reaches no closer than |pivot distance - arm length| to the record centre.
+        // On narrow layouts the stylesheet's arm is too short to reach the run-out, so the needle
+        // would stop partway across the grooves. Lengthen it by exactly the shortfall (capped).
+        const shortfall = (inputs.pivotToCenter - inputs.innerRadius) - inputs.armLength;
+        if (shortfall > 0.5) {
+          const boost = Math.min(shortfall + 1, arm.offsetWidth * MAX_ARM_STRETCH);
+          deck.style.setProperty('--tonearm-width', `${arm.offsetWidth + boost}px`);
+          inputs = read() || inputs;
+        }
+      }
+      const next = inputs ? createTonearmGeometry(inputs) : null;
+      // Keep the current object when nothing moved, so a resize does not re-render the deck.
+      setArmGeometry(previous => (previous && next
+        && sameAngle(previous.startAngle, next.startAngle)
+        && sameAngle(previous.endAngle, next.endAngle)
+        && sameAngle(previous.liftedAngle, next.liftedAngle) ? previous : next));
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    observer?.observe(deck);
+    return () => observer?.disconnect();
+    // The pivot helper only reads refs and CSS, so it is not a dependency.
+  }, [hasCurrentSong]);
+
   useEffect(() => () => {
     clearLongPress();
+    window.clearTimeout(scratchHoldRef.current);
     motorInertiaRef.current = null;
     if (releasedTonearmResetRef.current) window.clearTimeout(releasedTonearmResetRef.current);
   }, []);
