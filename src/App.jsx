@@ -1560,6 +1560,7 @@ function App() {
         />
         <ImportStatusPanel jobs={importJobs} embeddingJobs={embeddingJobs} />
 
+        {(view === VIEWS.HOME || view === VIEWS.DOWNLOADS) && (
         <section className="drive-summary" aria-label="Drive storage summary">
           <div>
             <span className="drive-summary__label">Drive folder</span>
@@ -1586,6 +1587,7 @@ function App() {
             <span>Storage</span>
           </button>
         </section>
+        )}
 
         {view === VIEWS.HOME && (
           <>

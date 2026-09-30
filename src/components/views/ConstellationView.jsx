@@ -6,10 +6,19 @@ import { getSongGenres, getSongMoods } from '../../services/exploreService.js';
 const MAX_CLUSTER_SONGS = 1200;
 const CLUSTER_COLORS = ['#78a7ff', '#c48cff', '#55d6be', '#ffb86b', '#ff7f9f', '#e7df78', '#74d99f', '#a7a7ff'];
 
+// Frames the 5th-95th percentile box of each axis, so the cloud sits centred
+// and a few outliers can't squash everything into a corner.
 function normalisePoints(songs) {
   if (!songs.length) return [];
-  const max = songs.reduce((value, song) => Math.max(value, Math.abs(song.coordX || 0), Math.abs(song.coordY || 0), Math.abs(song.coordZ || 0)), 0) || 1;
-  return songs.map(song => ({ ...song, x: (song.coordX || 0) / max, y: (song.coordY || 0) / max, z: (song.coordZ || 0) / max }));
+  const axes = ['coordX', 'coordY', 'coordZ'].map(axis => {
+    const values = songs.map(song => song[axis] || 0).sort((a, b) => a - b);
+    const low = values[Math.floor((values.length - 1) * 0.05)];
+    const high = values[Math.ceil((values.length - 1) * 0.95)];
+    return { axis, centre: (low + high) / 2, spread: (high - low) / 2 || 1 };
+  });
+  const clamp = value => Math.max(-1.25, Math.min(1.25, value));
+  const [x, y, z] = axes.map(({ axis, centre, spread }) => song => clamp(((song[axis] || 0) - centre) / spread));
+  return songs.map(song => ({ ...song, x: x(song), y: y(song), z: z(song) }));
 }
 
 const GENERIC_LABELS = new Set(['Open format', 'Discovery']);
@@ -88,8 +97,9 @@ function createPointProgram(gl) {
     void main() {
       float edge = distance(gl_PointCoord, vec2(0.5));
       if (edge > 0.5) discard;
-      float glow = 1.0 - smoothstep(0.18, 0.5, edge);
-      gl_FragColor = vec4(v_color, glow);
+      float core = 1.0 - smoothstep(0.12, 0.22, edge);
+      float glow = (1.0 - smoothstep(0.18, 0.5, edge)) * 0.55;
+      gl_FragColor = vec4(mix(v_color, vec3(1.0), core * 0.35), max(core, glow));
     }
   `);
   const program = gl.createProgram();
@@ -177,7 +187,8 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       bindAttribute(colorBuffer, colorLocation, colors, 3);
       bindAttribute(sizeBuffer, sizeLocation, sizes, 1);
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      // Normal alpha blending keeps dense clusters their own colour instead of saturating to white.
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.clearColor(0.025, 0.03, 0.065, 1);
       let frame;
       const render = () => {
@@ -216,12 +227,18 @@ export function ConstellationView({ songs = [], currentSong, onPlaySong, onAddTo
       if (!canvas || !wrapper) return;
       const rect = wrapper.getBoundingClientRect();
       const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
-      canvas.width = Math.max(320, Math.floor(rect.width * pixelRatio));
-      canvas.height = Math.max(380, Math.floor((rect.height || 520) * pixelRatio));
+      canvas.width = Math.max(1, Math.floor(rect.width * pixelRatio));
+      canvas.height = Math.max(1, Math.floor(rect.height * pixelRatio));
     };
     updateSize();
-    window.addEventListener('resize', updateSize);
-    return () => window.removeEventListener('resize', updateSize);
+    // Observe the wrapper, not the window: layout changes (sidebar, legend wrap) resize it too.
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(updateSize) : null;
+    if (observer && wrapperRef.current) observer.observe(wrapperRef.current);
+    else window.addEventListener('resize', updateSize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateSize);
+    };
   }, []);
 
   const findHovered = event => {

@@ -788,3 +788,48 @@ select:focus-visible,
     animation: none;
   }
 }
+
+/* Phones: the Drive summary becomes one swipeable row instead of filling the first screen. */
+@media (max-width: 760px) {
+  .drive-summary {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    gap: 8px;
+    margin: 0 -16px 16px;
+    padding: 4px 16px 12px;
+  }
+  .drive-summary::-webkit-scrollbar { display: none; }
+  .drive-summary > div,
+  .drive-summary__button {
+    flex: 0 0 auto;
+    min-width: 128px;
+    min-height: 0;
+    padding: 8px 12px;
+    scroll-snap-align: start;
+  }
+}
+
+/* Galaxy canvas: a fixed-height stage the canvas fills, so its pixel buffer
+   (width x devicePixelRatio) can never stretch the layout on retina screens. */
+.constellation-canvas-wrapper { flex: none; height: clamp(360px, 62vh, 720px); min-height: 0; }
+.constellation-canvas { position: absolute; inset: 0; }
+
+@media (max-width: 760px) {
+  /* One swipeable line per filter group instead of a wall of wrapped chips. */
+  .explore-filter-row,
+  .constellation-cluster-legend {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin-inline: -16px;
+    padding: 4px 16px 8px;
+  }
+  .explore-filter-row::-webkit-scrollbar,
+  .constellation-cluster-legend::-webkit-scrollbar { display: none; }
+  .explore-filter-row > span { width: auto; flex: none; }
+  .explore-filter-row > button,
+  .constellation-cluster-chip { flex: none; white-space: nowrap; }
+  .constellation-canvas-wrapper { height: 58vh; }
+}
