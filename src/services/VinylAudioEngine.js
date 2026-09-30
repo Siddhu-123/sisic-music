@@ -706,8 +706,12 @@ export class VinylAudioEngine {
     this._applyOutputVolume();
   }
 
-  setFade(value, seconds = 0) {
-    return this.graph.setFade(value, seconds);
+  setFade(value, seconds = 0, options) {
+    return this.graph.setFade(value, seconds, options);
+  }
+
+  setBassCut(db, seconds = 0) {
+    return this.graph.setBassCut(db, seconds);
   }
 
   handleVisibilityChange(hidden) {

@@ -10,6 +10,7 @@ import { cleanImportedFilename } from '../importIdentity.js';
 import { tokenExpiryFromResponse } from './driveAuth.js';
 import { getKnownDurationSeconds } from './downloadPolicy.js';
 import { getDriveAudioStreamUrl } from './driveStream.js';
+import { sanitizeRhythm } from './djBeatMath.js';
 import {
   isAuthWorkerConfigured,
   getStoredRefreshToken,
@@ -230,6 +231,7 @@ function normalizeSongIndexEntry(file = {}, item = null) {
     djMetadataUpdatedAt: String(normalizedItem?.djMetadataUpdatedAt || appProperties.sisicDjMetadataUpdatedAt || file.djMetadataUpdatedAt || ''),
     djAnalysisStatus: String(normalizedItem?.djAnalysisStatus || appProperties.sisicDjAnalysisStatus || file.djAnalysisStatus || ''),
     djAudioWindows: normalizedItem?.djAudioWindows || file.djAudioWindows || [],
+    djRhythm: sanitizeRhythm(normalizedItem?.djRhythm ?? file.djRhythm),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -806,14 +808,14 @@ export class GoogleDriveService {
     const previousSongs = Array.isArray(previous.songs) ? previous.songs : [];
     const previousByKey = new Map(previousSongs.filter(item => item.songKey).map(item => [item.songKey, item]));
     const previousByFileId = new Map(previousSongs.filter(item => item.driveFileId).map(item => [item.driveFileId, item]));
-    const metadataFields = ['description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource', 'metadataUpdatedAt', 'bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus', 'djAudioWindows'];
+    const metadataFields = ['description', 'lyrics', 'genre', 'releaseDate', 'coverArtUrl', 'metadataStatus', 'metadataSource', 'metadataUpdatedAt', 'bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus', 'djAudioWindows', 'djRhythm'];
     const songs = audioFiles.map(file => {
       const entry = normalizeSongIndexEntry(file);
       const previousEntry = previousByKey.get(entry.songKey) || previousByFileId.get(entry.driveFileId);
       const newerAnalysis = (Date.parse(entry.djMetadataUpdatedAt) || 0) > (Date.parse(previousEntry?.djMetadataUpdatedAt) || 0);
       return previousEntry
         ? { ...entry, ...Object.fromEntries(metadataFields.filter(field => Object.prototype.hasOwnProperty.call(previousEntry, field)
-          && (!newerAnalysis || !['bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus', 'djAudioWindows'].includes(field))).map(field => [field, previousEntry[field]])) }
+          && (!newerAnalysis || !['bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus', 'djAudioWindows', 'djRhythm'].includes(field))).map(field => [field, previousEntry[field]])) }
         : entry;
     }).sort((a, b) => a.songKey.localeCompare(b.songKey));
     const body = indexBody('songs', songs, previous);

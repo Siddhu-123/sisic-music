@@ -5,6 +5,9 @@ import {
   buildSkipObservations,
   chooseDjTransitionTime,
   normaliseMusicalKey,
+  pickMixBars,
+  planDjMix,
+  rememberDjTransition,
   predictSkipProbability,
   rankDjCandidates,
   scoreDjTransition,
@@ -85,4 +88,83 @@ test('DJ ranking reuses contextual candidates, honors compatibility, and falls b
   const fallback = chooseDjCandidate([{ song: distant, score: 1, transition: scoreDjTransition(source, distant) }]);
   assert.equal(fallback.song.songKey, 'distant');
   assert.equal(fallback.fallback, true);
+});
+
+const rhythm = (bpm, extra = {}) => ({ rhythmStatus: 'ready', bpm, firstDownbeat: 0.5, barBeats: 4, gridCoverage: 0.95, downbeatAgreement: 0.9, introBars: 8, outroBars: 8, outroStart: 184.5, abruptEnd: false, ...extra });
+const gridded = (songKey, bpm, key, extra) => ({ songKey, track: songKey, artist: songKey, driveFileId: songKey, bpm, musicalKey: key, djRhythm: rhythm(bpm, extra) });
+
+test('with beat grids, tempo is matched by stretch and octave, and the key is judged as it will be heard', () => {
+  const near = scoreDjTransition(gridded('a', 128, 'C major'), gridded('b', 130, 'C major'));
+  assert.equal(near.beatSync, true);
+  assert.equal(near.acceptable, true);
+  assert.ok(Math.abs(near.tempoRatio - 128 / 130) < 1e-9);
+
+  const ballad = scoreDjTransition(gridded('a', 140, 'A minor'), gridded('b', 70, 'A minor'));
+  assert.equal(ballad.tempoOctave, 1, 'a 70 bpm track locks to a 140 bpm one at two beats per beat');
+  assert.equal(ballad.acceptable, true);
+  assert.equal(ballad.tempoDelta, 0);
+
+  assert.equal(scoreDjTransition(gridded('a', 128, 'C major'), gridded('b', 90, 'C major')).acceptable, false);
+
+  // +1 semitone of speed-up turns C major into C# major: matching a C# major track is then perfect.
+  const shifted = scoreDjTransition(gridded('a', 127.2, 'C# major'), gridded('b', 120, 'C major'));
+  assert.ok(Math.abs(shifted.keyShiftSemitones - 1) < 0.01 || shifted.keyShiftSemitones === 1);
+  assert.equal(shifted.keyScore, 1);
+  const legacy = scoreDjTransition({ ...source, bpm: 127.2, musicalKey: 'C# major', djRhythm: undefined }, { ...compatible, bpm: 120, musicalKey: 'C major', djRhythm: undefined });
+  assert.ok(legacy.keyScore < 1, 'without a grid there is no rate change, so the keys stay apart');
+});
+
+test('a rubato track falls back to the v1 whole-track tempo instead of pretending to have a grid', () => {
+  const rubato = gridded('b', 124, 'G major', { gridCoverage: 0.4 });
+  const result = scoreDjTransition(gridded('a', 120, 'C major'), rubato);
+  assert.equal(result.beatSync, false);
+  assert.equal(result.tempoDelta, 4, 'the plain bpm difference, as in DJ mode v1');
+});
+
+test('a beat-synced plan leaves on a bar line, at the outro, for a whole number of bars', () => {
+  const out = gridded('a', 120, 'C major');
+  const incoming = gridded('b', 122, 'C major');
+  const transition = scoreDjTransition(out, incoming, 60);
+  const plan = planDjMix({ source: out, candidate: incoming, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 120 }, transition, random: () => 0.99 });
+  assert.equal(plan.beatSync, true);
+  assert.ok(Math.abs(((plan.transitionAtSeconds - 0.5) / 2) % 1) < 1e-9 || Math.abs(((plan.transitionAtSeconds - 0.5) / 2) % 1 - 1) < 1e-9, 'on a bar line (2 s bars)');
+  assert.equal(plan.crossfadeSeconds, plan.mixBars * 2);
+  assert.ok(plan.transitionAtSeconds + plan.crossfadeSeconds <= 120 + 1e-9, 'the mix is finished by the time a skip is predicted');
+  assert.ok(plan.transitionAtSeconds >= 61);
+
+  const noSkip = planDjMix({ source: out, candidate: incoming, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 78 + 400 }, transition, random: () => 0.5 });
+  assert.equal(noSkip.transitionAtSeconds, 184.5, 'with no earlier skip it waits for the outro');
+  assert.equal(noSkip.outroAligned, true);
+  assert.ok(noSkip.transitionAtSeconds + noSkip.crossfadeSeconds <= 200);
+});
+
+test('a track that ends abruptly gets a short blend, and a mix that cannot fit falls back to a timed crossfade', () => {
+  const abrupt = gridded('a', 120, 'C major', { abruptEnd: true, outroBars: 0, outroStart: 190 });
+  const incoming = gridded('b', 120, 'C major');
+  const transition = scoreDjTransition(abrupt, incoming, 60);
+  const plan = planDjMix({ source: abrupt, candidate: incoming, positionSeconds: 60, duration: 200, prediction: { positionSeconds: 60, predictedSkipAtSeconds: 400 }, transition, random: () => 0 });
+  assert.equal(plan.beatSync, true);
+  assert.ok(plan.mixBars <= 2);
+
+  const tooLate = planDjMix({ source: abrupt, candidate: incoming, positionSeconds: 199, duration: 200, prediction: { positionSeconds: 199, predictedSkipAtSeconds: 400 }, transition, fadeSeconds: 4 });
+  assert.equal(tooLate.beatSync, false);
+  assert.equal(tooLate.transitionAtSeconds, null, 'no room left');
+
+  const plain = planDjMix({ source, candidate: compatible, positionSeconds: 30, duration: 180, prediction: { positionSeconds: 30, predictedSkipAtSeconds: 60 }, transition: scoreDjTransition(source, compatible), fadeSeconds: 4 });
+  assert.equal(plain.beatSync, false);
+  assert.equal(plain.crossfadeSeconds, 4);
+  assert.equal(plain.transitionAtSeconds, chooseDjTransitionTime({ positionSeconds: 30, predictedSkipAtSeconds: 60 }, 180, 4, {}));
+});
+
+test('mix length rotates so consecutive transitions are not predictable, and never exceeds what fits', () => {
+  assert.equal(pickMixBars(1), 2);
+  for (let index = 0; index < 50; index += 1) assert.ok(pickMixBars(4, {}, Math.random) <= 4);
+  const seen = new Set();
+  for (let index = 0; index < 60; index += 1) seen.add(pickMixBars(16, { mixBars: [8] }, Math.random));
+  assert.ok(!seen.has(8), 'the length used last time is avoided when others fit');
+  assert.ok(seen.has(16) && seen.has(4));
+  assert.equal(pickMixBars(2, { mixBars: [2] }), 2, 'with a single option it repeats rather than fail');
+  const history = rememberDjTransition({ candidateKeys: ['x'], timingBuckets: [10] }, 'y', 33, 8);
+  assert.deepEqual(history.mixBars, [8]);
+  assert.deepEqual(rememberDjTransition(history, 'z', 70, 4).mixBars, [4, 8]);
 });

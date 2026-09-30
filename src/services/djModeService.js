@@ -4,8 +4,19 @@ import {
   getPlaybackContext,
   rankContextualSongs,
 } from './contextualRecommendationService.js';
+import {
+  MAX_TEMPO_STRETCH,
+  barBeatsOf,
+  beatSeconds,
+  downbeatsBetween,
+  hasBeatGrid,
+  mixBars,
+  semitonesForRate,
+  tempoMatch,
+} from './djBeatMath.js';
+import { cosineSimilarity, getSongEmbedding } from './tasteEmbeddingService.js';
 
-export const DJ_METADATA_VERSION = 1;
+export const DJ_METADATA_VERSION = 2;
 export const DJ_SKIP_HORIZON_SECONDS = 18;
 export const DJ_SKIP_THRESHOLD = 0.62;
 export const DJ_MAX_TEMPO_DELTA = 8;
@@ -51,10 +62,12 @@ export function normaliseMusicalKey(value) {
   return { notation: `${canonicalRoot} ${mode}`, root: PITCH_CLASSES.indexOf(canonicalRoot), mode };
 }
 
-function harmonicCompatibility(sourceKey, candidateKey) {
+function harmonicCompatibility(sourceKey, candidateKey, candidateSemitones = 0) {
   const source = normaliseMusicalKey(sourceKey);
-  const candidate = normaliseMusicalKey(candidateKey);
-  if (!source || !candidate) return { available: false, score: 0, compatible: true };
+  const parsed = normaliseMusicalKey(candidateKey);
+  if (!source || !parsed) return { available: false, score: 0, compatible: true };
+  // Playing a track faster or slower on a turntable moves its pitch, so compare the key it will be heard in.
+  const candidate = candidateSemitones ? { ...parsed, root: (parsed.root + Math.round(candidateSemitones) + 120) % 12 } : parsed;
   const distance = Math.min((source.root - candidate.root + 12) % 12, (candidate.root - source.root + 12) % 12);
   const same = distance === 0 && source.mode === candidate.mode;
   const relative = (source.mode !== candidate.mode && ((source.mode === 'major' && (candidate.root - source.root + 12) % 12 === 9) || (source.mode === 'minor' && (candidate.root - source.root + 12) % 12 === 3)));
@@ -172,36 +185,76 @@ function energyAt(song, position) {
 }
 
 export function transitionCacheKey(source, candidate, positionSeconds) {
-  const fingerprint = [source?.bpm, source?.musicalKey, source?.keyConfidence, energyAt(source, positionSeconds), source?.loudnessLufs, source?.djMetadataVersion, candidate?.bpm, candidate?.musicalKey, candidate?.keyConfidence, energyAt(candidate, 0), candidate?.loudnessLufs, candidate?.djMetadataVersion].map(value => value ?? '').join('|');
+  const fingerprint = [source?.bpm, source?.musicalKey, source?.keyConfidence, energyAt(source, positionSeconds), source?.loudnessLufs, source?.djMetadataVersion, candidate?.bpm, candidate?.musicalKey, candidate?.keyConfidence, energyAt(candidate, 0), candidate?.loudnessLufs, candidate?.djMetadataVersion, source?.djRhythm?.bpm, source?.djRhythm?.outroBpm, source?.djRhythm?.gridCoverage, candidate?.djRhythm?.bpm, candidate?.djRhythm?.introBpm, candidate?.djRhythm?.gridCoverage].map(value => value ?? '').join('|');
   return `${keyOf(source)}::${keyOf(candidate)}::${fingerprint}`;
 }
 
-export function scoreDjTransition(source = {}, candidate = {}, positionSeconds) {
-  const sourceTempo = normaliseTempo(source.bpm);
-  const candidateTempo = normaliseTempo(candidate.bpm);
-  const tempoDelta = sourceTempo && candidateTempo ? Math.abs(sourceTempo - candidateTempo) : null;
-  const tempoScore = tempoDelta == null ? 0 : clamp(1 - tempoDelta / DJ_MAX_TEMPO_DELTA);
+// Tempo of each track at the moment of the mix. With a beat grid the local tempo at the outro and
+// intro is used (a track can drift), otherwise the single whole-track bpm from the v1 analysis.
+function tempoPair(source, candidate, positionSeconds) {
+  const out = source.djRhythm;
+  const incoming = candidate.djRhythm;
+  if (hasBeatGrid(out) && hasBeatGrid(incoming)) {
+    const nearOutro = Number.isFinite(positionSeconds) && out.outroStart != null && positionSeconds >= out.outroStart - 20;
+    return { grid: true, out: nearOutro && out.outroBpm ? out.outroBpm : out.bpm, incoming: incoming.introBpm || incoming.bpm };
+  }
+  return { grid: false, out: normaliseTempo(source.bpm), incoming: normaliseTempo(candidate.bpm) };
+}
+
+export function scoreDjTransition(source = {}, candidate = {}, positionSeconds, { similarity = null } = {}) {
+  const pair = tempoPair(source, candidate, positionSeconds);
+  const match = pair.grid ? tempoMatch(pair.out, pair.incoming) : null;
+  const sourceTempo = pair.out;
+  const candidateTempo = pair.incoming;
+  const tempoDelta = sourceTempo && candidateTempo
+    ? Math.abs(sourceTempo - (match ? candidateTempo * (2 ** match.octave) : candidateTempo))
+    : null;
+  const tempoScore = tempoDelta == null ? 0 : match ? clamp(1 - Math.abs(match.stretch) / MAX_TEMPO_STRETCH) : clamp(1 - tempoDelta / DJ_MAX_TEMPO_DELTA);
+  const tempoAcceptable = match ? match.matchable : tempoDelta != null && tempoDelta <= DJ_MAX_TEMPO_DELTA;
+  const shift = match?.matchable ? semitonesForRate(match.ratio) : 0;
   const key = harmonicCompatibility(source.keyConfidence != null && source.keyConfidence < .1 ? null : source.musicalKey,
-    candidate.keyConfidence != null && candidate.keyConfidence < .1 ? null : candidate.musicalKey);
+    candidate.keyConfidence != null && candidate.keyConfidence < .1 ? null : candidate.musicalKey, shift);
   const sourceEnergy = energyAt(source, positionSeconds);
   const candidateEnergy = energyAt(candidate, 0);
   const sourceLoudness = numberOrNull(source.loudnessLufs);
   const candidateLoudness = numberOrNull(candidate.loudnessLufs);
   const energyScore = sourceEnergy == null || candidateEnergy == null ? null : clamp(1 - Math.abs(sourceEnergy - candidateEnergy) / .35);
   const loudnessScore = sourceLoudness == null || candidateLoudness == null ? null : clamp(1 - Math.abs(sourceLoudness - candidateLoudness) / 8);
+  const similarityScore = similarity == null ? null : clamp(similarity);
   const available = [tempoDelta != null, key.available, energyScore != null, loudnessScore != null].filter(Boolean).length;
+  // Timbre/style similarity is a soft preference (Kell & Tzanetakis, ISMIR 2013): it never makes a
+  // mix acceptable on its own, and it is left out entirely when no comparable vectors exist.
   const weighted = [
     [tempoDelta != null, tempoScore, .52],
     [key.available, key.score, .28],
     [energyScore != null, energyScore, .12],
     [loudnessScore != null, loudnessScore, .08],
+    [similarityScore != null, similarityScore, .14],
   ].filter(([present]) => present);
   const score = weighted.length ? weighted.reduce((sum, [, value, weight]) => sum + value * weight, 0) / weighted.reduce((sum, [, , weight]) => sum + weight, 0) : 0;
-  const acceptable = tempoDelta != null && tempoDelta <= DJ_MAX_TEMPO_DELTA && (!key.available || key.compatible);
-  return { cacheKey: transitionCacheKey(source, candidate, positionSeconds), sourceSongKey: keyOf(source), candidateSongKey: keyOf(candidate), score, acceptable, available, tempoDelta, tempoScore, keyScore: key.available ? key.score : null, harmonicCompatible: key.available ? key.compatible : null, energyScore, loudnessScore, metadataVersion: DJ_METADATA_VERSION };
+  const acceptable = tempoAcceptable && (!key.available || key.compatible);
+  return {
+    cacheKey: transitionCacheKey(source, candidate, positionSeconds), sourceSongKey: keyOf(source), candidateSongKey: keyOf(candidate),
+    score, acceptable, available, tempoDelta, tempoScore, keyScore: key.available ? key.score : null, harmonicCompatible: key.available ? key.compatible : null,
+    energyScore, loudnessScore, similarityScore,
+    beatSync: Boolean(match?.matchable), tempoRatio: match?.matchable ? match.ratio : 1, tempoOctave: match?.octave ?? 0, keyShiftSemitones: shift,
+    metadataVersion: DJ_METADATA_VERSION,
+  };
 }
 
-export function rankDjCandidates({ source, songs = [], playbackEvents = [], likedSongKeys = [], transitionScores = new Map(), history = {}, positionSeconds, now = Date.now(), currentContext = getPlaybackContext(now, typeof navigator === 'undefined' ? '' : navigator.userAgent) } = {}) {
+// Style similarity in [0, 1] from the recommender's vectors. Learned-audio (timbre) vectors can be
+// supplied by the caller through `similarityFor`; without them this is tag-space similarity.
+function styleSimilarity(source, candidate) {
+  try {
+    const a = getSongEmbedding(source);
+    const b = getSongEmbedding(candidate);
+    return a && b ? (cosineSimilarity(a, b) + 1) / 2 : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rankDjCandidates({ source, songs = [], similarityFor = styleSimilarity, playbackEvents = [], likedSongKeys = [], transitionScores = new Map(), history = {}, positionSeconds, now = Date.now(), currentContext = getPlaybackContext(now, typeof navigator === 'undefined' ? '' : navigator.userAgent) } = {}) {
   const sourceKey = keyOf(source);
   const profile = buildContextualTasteProfile(songs, playbackEvents, { now, currentContext, likedSongKeys });
   const contextual = rankContextualSongs(songs.filter(song => song.driveFileId), {
@@ -212,7 +265,7 @@ export function rankDjCandidates({ source, songs = [], playbackEvents = [], like
     limit: 60,
   });
   return contextual.map((song, index) => {
-    const transition = transitionScores.get(transitionCacheKey(source, song, positionSeconds)) || scoreDjTransition(source, song, positionSeconds);
+    const transition = transitionScores.get(transitionCacheKey(source, song, positionSeconds)) || scoreDjTransition(source, song, positionSeconds, { similarity: similarityFor(source, song) });
     return { song, contextualRank: index, contextualScore: song.tasteScore ?? song.recommendationScore ?? 0, transition, score: (song.tasteScore ?? song.recommendationScore ?? 0) + transition.score * .34 };
   }).sort((a, b) => b.score - a.score || a.contextualRank - b.contextualRank);
 }
@@ -246,10 +299,75 @@ export function chooseDjTransitionTime(prediction, duration, fadeSeconds, histor
   return earliest;
 }
 
-export function rememberDjTransition(history = {}, candidateSongKey, transitionAtSeconds) {
+export function rememberDjTransition(history = {}, candidateSongKey, transitionAtSeconds, mixBarsUsed = null) {
   const timingBucket = Math.max(0, Math.floor(Number(transitionAtSeconds || 0) / 5) * 5);
   return {
+    ...(mixBarsUsed ? { mixBars: [mixBarsUsed, ...(history.mixBars || [])].slice(0, 3) } : { mixBars: history.mixBars || [] }),
     candidateKeys: [candidateSongKey, ...(history.candidateKeys || []).filter(key => key !== candidateSongKey)].slice(0, 6),
     timingBuckets: [timingBucket, ...(history.timingBuckets || []).filter(bucket => bucket !== timingBucket)].slice(0, 4),
+  };
+}
+
+const MIX_BAR_CHOICES = [2, 4, 8, 16];
+
+/**
+ * How long this mix lasts, in bars, chosen from what both tracks' quiet ends allow. Rotates away from
+ * the length used last time so consecutive transitions do not share a fingerprint (the listener
+ * should not be able to predict the mix), while favouring the longer, smoother blends.
+ */
+export function pickMixBars(maxBars, history = {}, random = Math.random) {
+  const allowed = MIX_BAR_CHOICES.filter(bars => bars <= maxBars);
+  if (!allowed.length) return 2;
+  const recent = new Set((history.mixBars || []).slice(0, 1));
+  const fresh = allowed.filter(bars => !recent.has(bars));
+  const pool = fresh.length ? fresh : allowed;
+  const weights = pool.map(bars => Math.sqrt(bars));
+  let pick = random() * weights.reduce((sum, weight) => sum + weight, 0);
+  for (let index = 0; index < pool.length; index += 1) {
+    pick -= weights[index];
+    if (pick <= 0) return pool[index];
+  }
+  return pool.at(-1);
+}
+
+/**
+ * Plans when to leave the current song and how to blend into `candidate`.
+ *
+ * With a trustworthy beat grid on both songs and a tempo within a pitch-fader's reach, the mix is
+ * beat-synced: it starts on a bar line of the outgoing song (its outro when it has one, or earlier if
+ * a skip is predicted), runs a whole number of bars, and the incoming song is rate-matched. Otherwise
+ * it falls back to the plain time-based crossfade of DJ mode v1. `transitionAtSeconds` is null when
+ * there is no room left in the song.
+ */
+export function planDjMix({ source, candidate, positionSeconds, duration, prediction, transition, history = {}, fadeSeconds = 4, random = Math.random }) {
+  const out = source?.djRhythm;
+  const incoming = candidate?.djRhythm;
+  const synced = Boolean(transition?.beatSync) && hasBeatGrid(out) && hasBeatGrid(incoming);
+  if (!synced) {
+    return { beatSync: false, transitionAtSeconds: chooseDjTransitionTime(prediction, duration, fadeSeconds, history), crossfadeSeconds: fadeSeconds };
+  }
+  const outBeat = beatSeconds(out);
+  const barSeconds = outBeat * barBeatsOf(out);
+  const abrupt = out.abruptEnd === true || out.outroBars === 0;
+  const bars = pickMixBars(mixBars({ outroBars: abrupt ? 0 : out.outroBars, introBars: incoming.introBars, wantedBars: 16 }), history, random);
+  const mixSeconds = bars * barSeconds;
+  const predictedSkip = prediction?.predictedSkipAtSeconds;
+  const latestByEnd = duration - mixSeconds - 0.5;
+  const latestBySkip = Number.isFinite(predictedSkip) ? predictedSkip - mixSeconds : Infinity;
+  // Prefer leaving where the outro begins; never later than the skip we are trying to beat.
+  const wanted = Math.min(Number.isFinite(out.outroStart) && !abrupt ? out.outroStart : Infinity, latestBySkip, latestByEnd);
+  const earliest = positionSeconds + 1;
+  const bars_ = downbeatsBetween(out, earliest, Math.max(earliest, wanted));
+  const recent = new Set(history.timingBuckets || []);
+  const eligible = bars_.filter(time => time <= latestByEnd);
+  const fresh = [...eligible].reverse().find(time => !recent.has(Math.floor(time / 5) * 5));
+  const transitionAtSeconds = fresh ?? eligible.at(-1) ?? null;
+  if (transitionAtSeconds == null) {
+    return { beatSync: false, transitionAtSeconds: chooseDjTransitionTime(prediction, duration, fadeSeconds, history), crossfadeSeconds: fadeSeconds };
+  }
+  return {
+    beatSync: true, transitionAtSeconds, crossfadeSeconds: mixSeconds, mixBars: bars,
+    tempoRatio: transition.tempoRatio, tempoOctave: transition.tempoOctave, keyShiftSemitones: transition.keyShiftSemitones,
+    outroAligned: Number.isFinite(out.outroStart) && Math.abs(transitionAtSeconds - out.outroStart) < barSeconds / 2,
   };
 }

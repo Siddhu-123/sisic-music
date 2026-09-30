@@ -7,12 +7,15 @@ import {
   createSoftLimiterCurve,
   headroomDb,
 } from './eqMath.js';
+import { equalPowerCurve } from './djBeatMath.js';
 
 export { EQ_FREQUENCIES, EQ_PRESETS };
 
 // Parameter changes glide over a few time constants instead of jumping, which
 // removes the clicks ("zipper noise") a step change makes while a slider is dragged.
 const SMOOTHING_SECONDS = 0.02;
+
+const BASS_SWAP_FREQUENCY = 200;
 
 const flatGains = () => EQ_FREQUENCIES.map(() => 0);
 
@@ -23,6 +26,8 @@ export class AudioGraphManager {
     this.preampNode = null;
     this.masterGainNode = null;
     this.fadeGainNode = null;
+    this.bassNode = null;
+    this.bassCutDb = 0;
     this.limiterNode = null;
     this.filterNodes = [];
     this.analyserNode = null;
@@ -109,7 +114,7 @@ export class AudioGraphManager {
       this.limiterNode.curve = createSoftLimiterCurve();
       this.limiterNode.oversample = 'none';
 
-      // Source -> preamp -> EQ -> volume -> crossfade -> limiter -> analyser -> output.
+      // Source -> preamp -> EQ -> volume -> crossfade -> DJ bass shelf -> limiter -> analyser -> output.
       let currentNode = this.sourceNode;
       currentNode.connect(this.preampNode);
       currentNode = this.preampNode;
@@ -120,7 +125,13 @@ export class AudioGraphManager {
       currentNode.connect(this.masterGainNode);
       this.fadeGainNode = ctx.createGain();
       this.masterGainNode.connect(this.fadeGainNode);
-      this.fadeGainNode.connect(this.limiterNode);
+      // DJ bass swap: a low shelf after the crossfade, flat (0 dB) except while a mix is running.
+      this.bassNode = ctx.createBiquadFilter();
+      this.bassNode.type = 'lowshelf';
+      this.bassNode.frequency.setValueAtTime(BASS_SWAP_FREQUENCY, ctx.currentTime);
+      this.bassNode.gain.setValueAtTime(this.bassCutDb, ctx.currentTime);
+      this.fadeGainNode.connect(this.bassNode);
+      this.bassNode.connect(this.limiterNode);
       this.limiterNode.connect(this.analyserNode);
       this.analyserNode.connect(ctx.destination);
       this.attachedElement = audioElement;
@@ -143,6 +154,7 @@ export class AudioGraphManager {
     this.filterNodes.forEach(node => node?.disconnect?.());
     this.masterGainNode?.disconnect?.();
     this.fadeGainNode?.disconnect?.();
+    this.bassNode?.disconnect?.();
     this.limiterNode?.disconnect?.();
     this.analyserNode?.disconnect?.();
     this.sourceNode = null;
@@ -150,6 +162,7 @@ export class AudioGraphManager {
     this.filterNodes = [];
     this.masterGainNode = null;
     this.fadeGainNode = null;
+    this.bassNode = null;
     this.limiterNode = null;
     this.analyserNode = null;
     this.attachedElement = null;
@@ -168,14 +181,34 @@ export class AudioGraphManager {
     }
   }
 
-  setFade(value, seconds = 0) {
+  /**
+   * Ramps the crossfade gain. `curve: 'equal-power'` uses cos/sin gains, which keep the summed power of
+   * two unrelated signals constant; linear ramps dip 3 dB at the midpoint of a mix.
+   */
+  setFade(value, seconds = 0, { curve = 'linear' } = {}) {
     if (!this.fadeGainNode || !this.audioContext) return false;
     const gain = this.fadeGainNode.gain;
     const now = this.audioContext.currentTime;
+    const start = gain.value;
+    gain.cancelScheduledValues(now);
+    gain.setValueAtTime(start, now);
+    if (seconds <= 0) gain.setValueAtTime(value, now);
+    else if (curve === 'equal-power' && Math.abs(start - (value === 0 ? 1 : 0)) < 0.02 && (value === 0 || value === 1)) {
+      gain.setValueCurveAtTime(equalPowerCurve(value === 1 ? 'in' : 'out'), now, seconds);
+    } else gain.linearRampToValueAtTime(value, now + seconds);
+    return true;
+  }
+
+  /** Cuts (negative dB) or restores (0) the low end below ~200 Hz. Used to swap basslines during a mix. */
+  setBassCut(db, seconds = 0) {
+    this.bassCutDb = Math.max(-36, Math.min(0, Number(db) || 0));
+    if (!this.bassNode || !this.audioContext) return false;
+    const gain = this.bassNode.gain;
+    const now = this.audioContext.currentTime;
     gain.cancelScheduledValues(now);
     gain.setValueAtTime(gain.value, now);
-    if (seconds > 0) gain.linearRampToValueAtTime(value, now + seconds);
-    else gain.setValueAtTime(value, now);
+    if (seconds > 0) gain.linearRampToValueAtTime(this.bassCutDb, now + seconds);
+    else gain.setValueAtTime(this.bassCutDb, now);
     return true;
   }
 

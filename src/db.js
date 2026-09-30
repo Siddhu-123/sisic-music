@@ -1,6 +1,7 @@
 import Dexie from 'dexie';
 import { asSongRecord, getPlaylistKey, getSongKey } from './songIdentity.js';
 import { parseDurationSeconds } from './services/downloadPolicy.js';
+import { sanitizeRhythm } from './services/djBeatMath.js';
 
 export const db = new Dexie('SisicMusicDB');
 
@@ -264,6 +265,7 @@ function normalizeSongInput(input = {}) {
     energy: bounded(song.energy, 0, 1),
     djAudioWindows: Array.isArray(song.djAudioWindows) ? song.djAudioWindows.slice(0, 120).filter(item => item && bounded(item.startSeconds, 0, 600) != null && bounded(item.energy, 0, 1) != null)
       .map(item => ({ startSeconds: Number(item.startSeconds), energy: Number(item.energy) })) : [],
+    djRhythm: sanitizeRhythm(song.djRhythm),
     loudnessLufs: bounded(song.loudnessLufs, -80, 0),
     djMetadataVersion: Math.max(0, Math.floor(Number(song.djMetadataVersion) || 0)),
     djMetadataUpdatedAt: String(song.djMetadataUpdatedAt || ''),
@@ -273,7 +275,7 @@ function normalizeSongInput(input = {}) {
 
 function bestSongMerge(previous, incoming) {
   if (!previous) return incoming;
-  const analysisFields = ['bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djAudioWindows', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus'];
+  const analysisFields = ['bpm', 'musicalKey', 'keyConfidence', 'energy', 'loudnessLufs', 'djAudioWindows', 'djRhythm', 'djMetadataVersion', 'djMetadataUpdatedAt', 'djAnalysisStatus'];
   const incomingAnalysisTime = Date.parse(incoming.djMetadataUpdatedAt) || 0;
   const previousAnalysisTime = Date.parse(previous.djMetadataUpdatedAt) || 0;
   const authoritativeAnalysis = incoming.djAnalysisStatus === 'ready' && incomingAnalysisTime >= previousAnalysisTime
@@ -312,6 +314,7 @@ function bestSongMerge(previous, incoming) {
     keyConfidence: incoming.keyConfidence ?? previous.keyConfidence ?? null,
     energy: incoming.energy ?? previous.energy ?? null,
     djAudioWindows: incoming.djAudioWindows?.length ? incoming.djAudioWindows : previous.djAudioWindows || [],
+    djRhythm: incoming.djRhythm || previous.djRhythm || null,
     loudnessLufs: incoming.loudnessLufs ?? previous.loudnessLufs ?? null,
     djMetadataVersion: incoming.djMetadataVersion || previous.djMetadataVersion || 0,
     djMetadataUpdatedAt: incoming.djMetadataUpdatedAt || previous.djMetadataUpdatedAt || '',
