@@ -1,4 +1,5 @@
 import { memo, useEffect, useState } from 'react';
+import { defaultCoverFor } from '../assets/default-covers/index.js';
 
 function resizeArtworkUrl(url = '', size = 300) {
   if (!url || typeof url !== 'string' || url.startsWith('data:') || url.startsWith('blob:')) return url;
@@ -30,6 +31,7 @@ export const AsyncArtworkImage = memo(function AsyncArtworkImage({
   size = 300,
   sizes,
   priority = false,
+  defaultCover = false,
 }) {
   const [fetchedArt, setFetchedArt] = useState(null);
   const [failedUrl, setFailedUrl] = useState('');
@@ -41,13 +43,17 @@ export const AsyncArtworkImage = memo(function AsyncArtworkImage({
     import('../services/artworkService.js')
       .then(({ getSongArtwork }) => getSongArtwork(song))
       .then(res => {
-        if (active && res?.coverArtUrl) setFetchedArt({ key: songKey, url: res.coverArtUrl });
+        if (!active || !res?.coverArtUrl) return;
+        // Song tiles show a real default cover instead of the generated gradient.
+        if (defaultCover && res.isProcedural) return;
+        setFetchedArt({ key: songKey, url: res.coverArtUrl });
       })
       .catch(() => {});
     return () => { active = false; };
-  }, [song, songKey]);
+  }, [song, songKey, defaultCover]);
 
-  const artUrl = resizeArtworkUrl((fetchedArt?.key === songKey ? fetchedArt.url : '') || song?.coverArtUrl, size);
+  const ownArt = defaultCover && String(song?.coverArtUrl || '').startsWith('data:image/svg+xml') ? '' : song?.coverArtUrl;
+  const artUrl = resizeArtworkUrl((fetchedArt?.key === songKey ? fetchedArt.url : '') || ownArt, size);
   const hue = song?.track ? song.track.charCodeAt(0) % 360 : 200;
 
   if (artUrl && failedUrl !== artUrl) {
@@ -63,6 +69,21 @@ export const AsyncArtworkImage = memo(function AsyncArtworkImage({
         style={{ aspectRatio: '1 / 1', objectFit: 'cover' }}
         loading={priority ? 'eager' : 'lazy'}
         fetchPriority={priority ? 'high' : 'low'}
+        decoding="async"
+      />
+    );
+  }
+
+  if (defaultCover) {
+    return (
+      <img
+        src={defaultCoverFor(song)}
+        alt={alt || `${song?.track || 'Song'} cover placeholder`}
+        className={`${className} artwork-default-cover`}
+        width={size}
+        height={size}
+        style={{ aspectRatio: '1 / 1', objectFit: 'cover' }}
+        loading="lazy"
         decoding="async"
       />
     );

@@ -1,9 +1,46 @@
-import { memo, useEffect, useId, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, SkipForward, Download, CheckCircle2, ListMusic, Clock3, Cloud, Plus, Trash2, Info, RefreshCw, X, Sparkles, Heart, Copy, FolderOpen, MoreHorizontal } from 'lucide-react';
+import { FolderOpen, LoaderCircle } from 'lucide-react';
 import { statusDetails } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
+import '../song-tiles.css';
+import nextGlyph from '../assets/song-tile/next-arrow.svg';
+import playGlyph from '../assets/song-tile/play-arrow.svg';
+import likeGlyph from '../assets/song-tile/like-glyph.svg';
+import infoGlyph from '../assets/song-tile/info-glyph.svg';
+import duplicateGlyph from '../assets/song-tile/duplicate-glyph.svg';
+import reviewIcon from '../assets/song-tile/review.svg';
+import playlistIcon from '../assets/song-tile/playlist.png';
+import plusIcon from '../assets/song-tile/plus.png';
+import similarIcon from '../assets/song-tile/sparkles.png';
+import downloadIcon from '../assets/song-tile/download.png';
+import deleteIcon from '../assets/song-tile/delete.png';
+
+const ROW_SLOTS = ['next', 'play', 'queue', 'playlist', 'like', 'similar'];
+
+export function TileFace({ song, statusText, statusTitle, title = song.track, subtitle = song.artist, cover, children }) {
+  return (
+    <div className="tile-face">
+      <div className="tile-face__backdrop" aria-hidden="true">
+        {[0, 1, 2, 3].map(level => (
+          <div key={level} className={`tile-face__layer tile-face__layer--${level}`}>
+            <AsyncArtworkImage defaultCover song={song} className="tile-face__bg" size={300} alt="" />
+            <span className="tile-face__vignette" />
+          </div>
+        ))}
+      </div>
+      <div className="tile-face__cover">{cover ?? <AsyncArtworkImage defaultCover song={song} className="tile-face__cover-img" size={300} alt={`${song.track} cover`} />}</div>
+      {children}
+      <div className="tile-face__meta">
+        <span className="tile-face__meta-bg" aria-hidden="true" />
+        <p className="tile-face__title">{title}</p>
+        <p className="tile-face__artist">{subtitle}</p>
+      </div>
+      <p className="tile-face__status" title={statusTitle}>{statusText}</p>
+    </div>
+  );
+}
 
 export const SongCard = memo(function SongCard({
   song,
@@ -26,28 +63,104 @@ export const SongCard = memo(function SongCard({
   isDownloading,
 }) {
   const status = statusDetails(song);
-  const StatusIcon = status.icon;
+  const statusText = [
+    status.label,
+    song.syncStatus && song.syncStatus !== 'done' ? `Sync ${song.syncStatus}` : '',
+    song.embeddingStatus && song.embeddingStatus !== 'done' ? `Embedding ${song.embeddingStatus}` : '',
+  ].filter(Boolean).join(' · ');
+  const statusTitle = song.downloadJob?.lastError || statusText;
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuMounted, setMenuMounted] = useState(false);
+  const [menuPhase, setMenuPhase] = useState('opening');
+  const [menuPosition, setMenuPosition] = useState(null);
   const [dragOffset, setDragOffset] = useState(0);
   const menuId = useId();
   const cardRef = useRef(null);
+  const triggerRef = useRef(null);
+  const departingMenuRef = useRef(null);
+  const menuDialogRef = useRef(null);
   const longPressTimerRef = useRef(null);
   const longPressTriggeredRef = useRef(false);
+  const menuCloseTimerRef = useRef(null);
+  const menuSettleTimerRef = useRef(null);
+  const positionFrameRef = useRef(null);
+  const openingFramesRef = useRef([]);
+  const menuOpenRef = useRef(false);
+  const wasMenuMountedRef = useRef(false);
+  const prefersReducedMotionRef = useRef(false);
   const pointerRef = useRef({ active: false, startX: 0, offset: 0, swiped: false });
 
-  const closeMenu = () => setMenuOpen(false);
-  const menuRef = useDialogFocus(menuOpen, closeMenu);
+  const cancelOpeningFrames = useCallback(() => {
+    openingFramesRef.current.forEach(frame => window.cancelAnimationFrame(frame));
+    openingFramesRef.current = [];
+  }, []);
+
+  const closeMenu = useCallback(() => {
+    if (!menuOpenRef.current) return;
+    departingMenuRef.current = menuDialogRef.current?.current;
+    menuOpenRef.current = false;
+    setMenuOpen(false);
+    cancelOpeningFrames();
+    window.clearTimeout(menuSettleTimerRef.current);
+    setMenuPhase('closing');
+    window.clearTimeout(menuCloseTimerRef.current);
+    // Figma: Variant3 -> Default is a 0.3s ease-out dissolve.
+    menuCloseTimerRef.current = window.setTimeout(() => setMenuMounted(false), prefersReducedMotionRef.current ? 0 : 300);
+  }, [cancelOpeningFrames]);
+  const menuRef = useDialogFocus(menuOpen, closeMenu, { canClose: menuOpen });
+
+  useEffect(() => {
+    menuDialogRef.current = menuRef;
+  }, [menuRef]);
+
   const clearLongPress = () => {
     if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = null;
   };
   const runAction = (event, action) => {
     event.stopPropagation();
+    if (!menuOpenRef.current) return;
     closeMenu();
     action?.(song);
   };
 
-  const openMenu = () => setMenuOpen(true);
+  const updateMenuPosition = useCallback(() => {
+    if (!cardRef.current) return;
+    const rect = cardRef.current.getBoundingClientRect();
+    const viewportScale = Math.min((window.innerWidth - 16) / 352, (window.innerHeight - 16) / 388, 1);
+    const cardScale = Math.min(rect.width / 300, rect.height / 336, 1);
+    const scale = window.innerWidth <= 600 ? viewportScale : Math.min(cardScale, viewportScale);
+    const stageWidth = 352 * scale;
+    const stageHeight = 388 * scale;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - stageWidth - 8));
+    const top = Math.max(8, Math.min(rect.top - 52 * scale, window.innerHeight - stageHeight - 8));
+    setMenuPosition({ left, top, scale });
+  }, []);
+
+  const openMenu = useCallback(() => {
+    window.clearTimeout(menuCloseTimerRef.current);
+    window.clearTimeout(menuSettleTimerRef.current);
+    cancelOpeningFrames();
+    menuOpenRef.current = true;
+    updateMenuPosition();
+    setMenuMounted(true);
+    setMenuOpen(true);
+    setMenuPhase('opening');
+    const firstFrame = window.requestAnimationFrame(() => {
+      openingFramesRef.current = openingFramesRef.current.filter(frame => frame !== firstFrame);
+      const secondFrame = window.requestAnimationFrame(() => {
+        openingFramesRef.current = openingFramesRef.current.filter(frame => frame !== secondFrame);
+        if (!menuOpenRef.current) return;
+        setMenuPhase('open');
+        // Figma: Variant2 -> Variant3 (buttons above the card) right after the 1.022s spring lands.
+        menuSettleTimerRef.current = window.setTimeout(() => {
+          if (menuOpenRef.current) setMenuPhase('settled');
+        }, prefersReducedMotionRef.current ? 0 : 1022);
+      });
+      openingFramesRef.current.push(secondFrame);
+    });
+    openingFramesRef.current.push(firstFrame);
+  }, [cancelOpeningFrames, updateMenuPosition]);
 
   const handleCardContextMenu = event => {
     event.preventDefault();
@@ -62,13 +175,13 @@ export const SongCard = memo(function SongCard({
   };
 
   const handlePointerDown = (event) => {
-    if (event.target.closest('.song-card__dl-btn, .song-card__menu-btn, .song-card__actions')) return;
+    if (event.target.closest('.song-card__actions')) return;
     longPressTriggeredRef.current = false;
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTriggeredRef.current = true;
       pointerRef.current.active = false;
       setDragOffset(0);
-      setMenuOpen(true);
+      openMenu();
     }, 480);
     pointerRef.current = { active: isReadyLoose, startX: event.clientX, startY: event.clientY, offset: 0, swiped: false };
   };
@@ -101,6 +214,39 @@ export const SongCard = memo(function SongCard({
     return () => clearLongPress();
   }, []);
 
+  useEffect(() => () => {
+    window.clearTimeout(menuCloseTimerRef.current);
+    window.clearTimeout(menuSettleTimerRef.current);
+    window.cancelAnimationFrame(positionFrameRef.current);
+    cancelOpeningFrames();
+  }, [cancelOpeningFrames]);
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    const update = () => { prefersReducedMotionRef.current = Boolean(media?.matches); };
+    update();
+    media?.addEventListener?.('change', update);
+    return () => media?.removeEventListener?.('change', update);
+  }, []);
+
+  useEffect(() => {
+    if (menuMounted) {
+      wasMenuMountedRef.current = true;
+      return undefined;
+    }
+    if (!wasMenuMountedRef.current) return undefined;
+    wasMenuMountedRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      const activeElement = document.activeElement;
+      const trigger = triggerRef.current;
+      if (activeElement === document.body || !activeElement?.isConnected || activeElement === trigger || departingMenuRef.current?.contains(activeElement)) {
+        trigger?.focus();
+      }
+      departingMenuRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [menuMounted]);
+
   useEffect(() => {
     if (!menuOpen) return undefined;
     const handlePointerDownOutside = event => {
@@ -110,7 +256,22 @@ export const SongCard = memo(function SongCard({
     return () => {
       document.removeEventListener('pointerdown', handlePointerDownOutside);
     };
-  }, [menuOpen, menuRef]);
+  }, [menuOpen, menuRef, closeMenu]);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const reposition = () => {
+      window.cancelAnimationFrame(positionFrameRef.current);
+      positionFrameRef.current = window.requestAnimationFrame(updateMenuPosition);
+    };
+    window.addEventListener('resize', reposition);
+    window.addEventListener('scroll', reposition, true);
+    return () => {
+      window.removeEventListener('resize', reposition);
+      window.removeEventListener('scroll', reposition, true);
+      window.cancelAnimationFrame(positionFrameRef.current);
+    };
+  }, [menuOpen, updateMenuPosition]);
 
   const handleMenuKeyDown = event => {
     const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])];
@@ -129,25 +290,37 @@ export const SongCard = memo(function SongCard({
   };
 
   const actionItems = [
-    { label: isCurrentSong ? 'Resume' : 'Play', icon: Play, action: onPlay },
-    onPlayNext && { label: 'Next', icon: SkipForward, action: onPlayNext },
-    onAddToQueue && { label: 'Queue', icon: ListMusic, action: onAddToQueue },
-    onToggleLike && { label: isLiked ? 'Unlike' : 'Like', icon: Heart, action: onToggleLike, fill: isLiked ? 'currentColor' : 'none' },
-    onPrepare && { label: song.driveFileId ? 'Ready to stream' : 'Prepare on Drive', icon: Download, action: onPrepare, disabled: isDownloading },
-    onAddToPlaylist && { label: 'Playlist', icon: Plus, action: onAddToPlaylist },
-    onReview && { label: 'Review', icon: RefreshCw, action: onReview },
-    onInfo && { label: 'Info', icon: Info, action: onInfo },
-    onMoreLikeThis && { label: 'Similar', icon: Sparkles, action: onMoreLikeThis },
-    onMarkDuplicate && { label: 'Duplicate', icon: Copy, action: onMarkDuplicate, danger: true },
-    onRestoreDuplicate && { label: 'Restore', icon: FolderOpen, action: onRestoreDuplicate },
-    onDeleteReady && { label: 'Delete', icon: Trash2, action: onDeleteReady, danger: true },
+    { label: 'Play', glyph: playGlyph, action: onPlay, slot: 'play' },
+    onPlayNext && { label: 'Next', glyph: nextGlyph, action: onPlayNext, slot: 'next' },
+    onAddToQueue && { label: 'Queue', glyph: playlistIcon, action: onAddToQueue, slot: 'queue' },
+    onAddToPlaylist && { label: 'Playlist', glyph: plusIcon, action: onAddToPlaylist, slot: 'playlist' },
+    onToggleLike && { label: isLiked ? 'Unlike' : 'Like', glyph: likeGlyph, action: onToggleLike, slot: 'like' },
+    onMoreLikeThis && { label: 'Similar', glyph: similarIcon, action: onMoreLikeThis, slot: 'similar' },
+    onInfo && { label: 'Info', glyph: infoGlyph, action: onInfo, slot: 'info' },
+    onPrepare && { label: song.driveFileId ? 'Ready to stream' : 'Prepare on Drive', glyph: downloadIcon, action: onPrepare, disabled: isDownloading, busy: isDownloading, slot: 'download' },
+    onMarkDuplicate && !onRestoreDuplicate && { label: 'Duplicate', glyph: duplicateGlyph, action: onMarkDuplicate, slot: 'duplicate' },
+    onRestoreDuplicate && { label: 'Restore', Icon: FolderOpen, action: onRestoreDuplicate, slot: 'restore' },
+    onReview && { label: 'Review', glyph: reviewIcon, action: onReview, slot: 'review' },
+    { label: 'Delete', glyph: deleteIcon, action: onDeleteReady, disabled: !song.driveFileId || song.isDeleted, danger: true, slot: 'delete' },
   ].filter(Boolean);
+
+  const renderAction = item => {
+    const Icon = item.Icon;
+    return <button key={item.slot} type="button" role="menuitem" className={`song-prototype-action song-prototype-action--${item.slot}${item.danger ? ' is-danger' : ''}`} onClick={event => runAction(event, item.action)} disabled={!menuOpen || item.disabled} aria-label={item.label} title={item.label}>
+      <span className="song-prototype-action__icon">
+        {item.glyph && <span className="song-prototype-action__glyph" style={{ '--glyph': `url("${item.glyph}")` }} aria-hidden="true" />}
+        {Icon && <Icon className="song-prototype-action__restore" size={22} strokeWidth={2.5} aria-hidden="true" />}
+      </span>
+      <span className="song-prototype-action__label">{item.label}</span>
+      {item.busy && <LoaderCircle className="song-prototype-spinner" size={18} aria-label="Downloading" />}
+    </button>;
+  };
 
   return (
     <>
       <article
         ref={cardRef}
-        className={`song-card ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''} ${menuOpen ? 'song-card--actions-open' : ''}`}
+        className={`song-card song-card--group25 ${isCurrentSong ? 'song-card--active' : ''} ${isReadyLoose ? 'song-card--swipeable' : ''} ${menuOpen ? 'song-card--actions-open' : ''} ${menuMounted && menuPhase !== 'closing' ? 'song-card--prototype-hidden' : ''}`}
         style={isReadyLoose && dragOffset ? { transform: `translateX(${dragOffset}px)` } : undefined}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -157,119 +330,46 @@ export const SongCard = memo(function SongCard({
       >
       <button
         className="song-card__primary"
+        ref={triggerRef}
         onClick={() => {
           if (pointerRef.current.swiped || longPressTriggeredRef.current) return;
           onPlay(song);
         }}
         onKeyDown={handleCardKeyDown}
         aria-label={`${isCurrentSong ? 'Resume' : 'Play'} ${song.track} by ${song.artist}`}
-      >
-        <div className="song-card__art-wrapper">
-          <AsyncArtworkImage song={song} className="song-card__art" fallbackSize={18} size={240} sizes="(max-width: 768px) 45vw, 220px" />
-          {isCurrentSong && (
-            <div className={`song-card__playing-bars ${isPlaying ? '' : 'song-card__playing-bars--paused'}`}><span /><span /><span /></div>
-          )}
-        </div>
-        <div className="song-card__info">
-          <p className="song-card__title">{song.track}</p>
-          <p className="song-card__artist">{song.artist}</p>
-        </div>
-      </button>
-      <button
-        type="button"
-        className="song-card__menu-btn"
-        onClick={event => { event.stopPropagation(); openMenu(); }}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-controls={menuOpen ? menuId : undefined}
-        aria-label={`More actions for ${song.track}`}
-        title="More actions"
       >
-        <MoreHorizontal size={18} />
+        <TileFace song={song} statusText={statusText} statusTitle={statusTitle}>
+          {isCurrentSong && (
+            <div className={`song-card__playing-bars ${isPlaying ? '' : 'song-card__playing-bars--paused'}`}><span /><span /><span /></div>
+          )}
+        </TileFace>
       </button>
-      <div className="song-card__footer">
-        <div className="song-card__status-stack">
-          <div className={`song-status ${status.className}`} data-status-label={status.label} title={song.downloadJob?.lastError || status.label}>
-            <StatusIcon size={12} />
-            <span>{status.label}</span>
-          </div>
-          {song.syncStatus && song.syncStatus !== 'done' && (
-            <div className="song-status song-status--downloading" data-status-label="Sync queued" title="Metadata sync is pending">
-              <Cloud size={12} />
-              <span>Sync {song.syncStatus}</span>
-            </div>
-          )}
-          {song.embeddingStatus && song.embeddingStatus !== 'done' && (
-            <div className="song-status song-status--queued" data-status-label="Analysis queued" title="Embedding pipeline status">
-              <Clock3 size={12} />
-              <span>Embedding {song.embeddingStatus}</span>
-            </div>
-          )}
-        </div>
-        <button
-          className="song-card__dl-btn"
-          onClick={event => { event.stopPropagation(); onPrepare?.(song); }}
-          aria-label={song.driveFileId ? 'Ready to stream' : 'Prepare song on Drive'}
-          disabled={isDownloading}
-        >
-          {isDownloading
-            ? <div className="spinner" />
-            : song.driveFileId
-              ? <CheckCircle2 size={18} color="var(--green)" />
-              : <Download size={18} color="var(--text-muted)" />
-          }
-        </button>
-      </div>
       </article>
-      {menuOpen && createPortal(
-        <div className="song-action-sheet-overlay" role="presentation" onClick={closeMenu}>
+      {menuMounted && createPortal(
+        <div className={`song-prototype-portal is-${menuPhase}`} role="presentation" style={menuPosition ? { '--menu-left': `${menuPosition.left}px`, '--menu-top': `${menuPosition.top}px`, '--menu-scale': menuPosition.scale } : undefined}>
           <div
             ref={menuRef}
             id={menuId}
-            className="song-action-sheet"
+            className="song-prototype-stage"
             role="menu"
             aria-label={`Actions for ${song.track}`}
+            tabIndex={-1}
             onClick={event => event.stopPropagation()}
             onKeyDown={handleMenuKeyDown}
+            onContextMenu={event => event.preventDefault()}
           >
-            <div className="song-action-sheet__header">
-              <div className="song-action-sheet__art">
-                <AsyncArtworkImage song={song} size={96} fallbackSize={20} />
-              </div>
-              <div className="song-action-sheet__meta">
-                <strong>{song.track}</strong>
-                <span>{song.artist}</span>
-                {song.album && <small>{song.album}</small>}
-              </div>
-              <button
-                type="button"
-                className="song-action-sheet__close"
-                onClick={closeMenu}
-                aria-label="Close actions menu"
-              >
-                <X size={18} />
-              </button>
+            <div className="song-prototype-art" onClick={closeMenu}>
+              <TileFace song={song} statusText={statusText} statusTitle={statusTitle} />
             </div>
-
-            <div className="song-action-sheet__grid">
-              {actionItems.map(item => {
-                const Icon = item.icon;
-                return (
-                  <button
-                    key={item.label}
-                    type="button"
-                    role="menuitem"
-                    className={`song-action-sheet__btn ${item.danger ? 'song-action-sheet__btn--danger' : ''}`}
-                    onClick={event => runAction(event, item.action)}
-                    disabled={item.disabled}
-                  >
-                    <Icon size={18} fill={item.fill || 'none'} />
-                    <span>{item.label}</span>
-                  </button>
-                );
-              })}
+            <div className="song-prototype-actions" inert={!menuOpen}>
+              <div className="song-prototype-actions__row">{actionItems.filter(item => ROW_SLOTS.includes(item.slot)).map(renderAction)}</div>
+              <div className="song-prototype-actions__column">{actionItems.filter(item => !ROW_SLOTS.includes(item.slot)).map(renderAction)}</div>
             </div>
           </div>
+          <button className="song-prototype-scrim" aria-label="Close actions" onClick={closeMenu} tabIndex={-1} />
         </div>,
         document.body,
       )}

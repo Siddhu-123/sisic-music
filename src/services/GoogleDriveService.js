@@ -591,7 +591,7 @@ export class GoogleDriveService {
   async driveGet(url, label = 'Drive request') {
     const resp = await this.authorizedFetch(url, {}, label);
     if (!resp.ok) {
-      let details = '';
+      let details;
       try {
         const body = await resp.json();
         details = body.error?.message ? ` ${body.error.message}` : '';
@@ -1252,6 +1252,41 @@ export class GoogleDriveService {
       previousDriveFileId,
       reason: 'ready-offload',
     });
+  }
+
+  // Trashes the Drive audio (recoverable from Drive trash) for songs already marked as duplicates,
+  // then drops them from the song and duplicate indexes with one write each.
+  async removeDuplicateSongs(folderId, songInputs = [], onProgress = () => {}) {
+    const songs = songInputs.map(asSongRecord).filter(song => song.songKey);
+    const removed = [];
+    const failed = [];
+    for (const [index, song] of songs.entries()) {
+      try {
+        if (song.driveFileId) await this.trashFile(song.driveFileId);
+        removed.push(song);
+      } catch (error) {
+        if (/\b404\b/.test(String(error?.message))) removed.push(song);
+        else failed.push({ song, error });
+      }
+      onProgress(index + 1, songs.length);
+    }
+    if (removed.length) {
+      const keys = new Set(removed.map(song => song.songKey));
+      const fileIds = new Set(removed.map(song => song.driveFileId).filter(Boolean));
+      await this.mutateJsonIndex(folderId, SONG_INDEX_FILENAME, 'songs', [], current => (
+        current.filter(item => !keys.has(item.songKey) && !fileIds.has(item.driveFileId))
+      ));
+      await this.mutateJsonIndex(folderId, DUPLICATE_INDEX_FILENAME, 'duplicates', [], current => (
+        current.filter(item => !keys.has(item.songKey))
+      ));
+      const tombstones = removed.map(song => normalizeDeletedEntry(song, { previousDriveFileId: song.driveFileId, reason: 'duplicate-removed' }));
+      await this.mutateJsonIndex(folderId, DELETED_INDEX_FILENAME, 'deleted', [], deleted => {
+        const byKey = new Map(deleted.filter(item => item.songKey).map(item => [item.songKey, item]));
+        tombstones.forEach(entry => byKey.set(entry.songKey, entry));
+        return [...byKey.values()].sort((a, b) => String(b.deletedAt || '').localeCompare(String(a.deletedAt || '')));
+      });
+    }
+    return { removed, failed };
   }
 
   async readPlaylistIndex(folderId) {

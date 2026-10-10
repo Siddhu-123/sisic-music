@@ -116,8 +116,10 @@ try {
   await page.getByText('This playlist is empty', { exact: true }).waitFor();
   assert.equal(await page.evaluate(async () => (await window.__fixture.db.playlists.toArray()).filter(p => p.name === 'Night Drive').length), 1);
   await page.getByRole('button', { name: 'Ready', exact: true }).click();
-  await page.getByRole('button', { name: 'More actions for Amber Coast', exact: true }).first().click();
-  await page.getByRole('menuitem', { name: 'Playlist', exact: true }).click();
+  await songButton('Amber Coast').press('Shift+F10');
+  await page.locator('.song-prototype-portal.is-settled').waitFor({ state: 'visible' });
+  await page.getByRole('menu', { name: 'Actions for Amber Coast', exact: true }).getByRole('menuitem', { name: 'Playlist', exact: true }).click();
+  await page.getByLabel('Choose playlist', { exact: true }).waitFor({ state: 'visible' });
   await page.getByLabel('Night Drive', { exact: true }).check(); await page.getByRole('button', { name: /^Save/ }).click();
   await page.waitForFunction(async () => {
     const p = (await window.__fixture.db.playlists.toArray()).find(p => p.name === 'Night Drive');

@@ -1,0 +1,220 @@
+/* Group 25 song tile. Keep the collapsed card and portal art in the same grid. */
+.song-card.song-card--group25 {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 300px;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: 300 / 336;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 19px;
+  container-type: inline-size;
+  background: #000;
+  box-shadow: none;
+  transition: none;
+  isolation: isolate;
+}
+
+.song-card.song-card--group25:hover,
+.song-card.song-card--group25.song-card--active { background: #000; box-shadow: none; transform: none; }
+.song-card.song-card--group25.song-card--prototype-hidden { visibility: hidden; }
+
+.song-card.song-card--group25 .song-card__primary {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: inherit;
+  color: #fff;
+  background: #000;
+}
+
+.content-rail > .song-card.song-card--group25 { min-height: 0; }
+.content-rail > .song-card.song-card--group25 .song-card__primary { min-height: 0; }
+
+.tile-face{position:absolute;inset:0;overflow:hidden;border-radius:inherit;background:#fff;font-family:Inter,system-ui,sans-serif;text-align:left}
+.tile-face__backdrop,.tile-face__layer{position:absolute;inset:0;border-radius:inherit}
+.tile-face__layer{overflow:hidden}
+/* Any aspect ratio: a square box as tall as the tile, so the image's short side equals the tile's long side and cover never leaves bars. */
+.tile-face__bg{position:absolute;left:-6cqw;top:0;display:block;width:112cqw!important;height:112cqw!important;max-width:none;object-fit:cover;aspect-ratio:auto!important}
+.tile-face__vignette{position:absolute;left:0;top:-33.3333cqw;width:100cqw;height:176cqw;pointer-events:none;background:url("data:image/svg+xml;utf8,<svg viewBox='0 0 300 528' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='none'><g transform='matrix(-17 17.45 -15.808 -15.4 150 264)' opacity='1'><rect height='251.11' width='151.78' fill='url(%23grad)' id='quad' shape-rendering='crispEdges'/><use href='%23quad' transform='scale(1 -1)'/><use href='%23quad' transform='scale(-1 1)'/><use href='%23quad' transform='scale(-1 -1)'/></g><defs><linearGradient id='grad' gradientUnits='userSpaceOnUse' x2='5' y2='5'><stop stop-color='rgba(0,0,0,0)' offset='0.80752'/><stop stop-color='rgba(0,0,0,1)' offset='1'/></linearGradient></defs></svg>") center/100% 100% no-repeat}
+/* Figma progressive layer blur 12.1 from (167,264.5) to (275.5,41.5) in tile space = 26deg, 31.7% -> 88.9%.
+   Each step fades in over the one below; a lower step drops out only once the step above is fully in,
+   so the blurred edges of the top steps reveal the white card fill (Figma's light rim at the top-right). */
+.tile-face__layer--0{-webkit-mask-image:linear-gradient(26deg,#000 50.7%,transparent 60%);mask-image:linear-gradient(26deg,#000 50.7%,transparent 60%)}
+.tile-face__layer--1{filter:blur(.6667cqw);-webkit-mask-image:linear-gradient(26deg,transparent 31.7%,#000 50.7%,#000 69.9%,transparent 79%);mask-image:linear-gradient(26deg,transparent 31.7%,#000 50.7%,#000 69.9%,transparent 79%)}
+.tile-face__layer--2{filter:blur(1.3333cqw);-webkit-mask-image:linear-gradient(26deg,transparent 50.7%,#000 69.9%,#000 88.9%,transparent 95%);mask-image:linear-gradient(26deg,transparent 50.7%,#000 69.9%,#000 88.9%,transparent 95%)}
+.tile-face__layer--3{filter:blur(2.0167cqw);-webkit-mask-image:linear-gradient(26deg,transparent 69.9%,#000 88.9%);mask-image:linear-gradient(26deg,transparent 69.9%,#000 88.9%)}
+.tile-face__cover{position:absolute;left:7.6667cqw;top:8.3333cqw;width:84.6667cqw;height:80.3333cqw;overflow:hidden;border-radius:3cqw;opacity:.9;background:rgba(255,255,255,.1)}
+.tile-face__cover-img{position:absolute;left:-13.6667cqw;top:-8.3333cqw;width:112cqw!important;height:112cqw!important;max-width:none;object-fit:cover;aspect-ratio:auto!important}
+/* Glass name box: Figma 177x55 at (13,268), radius 10; hairline rim brightest on the left and upper-right edges. */
+.tile-face__meta{position:absolute;z-index:2;left:4.3333cqw;top:89.3333cqw;width:59cqw;height:18.3333cqw;overflow:hidden;border-radius:3.3333cqw;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.02));-webkit-backdrop-filter:blur(3px) saturate(1.4);backdrop-filter:blur(3px) saturate(1.4)}
+.tile-face__meta-bg{position:absolute;inset:0;padding:1px;border-radius:inherit;pointer-events:none;background:conic-gradient(rgba(255,255,255,.1),rgba(255,255,255,.14) 50deg,rgba(255,255,255,.52) 76deg,rgba(255,255,255,.42) 92deg,rgba(255,255,255,.1) 108deg,rgba(255,255,255,.08) 245deg,rgba(255,255,255,.42) 262deg,rgba(255,255,255,.52) 280deg,rgba(255,255,255,.1) 300deg,rgba(255,255,255,.1));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+.tile-face__title,.tile-face__artist{position:relative;margin:0;padding:0;color:#fff;font-weight:400;line-height:normal;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:49.6667cqw;text-shadow:none}
+.tile-face__title{margin:1.6667cqw 0 0 6.3333cqw;font-size:6.6667cqw}
+.tile-face__artist{margin-left:6.3333cqw;font-size:4cqw}
+.tile-face__status{position:absolute;z-index:2;right:8.3333cqw;bottom:5.3333cqw;max-width:28cqw;margin:0;color:rgba(255,255,255,.92);font-size:4cqw;line-height:1;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile-face .song-card__playing-bars{position:absolute;z-index:3;left:10.3333cqw;top:11cqw}
+
+.song-prototype-portal { position: fixed; inset: 0; z-index: 10020; pointer-events: none; }
+.song-prototype-stage {
+  position: fixed;
+  top: var(--menu-top, 8px);
+  left: var(--menu-left, 8px);
+  width: 352px;
+  height: 388px;
+  z-index: 1;
+  outline: 0;
+  transform: scale(var(--menu-scale, 1));
+  transform-origin: top left;
+  pointer-events: none;
+}
+
+.song-prototype-art {
+  position: absolute;
+  top: 52px;
+  left: 0;
+  z-index: 2;
+  width: 300px;
+  height: 336px;
+  overflow: hidden;
+  border-radius: 19px;
+  container-type: inline-size;
+  background: #000;
+  box-shadow: 0 17px 42px rgba(0,0,0,.38);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.song-prototype-actions { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+/* Right-anchored flex: a hovered pill grows left and pushes its neighbours aside instead of covering them. */
+.song-prototype-actions__row,
+.song-prototype-actions__column { position: absolute; right: 0; display: flex; gap: 7px; pointer-events: none; }
+.song-prototype-actions__row { top: 0; flex-direction: row; justify-content: flex-end; align-items: flex-start; }
+.song-prototype-actions__column { top: 52px; flex-direction: column; align-items: flex-end; }
+/* Figma "Gentle" spring (stiffness 100, damping 15, mass 1), settles at 1.022s. */
+.song-prototype-portal { --sp-gentle: linear(0, 0.0488, 0.1637, 0.308, 0.4567, 0.5949, 0.7142, 0.8115, 0.8869, 0.9423, 0.9807, 1.0055, 1.0198, 1.0267, 1.0284, 1.0268, 1.0235, 1.0194, 1.0152, 1.0113, 1.0079, 1.0052, 1.0031, 1.0016, 1.0005, 0.9998, 0.9994, 0.9992, 0.9992, 0.9992, 1); }
+.song-prototype-action {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-width: 45px;
+  height: 45px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 11px;
+  color: #fff;
+  background-color: rgba(255,255,255,.12);
+  background-image: linear-gradient(160deg, rgba(255,255,255,.14), rgba(255,255,255,0) 60%);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  backdrop-filter: blur(16px) saturate(1.6);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 6px 16px rgba(0,0,0,.18);
+  cursor: pointer;
+  pointer-events: auto;
+  transform: var(--rest-transform);
+  transition: transform 1.0220937s var(--sp-gentle), background-color .3s ease-in-out, box-shadow .3s ease-in-out;
+}
+/* Same glass rim as the name box: bright at the side edges, faint along top and bottom. */
+.song-prototype-action::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(255,255,255,.48), rgba(255,255,255,.1) 14px, rgba(255,255,255,.1) calc(100% - 14px), rgba(255,255,255,.4));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+.song-prototype-action__icon { position: relative; display: grid; flex: 0 0 45px; width: 45px; height: 45px; place-items: center; }
+.song-prototype-action:focus-visible { z-index: 4; outline: 2px solid rgba(255,255,255,.85); outline-offset: 2px; }
+.song-prototype-action:disabled { cursor: wait; opacity: .68; }
+/* One optical size for every glyph: 22px box; PNG sources are scaled so their drawn area (alpha bbox) is 22px. */
+.song-prototype-action__glyph { display: block; width: 22px; height: 22px; background-color: currentColor; -webkit-mask: var(--glyph) center / contain no-repeat; mask: var(--glyph) center / contain no-repeat; }
+.song-prototype-action--queue .song-prototype-action__glyph { width: 26.4px; height: 26.4px; }
+.song-prototype-action--playlist .song-prototype-action__glyph { width: 26.8px; height: 26.8px; }
+.song-prototype-action--similar .song-prototype-action__glyph,
+.song-prototype-action--download .song-prototype-action__glyph { width: 25.4px; height: 25.4px; }
+.song-prototype-action--delete .song-prototype-action__glyph { width: 27.9px; height: 27.9px; }
+.song-prototype-action__restore { width: 22px; height: 22px; }
+/* Figma Group 20/21 hover: pill grows to the left and reveals a 20px semibold label (0.3s ease-in-out). */
+.song-prototype-action__label {
+  overflow: hidden;
+  max-width: 0;
+  margin-left: -3px;
+  padding-right: 0;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 45px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: max-width .3s ease-in-out, padding-right .3s ease-in-out, opacity .3s ease-in-out;
+}
+.song-prototype-action.is-danger .song-prototype-action__label { color: #ffb4ab; }
+@media (hover: hover) {
+  .song-prototype-action:hover { z-index: 4; background-color: rgba(255,255,255,.22); box-shadow: inset 0 1px 0 rgba(255,255,255,.24), 0 10px 24px rgba(0,0,0,.26); }
+  .song-prototype-action:hover .song-prototype-action__label { max-width: 240px; padding-right: 12px; opacity: 1; }
+}
+.song-prototype-action:focus-visible .song-prototype-action__label { max-width: 240px; padding-right: 12px; opacity: 1; }
+/* Rest positions: buttons start tucked behind the card and spring out. */
+.song-prototype-actions__row .song-prototype-action { --rest-transform: translate(0, 60px); }
+.song-prototype-actions__row .song-prototype-action--similar { --rest-transform: translate(-69px, 52px); }
+.song-prototype-actions__column .song-prototype-action { --rest-transform: translate(-70px, 0); }
+.song-prototype-spinner { position: absolute; inset: 13px; animation: song-prototype-spin .9s linear infinite; }
+
+.song-prototype-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  border: 0;
+  background: rgba(6,6,10,.38);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  backdrop-filter: blur(14px) saturate(1.15);
+  opacity: 0;
+  pointer-events: auto;
+  transition: opacity .35s ease-out;
+}
+.song-prototype-scrim:focus-visible { outline: 2px solid rgba(255,255,255,.8); outline-offset: -4px; }
+
+/* Default -> Variant2: buttons spring out from behind the card. */
+.song-prototype-portal:is(.is-open, .is-settled) .song-prototype-action { transform: translate(0, 0); }
+.song-prototype-portal:is(.is-open, .is-settled) .song-prototype-scrim { opacity: 1; }
+/* Variant2 -> Variant3: once landed, buttons move above the card layer. */
+.song-prototype-portal.is-settled .song-prototype-actions,
+.song-prototype-actions:has(:focus-visible) { z-index: 3; }
+/* Variant3 -> Default: 0.3s ease-out dissolve back to the tile in the grid. */
+.song-prototype-stage { transition: opacity .3s ease-out; }
+.song-prototype-portal.is-closing .song-prototype-actions { z-index: 3; }
+.song-prototype-portal.is-closing .song-prototype-action { transform: translate(0, 0); transition: none; }
+.song-prototype-portal.is-closing .song-prototype-stage,
+.song-prototype-portal.is-closing .song-prototype-scrim { opacity: 0; transition: opacity .3s ease-out; }
+
+@keyframes song-prototype-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .song-prototype-action,
+  .song-prototype-action__label,
+  .song-prototype-stage,
+  .song-prototype-scrim { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
+
+.playlist-tile{cursor:pointer;font:inherit;text-align:left;color:#fff}
+.playlist-tile:focus-visible{outline:2px solid #fff;outline-offset:3px}
+.playlist-tile__mosaic{position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+.playlist-tile__mosaic-img{display:block;width:100%!important;height:100%!important;object-fit:cover}

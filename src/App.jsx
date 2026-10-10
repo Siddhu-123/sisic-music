@@ -27,6 +27,7 @@ import { driveService } from './services/GoogleDriveService.js';
 import { useAudioPlayer } from './hooks/useAudioPlayer.js';
 import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
 import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, MacWorkerTasksPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
+import { PlaylistTile } from './components/PlaylistTile.jsx';
 import { VirtualSongGrid } from './components/VirtualSongGrid.jsx';
 import { ExploreView } from './components/ExploreView.jsx';
 import { DeletePlaylistModal } from './components/DeletePlaylistModal.jsx';
@@ -599,6 +600,20 @@ function App() {
     }
     return byKey;
   }, [allSongs, driveIndexSongs, jobBySongKey]);
+
+  const playlistPreviewSongs = useMemo(() => {
+    const map = new Map();
+    for (const song of allSongsByKey.values()) {
+      for (const key of song.playlistKeys || []) {
+        const list = map.get(key) || [];
+        if (list.length < 4) {
+          list.push(song);
+          map.set(key, list);
+        }
+      }
+    }
+    return map;
+  }, [allSongsByKey]);
 
   const duplicateSongKeySet = useMemo(() => (
     new Set(driveDuplicateSongs.map(song => song.songKey).filter(Boolean))
@@ -1663,6 +1678,28 @@ function App() {
     }
   }, [addToast]);
 
+  const handleRemoveAllDuplicates = useCallback(async () => {
+    if (!DRIVE_FOLDER_ID) {
+      setActionError('Missing required config: VITE_DRIVE_FOLDER_ID.');
+      return;
+    }
+    const targets = duplicateSongs.filter(song => song.driveFileId);
+    if (!targets.length) return;
+    const confirmed = window.confirm(`Remove ${targets.length} duplicate song${targets.length === 1 ? '' : 's'} from Drive? Files go to the Drive trash (recoverable for 30 days) and will not be downloaded again.`);
+    if (!confirmed) return;
+    try {
+      const { removed, failed } = await driveService.removeDuplicateSongs(DRIVE_FOLDER_ID, targets);
+      const removedKeys = new Set(removed.map(song => song.songKey));
+      setDriveDuplicateSongs(prev => prev.filter(item => !removedKeys.has(item.songKey)));
+      if (removedKeys.has(player.currentSongKey)) player.stop();
+      addToast(failed.length ? `Removed ${removed.length}, ${failed.length} failed` : `Removed ${removed.length} duplicate${removed.length === 1 ? '' : 's'}`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
+  }, [addToast, duplicateSongs, player]);
+
   const handleSaveSongMetadata = useCallback(async (song, updates) => {
     const nextUpdates = Object.fromEntries(
       ['artist', 'track', 'album', 'description', 'lyrics', 'genre', 'releaseDate']
@@ -1763,7 +1800,7 @@ function App() {
       onReview={setReviewSong}
       onInfo={setSongInfo}
       onMoreLikeThis={(selected) => setRecommendationTarget(selected)}
-      onDeleteReady={!selectedPlaylistKey && view === VIEWS.LIBRARY ? handleDeleteReadySong : undefined}
+      onDeleteReady={handleDeleteReadySong}
       onMarkDuplicate={!selectedPlaylistKey && view !== VIEWS.DUPLICATES ? handleMarkDuplicate : undefined}
       onRestoreDuplicate={view === VIEWS.DUPLICATES ? handleRestoreDuplicate : undefined}
       isReadyLoose={!selectedPlaylistKey && view === VIEWS.LIBRARY}
@@ -1913,26 +1950,15 @@ function App() {
             {visiblePlaylists.length > 0 && (
               <section className="home-section">
                 <h2 className="home-section__title">Your Playlists</h2>
-                <div className="playlist-grid">
-                  {visiblePlaylists.slice(0, 12).map(playlist => {
-                    const hue = playlist.name.charCodeAt(0) % 360;
-                    return (
-                      <button
-                        key={playlist.playlistKey}
-                        className="playlist-card"
-                        onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); }}
-                      >
-                        <div
-                          className="playlist-card__art"
-                          style={{ background: `linear-gradient(135deg, hsl(${hue}, 60%, 30%), hsl(${(hue + 80) % 360}, 50%, 18%))` }}
-                        />
-                        <div className="playlist-card__info">
-                          <span className="playlist-card__name">{playlist.name}</span>
-                          <span className="playlist-card__count">{playlist.count} songs</span>
-                        </div>
-                      </button>
-                    );
-                  })}
+                <div className="content-rail">
+                  {visiblePlaylists.slice(0, 12).map(playlist => (
+                    <PlaylistTile
+                      key={playlist.playlistKey}
+                      playlist={playlist}
+                      songs={playlistPreviewSongs.get(playlist.playlistKey) || []}
+                      onOpen={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); }}
+                    />
+                  ))}
                 </div>
               </section>
             )}
@@ -2067,7 +2093,12 @@ function App() {
                 </div>
               ) : (
                 <>
-                  <div className="library-count">{filtered.length} songs</div>
+                  <div className="library-count">
+                    {filtered.length} songs
+                    <button type="button" className="btn-primary" style={{ marginLeft: 12, padding: "4px 12px" }} onClick={handleRemoveAllDuplicates}>
+                      Remove duplicates ({duplicateSongs.length})
+                    </button>
+                  </div>
                   <VirtualSongGrid
                     songs={filtered}
                     renderSong={song => renderSongCard(song, searchQuery.trim() ? null : filtered, { isSearch: Boolean(searchQuery.trim()) })}

@@ -747,7 +747,7 @@ export class PlaybackController {
 
     this.failed.clear(); this.played.clear(); this.originalQueue = [];
     let queue;
-    let index = 0;
+    let index;
 
     if (isSearch) {
       // ONLY the selected track starts; the rest of that search batch must not enter the queue.
