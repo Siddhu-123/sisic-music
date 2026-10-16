@@ -1,5 +1,5 @@
 import { db, getSongVectors, saveSongVector } from '../db.js';
-import { findSimilarSongMatch, getSongKey } from '../songIdentity.js';
+import { findSimilarSongMatch, getSongKey, tokenSet } from '../songIdentity.js';
 
 export const GEMMA2_MODEL = 'embeddinggemma-2@fp32/clip30/v1';
 export const GEMMA2_DIMENSIONS = 256;
@@ -24,22 +24,50 @@ function filenameTitle(filename = '') {
   return String(filename).split(/[\\/]/).pop().replace(/\.[^.]+$/, '').trim();
 }
 
+const baseName = name => filenameTitle(name).toLowerCase();
+
+// "Artist - Title.mp3" files with no artist tag: take the artist from the name, as Drive import does.
+function recordParts(record) {
+  const title = record.title || filenameTitle(record.filename);
+  if (record.artist) return { artist: record.artist, track: title };
+  const stem = filenameTitle(record.filename);
+  const [artist, ...rest] = stem.split(' - ');
+  return rest.length ? { artist: artist.trim(), track: rest.join(' - ').trim() } : { artist: '', track: title };
+}
+
 export function matchExportToLibrary(records = [], librarySongs = []) {
   const byKey = new Map();
+  const byFile = new Map();
+  const byArtistToken = new Map(); // 'high' needs artist overlap, so only songs sharing a token can match
   for (const song of librarySongs) {
     const key = song.songKey || getSongKey(song);
     if (key && !byKey.has(key)) byKey.set(key, song);
+    const file = song.filename || song.fileName;
+    if (file && !byFile.has(baseName(file))) byFile.set(baseName(file), song);
+    const tokens = tokenSet(song.artist);
+    if (!tokens.size) tokens.add('');
+    for (const token of tokens) {
+      if (!byArtistToken.has(token)) byArtistToken.set(token, []);
+      byArtistToken.get(token).push(song);
+    }
   }
+  const candidatesFor = artist => {
+    const tokens = tokenSet(artist);
+    if (!tokens.size) return byArtistToken.get('') || [];
+    const seen = new Set();
+    for (const token of tokens) for (const song of byArtistToken.get(token) || []) seen.add(song);
+    return [...seen];
+  };
   const matches = [];
   const unmatched = [];
   const claimed = new Set(); // first record wins; duplicates (other files of the same song) are dropped
   for (const record of records) {
     const key = recordSongKey(record);
-    let song = key ? byKey.get(key) : null;
+    let song = (key ? byKey.get(key) : null) || (record.filename ? byFile.get(baseName(record.filename)) : null) || null;
     if (!song) {
-      const title = record.title || filenameTitle(record.filename);
+      const parts = recordParts(record);
       // 'high' only: a medium match can attach a live/remix vector to the studio track.
-      const match = findSimilarSongMatch({ artist: record.artist, track: title }, librarySongs, 'high');
+      const match = findSimilarSongMatch(parts, candidatesFor(parts.artist), 'high');
       song = match?.song || null;
     }
     const matchedKey = song && (song.songKey || getSongKey(song));

@@ -169,3 +169,25 @@ test('sync holds the cursor when a page has rows not yet in the library', async 
     db.songVectors.put = originalVectorPut;
   }
 });
+
+test('matchExportToLibrary uses filenames for untagged files and pruning keeps every fuzzy match', async () => {
+  const { findSimilarSongMatch, getSongKey } = await import('../songIdentity.js');
+  const library = [
+    { songKey: getSongKey({ artist: 'Rihanna', track: 'S&M' }), artist: 'Rihanna', track: 'S&M', filename: 'Rihanna - S&M.mp3' },
+    { songKey: getSongKey({ artist: 'Teddy Swims', track: 'Lose Control' }), artist: 'Teddy Swims', track: 'Lose Control', filename: 'x.mp3' },
+    { songKey: getSongKey({ artist: 'Hans Zimmer', track: 'Time' }), artist: 'Hans Zimmer', track: 'Time', filename: 'Hans Zimmer - Time (From Inception).m4a' },
+  ];
+  const records = [
+    { songKey: 'unknown artist::hans zimmer time from inception', artist: '', title: 'Hans Zimmer - Time (From Inception)', filename: 'Hans Zimmer - Time (From Inception).m4a' },
+    { songKey: 'unknown artist::teddy swims lose control', artist: '', title: 'Teddy Swims - Lose Control', filename: 'Teddy Swims - Lose Control.mp3' },
+    { songKey: 'rihana::s and m', artist: 'Rihanna feat. Nobody', title: 'S&M', filename: 'other.mp3' },
+  ];
+  const { matches, unmatched } = matchExportToLibrary(records, library);
+  assert.deepEqual(matches.map(m => m.song.track), ['Time', 'Lose Control', 'S&M']);
+  assert.equal(unmatched.length, 0);
+  // Pruned candidate search must agree with a scan of the whole library.
+  for (const record of records.slice(2)) {
+    const full = findSimilarSongMatch({ artist: record.artist, track: record.title }, library, 'high');
+    assert.equal(full?.song, matches.find(m => m.record === record)?.song);
+  }
+});
