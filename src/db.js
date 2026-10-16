@@ -936,6 +936,16 @@ export async function saveSongVector(songKey, embeddingModel, row = {}) {
   await db.songVectors.put({ ...row, songKey, embeddingModel, updatedAt });
 }
 
+export async function saveSongVectors(rows = [], { chunkSize = 500 } = {}) {
+  if (!db?.songVectors || !rows.length) return 0;
+  const updatedAt = new Date().toISOString();
+  const valid = rows.filter(row => row?.songKey && row?.embeddingModel).map(row => ({ updatedAt, ...row }));
+  for (let start = 0; start < valid.length; start += chunkSize) {
+    await db.songVectors.bulkPut(valid.slice(start, start + chunkSize));
+  }
+  return valid.length;
+}
+
 export async function getSongVectors(embeddingModel) {
   if (!db?.songVectors) return [];
   return db.songVectors.where('embeddingModel').equals(embeddingModel).toArray();

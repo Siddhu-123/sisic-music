@@ -1,4 +1,4 @@
-import { db, getSongVectors, saveSongVector } from '../db.js';
+import { db, getSongVectors, saveSongVector, saveSongVectors } from '../db.js';
 import { findSimilarSongMatch, getSongKey, tokenSet } from '../songIdentity.js';
 
 export const GEMMA2_MODEL = 'embeddinggemma-2@fp32/clip30/v1';
@@ -82,8 +82,8 @@ export async function importGemmaVectors(payload, librarySongs = []) {
     return { imported: 0, unmatched: 0, skipped: Array.isArray(payload?.songs) ? payload.songs.length : 0 };
   }
   const { matches, unmatched } = matchExportToLibrary(payload.songs, librarySongs);
-  let imported = 0;
   let skipped = 0;
+  const rows = [];
   for (const { record, song } of matches) {
     if (record.model && record.model !== GEMMA2_MODEL) {
       skipped++;
@@ -99,7 +99,9 @@ export async function importGemmaVectors(payload, librarySongs = []) {
       skipped++;
       continue;
     }
-    await saveSongVector(song.songKey || getSongKey(song), GEMMA2_MODEL, {
+    rows.push({
+      songKey: song.songKey || getSongKey(song),
+      embeddingModel: GEMMA2_MODEL,
       vector,
       dimensions: GEMMA2_DIMENSIONS,
       fileHash: record.fileHash || '',
@@ -113,8 +115,9 @@ export async function importGemmaVectors(payload, librarySongs = []) {
       year: record.year ?? song.year ?? null,
       duration: record.duration ?? song.duration ?? null,
     });
-    imported++;
   }
+  // One bulkPut per 500 rows instead of a transaction per song (a full export is ~5,000 rows).
+  const imported = await saveSongVectors(rows);
   return { imported, unmatched: unmatched.length, skipped };
 }
 

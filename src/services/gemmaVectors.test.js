@@ -32,6 +32,8 @@ test('validates model and dimensions and imports normalized vectors without touc
   const originalPut = db.songVectors.put;
   const saved = [];
   db.songVectors.put = async row => saved.push(row);
+  const originalBulkPut = db.songVectors.bulkPut;
+  db.songVectors.bulkPut = async rows => { saved.push(...rows); };
   try {
     const library = [{ songKey: 'a', artist: 'A', track: 'One' }, { songKey: 'b', artist: 'B', track: 'Two' }];
     const result = await importGemmaVectors({
@@ -54,6 +56,7 @@ test('validates model and dimensions and imports normalized vectors without touc
     });
   } finally {
     db.songVectors.put = originalPut;
+    db.songVectors.bulkPut = originalBulkPut;
   }
 });
 
@@ -66,6 +69,8 @@ test('sync pages with bearer auth, persists only the cursor, and never writes to
   const originalStorage = globalThis.localStorage;
   globalThis.localStorage = { setItem: (...args) => storageWrites.push(args) };
   db.songVectors.put = async row => saved.push(row);
+  const originalBulkPut = db.songVectors.bulkPut;
+  db.songVectors.bulkPut = async rows => { saved.push(...rows); };
   db.metadata.put = async row => metadata.push(row);
   const calls = [];
   const pages = [
@@ -101,6 +106,7 @@ test('sync pages with bearer auth, persists only the cursor, and never writes to
     assert.equal(storageWrites.length, 0);
   } finally {
     db.songVectors.put = originalVectorPut;
+    db.songVectors.bulkPut = originalBulkPut;
     db.metadata.put = originalMetadataPut;
     if (originalStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalStorage;
@@ -122,6 +128,8 @@ test('rejects vectors with null or string entries and keeps only the first recor
   const originalPut = db.songVectors.put;
   const saved = [];
   db.songVectors.put = async row => saved.push(row);
+  const originalBulkPut = db.songVectors.bulkPut;
+  db.songVectors.bulkPut = async rows => { saved.push(...rows); };
   try {
     const bad = vector(0); bad[5] = null;
     const result = await importGemmaVectors({
@@ -137,6 +145,7 @@ test('rejects vectors with null or string entries and keeps only the first recor
     assert.equal(saved[0].vector[1], 1);
   } finally {
     db.songVectors.put = originalPut;
+    db.songVectors.bulkPut = originalBulkPut;
   }
 });
 
@@ -148,6 +157,8 @@ test('sync holds the cursor when a page has rows not yet in the library', async 
   db.metadata.get = async () => null;
   db.metadata.put = async row => cursors.push(row.value);
   db.songVectors.put = async () => {};
+  const originalBulkPut = db.songVectors.bulkPut;
+  db.songVectors.bulkPut = async () => {};
   const pages = [
     { songs: [{ songKey: 'known', vector: vector(0) }], cursor: 'c1' },
     { songs: [{ songKey: 'not-loaded-yet', vector: vector(1) }], cursor: 'c2' },
@@ -167,6 +178,7 @@ test('sync holds the cursor when a page has rows not yet in the library', async 
     db.metadata.get = originalGet;
     db.metadata.put = originalPut;
     db.songVectors.put = originalVectorPut;
+    db.songVectors.bulkPut = originalBulkPut;
   }
 });
 
