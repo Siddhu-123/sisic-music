@@ -641,6 +641,16 @@ test('planNextSet asks the scorer once per ordered pair', () => {
   assert.ok(calls.every(c => !c.endsWith('>src')));
 });
 
+test('planNextSet incorporates Gemma boundary similarity and learned pair skip cost', () => {
+  const ranked = [item(mk('gemma-avoid')), item(mk('gemma-match'))];
+  const picks = Array.from({ length: 20 }, (_, seed) => planNextSet({
+    source: mk('src'), ranked, count: 1, seed, transitionScorer: good,
+    gemmaBoundaryScorer: (a, b) => b.songKey === 'gemma-match' ? 1 : -1,
+    learnedTransitionPenalty: (a, b) => b.songKey === 'gemma-avoid' ? 1 : 0,
+  }).keys[0]);
+  assert.ok(picks.filter(key => key === 'gemma-match').length > picks.length / 2);
+});
+
 test('planNextSet avoids the artists played just before the set (recentArtists)', () => {
   const ranked = [...['y1', 'y2', 'y3'].map(k => item(mk(k, 'Y'))), ...['z1', 'z2', 'z3'].map(k => item(mk(k, 'Z')))];
   const run = extra => picksOver(seed => planNextSet({ source: mk('src', 'X'), ranked, count: 1, seed, transitionScorer: good, ...extra }));

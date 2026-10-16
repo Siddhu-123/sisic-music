@@ -130,10 +130,13 @@ export function buildInterests(items = [], {
   minRelativeGain = 0.3,
   minAbsoluteGain = 0.04,
   seed = 11,
+  gemmaVectors,
 } = {}) {
   const valid = [];
   items.forEach((item, index) => {
-    const vector = unit(item?.vector);
+    const gemmaVector = gemmaVectors?.get?.(item?.songKey)?.vector;
+    // When a Gemma map is supplied it is authoritative; never mix it with a fallback space.
+    const vector = unit(gemmaVectors ? gemmaVector : item?.vector);
     const weight = Number(item?.weight);
     if (vector && weight > 0 && Number.isFinite(weight)) valid.push({ vector, weight, index });
   });

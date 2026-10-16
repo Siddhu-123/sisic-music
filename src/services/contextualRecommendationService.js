@@ -5,8 +5,19 @@ import {
   getSongEmbedding,
 } from './tasteEmbeddingService.js';
 import { buildInterests, interestAffinity } from './tasteInterests.js';
+import { createSessionSteer, outcomeWeight } from './behaviourLearning.js';
 
 export const PLAYBACK_SESSION_GAP_MS = 20 * 60 * 1000;
+export function currentSessionEvents(events = [], gapMs = PLAYBACK_SESSION_GAP_MS) {
+  const sorted = [...events].filter(event => Number.isFinite(Date.parse(event?.createdAt)))
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  let start = 0;
+  for (let i = 1; i < sorted.length; i++) {
+    if (Date.parse(sorted[i].createdAt) - Date.parse(sorted[i - 1].createdAt) > gapMs) start = i;
+  }
+  return sorted.slice(start);
+}
+
 export const PLAYBACK_START_EVENT_TYPES = Object.freeze(['playback-start', 'playback-resume']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -282,6 +293,8 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
 
   function getCompatibleVector(song) {
     if (!song) return null;
+    const gemma = options.gemmaVectors?.get?.(song.songKey || getSongKey(song));
+    if (targetSpace === 'gemma') return gemma?.vector ? validateAndNormalizeVector(gemma.vector, gemma.vector.length) : null;
     // Metadata space always goes through the versioned helper so stale v1 vectors never mix in.
     if (targetSpace === 'metadata') return targetDimensions === EMBEDDING_DIMENSIONS ? getSongVector(song) : null;
     const meta = resolveEmbeddingMetadata(song);
@@ -363,7 +376,7 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     const vector = getCompatibleVector(entry.song);
     if (vector) interestItems.push({ vector, weight: net, songKey: key });
   });
-  const interests = buildInterests(interestItems, { maxInterests: options.maxInterests || 4 }).map(interest => ({
+  const interests = buildInterests(interestItems, { maxInterests: options.maxInterests || 4, gemmaVectors: options.gemmaVectors }).map(interest => ({
     vector: interest.vector,
     weight: interest.weight,
     size: interest.size,
@@ -447,7 +460,9 @@ export function rankContextualSongs(songs = [], options = {}) {
       const key = song.songKey || getSongKey(song);
       let vector = null;
       if (profile?.spaceMeta) {
-        const meta = profile.spaceMeta.vectorType === 'metadata' ? null : resolveEmbeddingMetadata(song);
+        const gemma = options.gemmaVectors?.get?.(key);
+        if (profile.spaceMeta.vectorType === 'gemma') vector = gemma?.vector ? validateAndNormalizeVector(gemma.vector, gemma.vector.length) : null;
+        const meta = profile.spaceMeta.vectorType === 'metadata' || profile.spaceMeta.vectorType === 'gemma' ? null : resolveEmbeddingMetadata(song);
         if (meta && areVectorSpacesCompatible(profile.spaceMeta, meta)) {
           vector = meta.vector;
         } else if (profile.spaceMeta.vectorType === 'metadata') {
@@ -476,11 +491,13 @@ export function rankContextualSongs(songs = [], options = {}) {
         + popularityBoost
         + discoveryBoost
         - recentPenalty;
+      const steerScore = options.sessionSteer?.score?.(vector) || 0;
       return {
         song,
         key,
         artist: String(song.artist || '').trim().toLowerCase(),
-        score,
+        score: score + (steerScore * (options.steerWeight ?? 0.2)),
+        steerScore,
         plays,
       };
     })
@@ -633,7 +650,11 @@ export async function buildUpNextRecommendations({
   limit = 5,
   signal,
   getEmbedding,
+  gemmaVectors: gemmaVectorsOption,
+  sessionSteer,
 } = {}) {
+  // An empty map means "no Gemma vectors yet": keep the old MusiCNN/metadata path untouched.
+  const gemmaVectors = gemmaVectorsOption?.size ? gemmaVectorsOption : null;
   if (!currentSong || !Array.isArray(librarySongs) || librarySongs.length === 0) return [];
   const currentKey = currentSong.songKey || getSongKey(currentSong);
   if (!currentKey) return [];
@@ -667,10 +688,25 @@ export async function buildUpNextRecommendations({
   if (candidates.length === 0) return [];
   if (signal?.aborted) return [];
 
+  const activeSteer = sessionSteer || createSessionSteer();
+  if (!sessionSteer && gemmaVectors) {
+    // Steer from the current listening session only, not the whole history.
+    for (const event of currentSessionEvents(playbackEvents)) {
+      const vector = gemmaVectors?.get?.(event.songKey)?.vector;
+      const weight = outcomeWeight(event);
+      if (vector && weight) activeSteer.observe(vector, weight);
+    }
+  }
+  const gemmaDimensions = gemmaVectors?.values?.().next?.().value?.vector?.length;
+
   // 2. Resolve embedding for current song
   let currentMeta = null;
   let currentVector = null;
-  if (currentSong.vector) {
+  const gemmaCurrent = gemmaVectors?.get?.(currentKey);
+  if (gemmaCurrent?.vector) {
+    currentVector = validateAndNormalizeVector(gemmaCurrent.vector, gemmaCurrent.vector.length);
+    if (currentVector) currentMeta = { vectorType: 'gemma', model: 'embeddinggemma-2@fp32/clip30/v1', dimensions: currentVector.length };
+  } else if (!gemmaVectors && currentSong.vector) {
     const rawDims = currentSong.dimensions || currentSong.embeddingDimensions || currentSong.vector.length;
     const norm = validateAndNormalizeVector(currentSong.vector, rawDims);
     if (norm) {
@@ -678,7 +714,7 @@ export async function buildUpNextRecommendations({
       currentVector = norm;
     }
   }
-  if (!currentVector && typeof getEmbedding === 'function') {
+  if (!currentVector && !gemmaVectors && typeof getEmbedding === 'function') {
     try {
       const loaded = await getEmbedding(currentKey);
       if (loaded?.vector) {
@@ -699,9 +735,10 @@ export async function buildUpNextRecommendations({
   // 3. Build contextual taste profile from playback history within compatible space
   const profile = buildContextualTasteProfile(librarySongs, playbackEvents, {
     excludeSongKeys: Array.from(recentKeys),
-    targetSpace: currentMeta?.vectorType || 'metadata',
+    targetSpace: currentMeta?.vectorType || (gemmaVectors ? 'gemma' : 'metadata'),
     targetModel: currentMeta?.model || null,
-    targetDimensions: currentMeta?.dimensions || EMBEDDING_DIMENSIONS,
+    targetDimensions: currentMeta?.dimensions || gemmaDimensions || EMBEDDING_DIMENSIONS,
+    gemmaVectors,
     likedSongKeys,
     now: Date.now(),
   });
@@ -714,7 +751,11 @@ export async function buildUpNextRecommendations({
     const candKey = candidate.songKey || getSongKey(candidate);
     let candMeta = null;
     let candVector = null;
-    if (candidate.vector) {
+    const gemmaCandidate = gemmaVectors?.get?.(candKey);
+    if (gemmaCandidate?.vector) {
+      candVector = validateAndNormalizeVector(gemmaCandidate.vector, gemmaCandidate.vector.length);
+      if (candVector) candMeta = { vectorType: 'gemma', model: 'embeddinggemma-2@fp32/clip30/v1', dimensions: candVector.length };
+    } else if (!gemmaVectors && candidate.vector) {
       const rawDims = candidate.dimensions || candidate.embeddingDimensions || candidate.vector.length;
       const norm = validateAndNormalizeVector(candidate.vector, rawDims);
       if (norm) {
@@ -722,7 +763,7 @@ export async function buildUpNextRecommendations({
         candVector = norm;
       }
     }
-    if (!candVector && hasEmbedding && typeof getEmbedding === 'function') {
+    if (!candVector && hasEmbedding && !gemmaVectors && typeof getEmbedding === 'function') {
       try {
         const loaded = await getEmbedding(candKey);
         if (loaded?.vector) {
@@ -764,6 +805,8 @@ export async function buildUpNextRecommendations({
       likedSongKeys,
       excludeSongKeys: Array.from(recentKeys),
       limit: candidates.length,
+      gemmaVectors,
+      sessionSteer: activeSteer,
     }
   );
   const contextualScoreByKey = new Map(rankedContextual.map((item, idx) => [
@@ -792,10 +835,16 @@ export async function buildUpNextRecommendations({
       embeddingModel: hasEmbeddingMatch ? item.candMeta?.model : null,
       similarityScore: hasEmbeddingMatch ? item.embeddingSimilarity : undefined,
       isFallback: !hasEmbeddingMatch,
+      _vector: item.candMeta?.vectorType === 'gemma' ? gemmaVectors?.get?.(item.candKey)?.vector : item.candidate.vector,
     };
   });
 
   // Sort descending by finalScore
+  if (activeSteer?.state) {
+    const reranked = activeSteer.rerank(finalScored.map(item => ({ ...item, vector: item._vector, baseScore: item.score })), { mix: 0.25 });
+    const scores = new Map(reranked.map(item => [item.song.songKey || getSongKey(item.song), item.rerankScore]));
+    finalScored.forEach(item => { item.score = scores.get(item.song.songKey || getSongKey(item.song)) ?? item.score; });
+  }
   finalScored.sort((a, b) => b.score - a.score);
 
   // Apply artist diversity: max 2 tracks per artist unless pool is small

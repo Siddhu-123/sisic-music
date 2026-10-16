@@ -193,6 +193,7 @@ function selectPool(candidates, startId) {
 export function planSet(options) {
   if (options === null || typeof options !== 'object') return null;
   const { candidates, start, pairScore = null } = options;
+  const transitionScorer = typeof options.transitionScorer === 'function' ? options.transitionScorer : null;
   const count = options.count === undefined ? 4 : options.count;
   const beamWidth = isNum(options.beamWidth) ? options.beamWidth : 8;
   const seed = isNum(options.seed) ? options.seed : 1;
@@ -210,7 +211,7 @@ export function planSet(options) {
 
   const wanted = Math.max(1, Math.floor(count));
   const width = Math.max(1, Math.floor(beamWidth));
-  const custom = typeof pairScore === 'function' ? pairScore : null;
+  const custom = typeof pairScore === 'function' ? pairScore : transitionScorer;
 
   const recentArtistsOpt = Array.isArray(options.recentArtists)
     ? options.recentArtists.filter((a) => typeof a === 'string')

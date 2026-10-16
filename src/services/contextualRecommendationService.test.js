@@ -149,6 +149,23 @@ test('buildUpNextRecommendations with real embeddings ranks nearest neighbors wi
   assert.equal(recs[1].songKey, 'far-neighbor');
 });
 
+test('Gemma vectors take precedence over song embeddings and steer Up Next in their own vector space', async () => {
+  const songs = [
+    { songKey: 'current', artist: 'Source', track: 'Current', vector: basis(0), driveFileId: 'f0' },
+    { songKey: 'gemma-near', artist: 'Near', track: 'Near', vector: basis(1), driveFileId: 'f1' },
+    { songKey: 'gemma-far', artist: 'Far', track: 'Far', vector: basis(0), driveFileId: 'f2' },
+  ];
+  const gemmaVectors = new Map([
+    ['current', { vector: [1, 0] }],
+    ['gemma-near', { vector: [0.99, 0.01] }],
+    ['gemma-far', { vector: [0, 1] }],
+  ]);
+  const recs = await buildUpNextRecommendations({ currentSong: songs[0], librarySongs: songs, gemmaVectors, limit: 2 });
+  assert.equal(recs[0].songKey, 'gemma-near');
+  assert.equal(recs[0].embeddingType, 'gemma');
+  assert.ok(recs[0].similarityScore > 0.99);
+});
+
 test('buildUpNextRecommendations handles missing embeddings honestly without fake vectors', async () => {
   const currentSong = { songKey: 'no-vector-song', artist: 'Indie Band', track: 'Acoustic Track' };
   const librarySongs = [
@@ -627,4 +644,11 @@ test('stale sessions fade and recently skipped songs are penalised', () => {
   const [skipped] = rankContextualSongs(songs, { profile: fresh, now: baseTime + 300_000, excludeSongKeys: ['played'] });
   const [unskipped] = rankContextualSongs([{ ...songs[1], songKey: 'other' }], { profile: fresh, now: baseTime + 300_000 });
   assert.ok(skipped.recommendationScore < unskipped.recommendationScore);
+});
+
+test('currentSessionEvents keeps only events after the last 20-minute gap', async () => {
+  const { currentSessionEvents } = await import('./contextualRecommendationService.js');
+  const at = minutes => new Date(Date.UTC(2026, 9, 16, 20, minutes)).toISOString();
+  const events = [{ id: 'old', createdAt: at(0) }, { id: 'a', createdAt: at(30) }, { id: 'b', createdAt: at(40) }];
+  assert.deepEqual(currentSessionEvents(events).map(event => event.id), ['a', 'b']);
 });

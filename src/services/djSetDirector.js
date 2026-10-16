@@ -119,7 +119,7 @@ export function transitionPairScore(songA, songB, scorer = scoreDjTransition) {
 
 export function planNextSet(options) {
   if (!options?.source || !options?.ranked?.length) return null;
-  const { source, ranked, count, seed, rng, now = Date.now, pairScore = null, recentArtists: explicitRecentArtists = null, transitionScorer: scorer = scoreDjTransition } = options;
+  const { source, ranked, count, seed, rng, now = Date.now, pairScore = null, recentArtists: explicitRecentArtists = null, transitionScorer: scorer = scoreDjTransition, gemmaBoundaryScorer, learnedTransitionPenalty } = options;
 
   const startSong = toPlannerSong(source, { energy: source.energy, taste: source.taste });
   if (!startSong) return null;
@@ -159,12 +159,18 @@ export function planNextSet(options) {
   }
 
   let effectivePairScore = pairScore;
-  if (typeof effectivePairScore !== 'function') {
+  if (typeof effectivePairScore !== 'function' || typeof gemmaBoundaryScorer === 'function' || typeof learnedTransitionPenalty === 'function') {
+    const suppliedPairScore = effectivePairScore;
     const pairCache = new Map();
     effectivePairScore = (plannerA, plannerB) => {
       const cacheKey = `${plannerA.id}->${plannerB.id}`;
       if (!pairCache.has(cacheKey)) {
-        pairCache.set(cacheKey, transitionPairScore(rawSongById.get(plannerA.id), rawSongById.get(plannerB.id), scorer));
+        const rawA = rawSongById.get(plannerA.id);
+        const rawB = rawSongById.get(plannerB.id);
+        let score = typeof suppliedPairScore === 'function' ? Number(suppliedPairScore(plannerA, plannerB)) : transitionPairScore(rawA, rawB, scorer);
+        if (typeof gemmaBoundaryScorer === 'function') score += 0.25 * (Number(gemmaBoundaryScorer(rawA, rawB)) || 0);
+        if (typeof learnedTransitionPenalty === 'function') score -= Number(learnedTransitionPenalty(rawA, rawB)) || 0;
+        pairCache.set(cacheKey, Math.max(0, Math.min(1, score)));
       }
       return pairCache.get(cacheKey);
     };

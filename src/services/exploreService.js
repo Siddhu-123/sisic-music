@@ -1,8 +1,15 @@
 import { getSongKey, normalizeText } from '../songIdentity.js';
 import {
   buildContextualTasteProfile,
+  currentSessionEvents,
   rankContextualSongs,
 } from './contextualRecommendationService.js';
+import {
+  buildArtistMix, buildDailyMixes, buildDecadeMix, buildGenreMix, buildMoodMix, buildNicheMix,
+  buildTextMix,
+} from './mixEngine.js';
+import { queryTextVector } from './gemmaVectors.js';
+import { createSessionSteer, outcomeWeight } from './behaviourLearning.js';
 
 const GENRE_RULES = [
   ['Pop', ['pop', 'dance pop', 'synthpop']],
@@ -132,6 +139,15 @@ export function getExploreFacets(songs = [], type = 'genre', limit = 8) {
     .map(([label, count]) => ({ label, count }));
 }
 
+export async function buildExploreTextMix(text, ctx = {}, serviceOptions = {}) {
+  const query = String(text || '').trim();
+  if (!query) return { id: 'text-mix', title: 'Inspired by your search', songs: [] };
+  const result = await queryTextVector({ ...serviceOptions, text: query });
+  const textVector = result?.vector || result?.textVector;
+  const songs = textVector ? buildTextMix(textVector, ctx, { size: serviceOptions.size || 40 }) : [];
+  return { id: `text-${normalizeText(query)}`, title: `Inspired by “${query}”`, subtitle: 'Expanded from your search with EmbeddingGemma', songs };
+}
+
 function songKey(song) {
   return song.songKey || getSongKey(song);
 }
@@ -149,6 +165,9 @@ export function buildExploreMixes(songs = [], {
   likedSongKeys = [],
   now = Date.now(),
   currentContext,
+  gemmaVectors,
+  affinities,
+  textVector,
 } = {}) {
   const pool = songs.filter(song => songKey(song));
   const liked = new Set(likedSongKeys);
@@ -157,13 +176,25 @@ export function buildExploreMixes(songs = [], {
   for (const event of starts) {
     if (event.songKey) playCountByKey.set(event.songKey, (playCountByKey.get(event.songKey) || 0) + 1);
   }
-  const profile = buildContextualTasteProfile(pool, playbackEvents, { now, currentContext, likedSongKeys: liked });
+  const hasGemma = gemmaVectors instanceof Map && gemmaVectors.size > 0;
+  const dimensions = hasGemma ? gemmaVectors.values().next().value?.vector?.length : null;
+  const sessionSteer = hasGemma ? createSessionSteer() : null;
+  if (sessionSteer) currentSessionEvents(playbackEvents).forEach(event => {
+    const vector = gemmaVectors.get(event.songKey)?.vector;
+    const weight = outcomeWeight(event);
+    if (vector && weight) sessionSteer.observe(vector, weight);
+  });
+  const profile = buildContextualTasteProfile(pool, playbackEvents, {
+    now, currentContext, likedSongKeys: liked, gemmaVectors,
+    ...(hasGemma ? { targetSpace: 'gemma', targetModel: 'embeddinggemma-2@fp32/clip30/v1', targetDimensions: dimensions } : {}),
+  });
   const ranked = rankContextualSongs(pool, {
     profile,
     likedSongKeys: liked,
     playCountByKey,
     now,
     limit: pool.length,
+    ...(hasGemma ? { gemmaVectors, sessionSteer } : {}),
   });
   const topMood = dominantFacet(ranked.slice(0, 30), getSongMoods);
   const topGenre = dominantFacet(ranked.slice(0, 30), getSongGenres);
@@ -178,6 +209,18 @@ export function buildExploreMixes(songs = [], {
     topGenre ? { id: `genre-${normalizeText(topGenre)}`, title: `${topGenre} shelf`, subtitle: 'A focused library mix', songs: genreSongs.slice(0, 12) } : null,
     notReady.length ? { id: 'not-ready', title: 'Not ready yet', subtitle: 'Queue the Mac worker to prepare these songs', songs: notReady.slice(0, 12) } : null,
   ].filter(mix => mix?.songs?.length);
+
+  if (gemmaVectors instanceof Map && gemmaVectors.size) {
+    const context = { songs: pool, gemmaVectors, affinities, events: playbackEvents, now, textVector };
+    const artists = [...new Set(ranked.map(song => song.artist).filter(Boolean))].slice(0, 2);
+    const decades = [...new Set(pool.map(song => Math.floor(Number(song.year || String(song.releaseDate || '').slice(0, 4)) / 10) * 10).filter(Number.isFinite))].sort((a, b) => b - a).slice(0, 2);
+    for (const artist of artists) mixes.push({ id: `artist-${normalizeText(artist)}`, title: `${artist} mix`, subtitle: 'Artist essentials and close matches', songs: buildArtistMix(artist, context, { size: 12 }).slice(0, 12) });
+    for (const decade of decades) mixes.push({ id: `decade-${decade}`, title: `${decade}s mix`, subtitle: 'A decade, expanded by sound', songs: buildDecadeMix(decade, context).slice(0, 12) });
+    for (const genre of [topGenre].filter(Boolean)) mixes.push({ id: `gemma-genre-${normalizeText(genre)}`, title: `${genre} mix`, subtitle: 'Expanded by sound', songs: buildGenreMix(genre, context).slice(0, 12) });
+    for (const mood of [topMood].filter(Boolean)) mixes.push({ id: `gemma-mood-${normalizeText(mood)}`, title: `${mood} mix`, subtitle: 'Expanded by sound', songs: buildMoodMix(mood, context).slice(0, 12) });
+    mixes.push(...buildDailyMixes(context, { count: 3, size: 12 }));
+    mixes.push({ id: 'niche', title: 'Deep cuts', subtitle: 'Less familiar corners of your library', songs: buildNicheMix(context).slice(0, 12) });
+  }
 
   return {
     mixes,
