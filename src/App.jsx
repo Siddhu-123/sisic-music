@@ -1302,7 +1302,8 @@ function App() {
     const pending = (playbackEventQueue || []).filter(item => item?.id && !processedPlaybackEventIdsRef.current.has(item.id));
     if (!pending.length) return;
     pending.forEach(item => processedPlaybackEventIdsRef.current.add(item.id));
-    if (processedPlaybackEventIdsRef.current.size > 500) processedPlaybackEventIdsRef.current = new Set(pending.map(item => item.id));
+    // Rebuild from the live queue (not just this batch) so older queued ids are never replayed to Drive.
+    if (processedPlaybackEventIdsRef.current.size > 500) processedPlaybackEventIdsRef.current = new Set(playbackEventQueue.map(item => item?.id).filter(Boolean));
     const syncPlaybackEvent = async playbackEvent => {
       const event = enrichPlaybackEvent(playbackEvent, playbackSessionRef.current, {
         userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
@@ -1359,7 +1360,7 @@ function App() {
     const selectedKey = getSongKey(song);
     const isSearch = Boolean(options.isSearch || (searchQuery.trim().length >= 1 && (!selectedPlaylistKey || view === VIEWS.LIBRARY || view === VIEWS.DUPLICATES)));
     const sourceType = options.sourceType || (isSearch ? 'search' : selectedPlaylistKey ? 'playlist' : 'library');
-    const sourceId = options.sourceId || (sourceType === 'search' ? sourceHash(searchQuery.trim()) : sourceType === 'playlist' ? selectedPlaylistKey : '');
+    const sourceId = options.sourceId || (sourceType === 'search' ? sourceHash(String(options.searchText ?? searchQuery).trim()) : sourceType === 'playlist' ? selectedPlaylistKey : '');
     const sourceSongs = (isSearch ? [song] : (songList || [song]))
       .map(asSongRecord)
       .map(item => mergeJob(allSongsByKey.get(item.songKey) || item, jobBySongKey));
@@ -1393,9 +1394,11 @@ function App() {
     }
   }, [addToast, allSongsByKey, jobBySongKey, player, resolvePlayableSong, searchQuery, selectedPlaylistKey, view]);
 
+  // player is a new object each render; its controller methods are stable, so depend on the method itself.
+  const logPlayerEvent = player.event;
   const handleRecommendationShown = useCallback((surface, songKeys, sourceId = '') => {
-    player.event('recommendation-shown', null, { surface, songKeys: (songKeys || []).slice(0, 50), sourceId });
-  }, [player]);
+    logPlayerEvent('recommendation-shown', null, { surface, songKeys: (songKeys || []).slice(0, 50), sourceId });
+  }, [logPlayerEvent]);
 
   const handlePrepare = useCallback(async (song) => {
     const selectedKey = getSongKey(song);

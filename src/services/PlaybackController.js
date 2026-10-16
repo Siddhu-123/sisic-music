@@ -187,6 +187,7 @@ export class PlaybackController {
       const previous = this.impressions.get(signature);
       if (previous != null && now - previous < IMPRESSION_WINDOW_MS) return null;
       this.impressions.set(signature, now);
+      for (const [key, shownAt] of this.impressions) if (now - shownAt >= IMPRESSION_WINDOW_MS) this.impressions.delete(key);
     }
     if (eventType === 'playback-start' && songKey) {
       const qualifiedAt = this.replayCandidates.get(songKey);

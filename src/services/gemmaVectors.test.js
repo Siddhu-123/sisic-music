@@ -117,3 +117,55 @@ test('ranks cosine neighbours by whole-song vector and ignores boundary vectors'
   assert.deepEqual(gemmaNeighbors('seed', rows, 5).map(row => row.songKey), ['close', 'far']);
   assert.deepEqual(gemmaNeighbors('unknown', rows), []);
 });
+
+test('rejects vectors with null or string entries and keeps only the first record per song', async () => {
+  const originalPut = db.songVectors.put;
+  const saved = [];
+  db.songVectors.put = async row => saved.push(row);
+  try {
+    const bad = vector(0); bad[5] = null;
+    const result = await importGemmaVectors({
+      model: GEMMA2_MODEL, dimensions: GEMMA2_DIMENSIONS,
+      songs: [
+        { songKey: 'a', vector: bad },
+        { songKey: 'b', vector: vector(1) },
+        { songKey: 'b', vector: vector(2) },
+      ],
+    }, [{ songKey: 'a', artist: 'A', track: 'One' }, { songKey: 'b', artist: 'B', track: 'Two' }]);
+    assert.equal(result.imported, 1);
+    assert.equal(result.skipped, 1);
+    assert.equal(saved[0].vector[1], 1);
+  } finally {
+    db.songVectors.put = originalPut;
+  }
+});
+
+test('sync holds the cursor when a page has rows not yet in the library', async () => {
+  const originalGet = db.metadata.get;
+  const originalPut = db.metadata.put;
+  const originalVectorPut = db.songVectors.put;
+  const cursors = [];
+  db.metadata.get = async () => null;
+  db.metadata.put = async row => cursors.push(row.value);
+  db.songVectors.put = async () => {};
+  const pages = [
+    { songs: [{ songKey: 'known', vector: vector(0) }], cursor: 'c1' },
+    { songs: [{ songKey: 'not-loaded-yet', vector: vector(1) }], cursor: 'c2' },
+    { songs: [{ songKey: 'known2', vector: vector(2) }], cursor: 'c3' },
+    { songs: [], cursor: 'c3' },
+  ];
+  let call = 0;
+  const fetchImpl = async () => ({ ok: true, json: async () => pages[call++] });
+  try {
+    const result = await syncGemmaVectorsFromService({
+      baseUrl: 'https://svc', token: 't', fetchImpl,
+      librarySongs: [{ songKey: 'known', artist: 'K', track: 'K' }, { songKey: 'known2', artist: 'L', track: 'L' }],
+    });
+    assert.equal(result.imported, 2);
+    assert.deepEqual(cursors, ['c1']);
+  } finally {
+    db.metadata.get = originalGet;
+    db.metadata.put = originalPut;
+    db.songVectors.put = originalVectorPut;
+  }
+});

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles, Play, Plus, X, ListPlus } from 'lucide-react';
 import { findSimilarSongs } from '../services/tasteEmbeddingService.js';
 import { getSongKey } from '../songIdentity.js';
@@ -8,33 +8,39 @@ import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
 export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs = [], onPlaySong, onAddToQueue, onRecommendationShown }) {
   const dialogRef = useDialogFocus(Boolean(isOpen && targetSong), onClose);
-  const [gemmaRecommendations, setGemmaRecommendations] = useState(null);
+  const seedKey = targetSong ? (targetSong.songKey || getSongKey(targetSong)) : '';
+  // Lookup result is tagged with its seed so a quick A -> B switch never shows or logs A's list for B.
+  const [gemmaLookup, setGemmaLookup] = useState({ seedKey: '', recommendations: null });
   useEffect(() => {
     let cancelled = false;
-    setGemmaRecommendations(null);
-    if (!targetSong) return () => { cancelled = true; };
-    const seedKey = targetSong.songKey || getSongKey(targetSong);
+    if (!seedKey) return () => { cancelled = true; };
+    const songsByKey = new Map(librarySongs.map(song => [song.songKey || getSongKey(song), song]));
     getSongVectors(GEMMA2_MODEL).then(rows => {
-      if (cancelled || !rows.some(row => row.songKey === seedKey)) return;
-      const songsByKey = new Map(librarySongs.map(song => [song.songKey || getSongKey(song), song]));
-      const recommendations = gemmaNeighbors(seedKey, rows, 12).flatMap(row => {
-        const song = songsByKey.get(row.songKey);
-        return song ? [{ ...song, similarityScore: row.similarityScore }] : [];
-      });
-      setGemmaRecommendations(recommendations);
-    }).catch(() => {});
+      if (cancelled) return;
+      if (!rows.some(row => row.songKey === seedKey)) { setGemmaLookup({ seedKey, recommendations: null }); return; }
+      // Filter to library songs before taking the top 12 so the list is not short.
+      const libraryRows = rows.filter(row => row.songKey === seedKey || songsByKey.has(row.songKey));
+      const recommendations = gemmaNeighbors(seedKey, libraryRows, 12)
+        .map(row => ({ ...songsByKey.get(row.songKey), similarityScore: row.similarityScore }));
+      setGemmaLookup({ seedKey, recommendations });
+    }).catch(() => { if (!cancelled) setGemmaLookup({ seedKey, recommendations: null }); });
     return () => { cancelled = true; };
-  }, [targetSong, librarySongs]);
+  }, [seedKey, librarySongs]);
   const fallbackRecommendations = useMemo(() => {
     if (!targetSong) return [];
     return findSimilarSongs(targetSong, librarySongs, { limit: 12 });
   }, [targetSong, librarySongs]);
-  const recommendations = gemmaRecommendations ?? fallbackRecommendations;
+  const lookupSettled = gemmaLookup.seedKey === seedKey;
+  const recommendations = (lookupSettled && gemmaLookup.recommendations) || fallbackRecommendations;
+  const impressionKeys = recommendations.slice(0, 50).map(song => song.songKey || getSongKey(song)).join(',');
+  const lastImpressionRef = useRef('');
   useEffect(() => {
-    if (!isOpen || !targetSong) return;
-    const sourceId = targetSong.songKey || getSongKey(targetSong);
-    onRecommendationShown?.('recommendations-modal', recommendations.slice(0, 50).map(song => song.songKey || getSongKey(song)), sourceId);
-  }, [isOpen, targetSong, recommendations, onRecommendationShown]);
+    if (!isOpen || !seedKey || !lookupSettled) { if (!isOpen) lastImpressionRef.current = ''; return; }
+    const signature = `${seedKey}|${impressionKeys}`;
+    if (signature === lastImpressionRef.current) return;
+    lastImpressionRef.current = signature;
+    onRecommendationShown?.('recommendations-modal', impressionKeys ? impressionKeys.split(',') : [], seedKey);
+  }, [isOpen, seedKey, lookupSettled, impressionKeys]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isOpen || !targetSong) return null;
 

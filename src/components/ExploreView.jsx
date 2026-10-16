@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Compass, Music2, Search, Sparkles } from 'lucide-react';
 import { AsyncArtworkImage } from './Components.jsx';
 import {
@@ -57,13 +57,17 @@ export function ExploreView({
     [availability, genre, mood, rankedSongs],
   );
   const isFiltering = Boolean(query || genre || mood || availability !== 'all' || activeMix);
+  const impression = activeMix
+    ? { surface: 'explore-mix', keys: activeMix.songs.slice(0, 50).map(song => song.songKey), sourceId: activeMix.id }
+    : !isFiltering ? { surface: 'explore-mixes', keys: taste.mixes.flatMap(mix => mix.songs).slice(0, 50).map(song => song.songKey), sourceId: '' } : null;
+  const impressionSignature = impression ? `${impression.surface}|${impression.sourceId}|${impression.keys.join(',')}` : '';
+  const lastImpressionRef = useRef('');
   useEffect(() => {
-    if (activeMix) {
-      onRecommendationShown?.('explore-mix', activeMix.songs.slice(0, 50).map(song => song.songKey), activeMix.id);
-    } else if (!isFiltering) {
-      onRecommendationShown?.('explore-mixes', taste.mixes.flatMap(mix => mix.songs).slice(0, 50).map(song => song.songKey), '');
-    }
-  }, [activeMix, isFiltering, onRecommendationShown, taste.mixes]);
+    // Log a list once when it is first shown or changes, not on every re-render.
+    if (!impression || impressionSignature === lastImpressionRef.current) return;
+    lastImpressionRef.current = impressionSignature;
+    onRecommendationShown?.(impression.surface, impression.keys, impression.sourceId);
+  }, [impressionSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const genreShelves = useMemo(
     () => genres.slice(0, 4).map(facet => ({
       ...facet,
@@ -147,7 +151,7 @@ export function ExploreView({
           {activeMix ? (
             <div className="content-rail">{activeMix.songs.map(song => renderSong(song, activeMix.songs, { sourceType: 'mix', sourceId: activeMix.id }))}</div>
           ) : filteredSongs.length ? (
-            <div className="songs-grid explore-results-grid">{filteredSongs.slice(0, 48).map(song => renderSong(song, query.trim() ? null : filteredSongs, { isSearch: Boolean(query.trim()) }))}</div>
+            <div className="songs-grid explore-results-grid">{filteredSongs.slice(0, 48).map(song => renderSong(song, query.trim() ? null : filteredSongs, { isSearch: Boolean(query.trim()), searchText: query }))}</div>
           ) : (
             <div className="empty-state explore-empty"><Music2 size={40} color="var(--text-muted)" /><h3>No matches</h3><p>Try clearing a mood, genre, or library filter.</p></div>
           )}

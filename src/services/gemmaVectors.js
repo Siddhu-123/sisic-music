@@ -8,8 +8,9 @@ const CURSOR_KEY = `gemmaVectorsCursor:${GEMMA2_MODEL}`;
 
 function normalizeVector(vector, dimensions) {
   if (!Array.isArray(vector) || vector.length !== dimensions) return null;
-  const values = vector.map(Number);
-  if (values.some(value => !Number.isFinite(value))) return null;
+  // Reject null/''/strings instead of letting Number() coerce them to 0.
+  if (vector.some(value => typeof value !== 'number' || !Number.isFinite(value))) return null;
+  const values = vector;
   const norm = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0));
   return norm > 0 ? values.map(value => value / norm) : null;
 }
@@ -31,15 +32,18 @@ export function matchExportToLibrary(records = [], librarySongs = []) {
   }
   const matches = [];
   const unmatched = [];
+  const claimed = new Set(); // first record wins; duplicates (other files of the same song) are dropped
   for (const record of records) {
     const key = recordSongKey(record);
     let song = key ? byKey.get(key) : null;
     if (!song) {
       const title = record.title || filenameTitle(record.filename);
-      const match = findSimilarSongMatch({ artist: record.artist, track: title }, librarySongs, 'medium');
+      // 'high' only: a medium match can attach a live/remix vector to the studio track.
+      const match = findSimilarSongMatch({ artist: record.artist, track: title }, librarySongs, 'high');
       song = match?.song || null;
     }
-    if (song) matches.push({ record, song });
+    const matchedKey = song && (song.songKey || getSongKey(song));
+    if (song && !claimed.has(matchedKey)) { claimed.add(matchedKey); matches.push({ record, song }); }
     else unmatched.push(record);
   }
   return { matches, unmatched };
@@ -93,6 +97,7 @@ export async function syncGemmaVectorsFromService({ baseUrl, token, since, fetch
   let unmatched = 0;
   let skipped = 0;
   const seen = new Set();
+  let holdCursor = false;
   while (!seen.has(String(cursor))) {
     seen.add(String(cursor));
     const url = new URL('vectors', `${String(baseUrl).replace(/\/+$/, '')}/`);
@@ -111,7 +116,9 @@ export async function syncGemmaVectorsFromService({ baseUrl, token, since, fetch
     unmatched += result.unmatched;
     skipped += result.skipped;
     const nextCursor = page.cursor ?? cursor;
-    if (nextCursor !== cursor) await db.metadata.put({ key: CURSOR_KEY, value: nextCursor });
+    // Stop persisting once a page had unmatched rows, so the next sync (e.g. after the library loads) retries them.
+    if (result.unmatched) holdCursor = true;
+    if (!holdCursor && nextCursor !== cursor) await db.metadata.put({ key: CURSOR_KEY, value: nextCursor });
     const done = !rows.length || String(nextCursor) === String(cursor);
     cursor = nextCursor;
     if (done) break;
