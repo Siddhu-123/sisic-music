@@ -292,7 +292,7 @@ def evaluate(db_path: str, out_dir: str, *, seeds: int = 30, dims: int = 768, se
     (out / "eval.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     (out / "neighbors.json").write_text(json.dumps(neighbors, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     (out / "review.html").write_text(render_review(neighbors), encoding="utf-8")
-    print(f"Evaluated {len(songs)} songs, {report["coverage"]["clips"]} clips; {len(covered)} full coverage; artist P@5={report['same_artist']['p_at_k']}")
+    print(f"Evaluated {len(songs)} songs, {report['coverage']['clips']} clips; {len(covered)} full coverage; artist P@5={report['same_artist']['p_at_k']}")
     return report
 
 
