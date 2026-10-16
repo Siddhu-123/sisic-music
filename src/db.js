@@ -218,6 +218,23 @@ db.version(11).stores({
   await tx.table('metadata').put({ key: 'schemaVersion', value: 11 });
 });
 
+db.version(12).stores({
+  songs: '++id, &songKey, track, artist, album, driveFileId, playCount, lastPlayedAt, fileIdentity, importStatus, syncStatus, embeddingStatus, coverArtUrl, bpm, musicalKey, djMetadataVersion',
+  playlists: '&playlistKey, name, source, updatedAt',
+  playlistSongs: '[playlistKey+songKey], playlistKey, songKey',
+  downloadJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  songEmbeddings: '&songKey, updatedAt',
+  songVectors: '&[songKey+embeddingModel], songKey, embeddingModel, fileHash, updatedAt',
+  importJobs: '&jobId, songKey, status, updatedAt, createdAt, fileIdentity',
+  embeddingJobs: '&jobId, songKey, status, updatedAt, createdAt',
+  syncOutbox: '&opId, entityType, status, updatedAt, createdAt',
+  playbackEvents: '&eventId, songKey, eventType, createdAt',
+  djTransitionScores: '&cacheKey, sourceSongKey, candidateSongKey, updatedAt',
+  metadata: 'key',
+}).upgrade(async tx => {
+  await tx.table('metadata').put({ key: 'schemaVersion', value: 12 });
+});
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Unknown IndexedDB error.');
 }
@@ -911,4 +928,20 @@ export async function saveSongEmbedding(songKey, embeddingData = {}) {
     provider: embeddingData.provider || embeddingData.embeddingProvider || (isLearned ? 'local-mac-worker' : 'sisic-client'),
     updatedAt: new Date().toISOString(),
   });
+}
+
+export async function saveSongVector(songKey, embeddingModel, row = {}) {
+  if (!songKey || !embeddingModel || !db?.songVectors) return;
+  const updatedAt = row.updatedAt || new Date().toISOString();
+  await db.songVectors.put({ ...row, songKey, embeddingModel, updatedAt });
+}
+
+export async function getSongVectors(embeddingModel) {
+  if (!db?.songVectors) return [];
+  return db.songVectors.where('embeddingModel').equals(embeddingModel).toArray();
+}
+
+export async function getSongVector(songKey, embeddingModel) {
+  if (!songKey || !embeddingModel || !db?.songVectors) return null;
+  return db.songVectors.get([songKey, embeddingModel]);
 }

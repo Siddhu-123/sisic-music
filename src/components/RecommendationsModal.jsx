@@ -1,14 +1,35 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Sparkles, Play, Plus, X, ListPlus } from 'lucide-react';
 import { findSimilarSongs } from '../services/tasteEmbeddingService.js';
+import { getSongKey } from '../songIdentity.js';
+import { getSongVectors } from '../db.js';
+import { GEMMA2_MODEL, gemmaNeighbors } from '../services/gemmaVectors.js';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
 export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs = [], onPlaySong, onAddToQueue }) {
   const dialogRef = useDialogFocus(Boolean(isOpen && targetSong), onClose);
-  const recommendations = useMemo(() => {
+  const [gemmaRecommendations, setGemmaRecommendations] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setGemmaRecommendations(null);
+    if (!targetSong) return () => { cancelled = true; };
+    const seedKey = targetSong.songKey || getSongKey(targetSong);
+    getSongVectors(GEMMA2_MODEL).then(rows => {
+      if (cancelled || !rows.some(row => row.songKey === seedKey)) return;
+      const songsByKey = new Map(librarySongs.map(song => [song.songKey || getSongKey(song), song]));
+      const recommendations = gemmaNeighbors(seedKey, rows, 12).flatMap(row => {
+        const song = songsByKey.get(row.songKey);
+        return song ? [{ ...song, similarityScore: row.similarityScore }] : [];
+      });
+      setGemmaRecommendations(recommendations);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [targetSong, librarySongs]);
+  const fallbackRecommendations = useMemo(() => {
     if (!targetSong) return [];
     return findSimilarSongs(targetSong, librarySongs, { limit: 12 });
   }, [targetSong, librarySongs]);
+  const recommendations = gemmaRecommendations ?? fallbackRecommendations;
 
   if (!isOpen || !targetSong) return null;
 

@@ -1,6 +1,7 @@
 import { db, saveSongEmbedding, updateSongPipelineStatus } from '../db.js';
 import { defaultSisicEmbeddingProvider } from './tasteEmbeddingService.js';
 import { validateAndNormalizeVector } from './contextualRecommendationService.js';
+import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, importGemmaVectors } from './gemmaVectors.js';
 
 export const DEFAULT_AUDIO_EMBEDDING_MODEL = Object.freeze({
   provider: 'local-mac-worker',
@@ -10,6 +11,30 @@ export const DEFAULT_AUDIO_EMBEDDING_MODEL = Object.freeze({
   vectorType: 'learned-audio',
   description: 'MSD-MusiCNN 200D learned music embedding via ONNXRuntime on Apple Silicon',
 });
+
+export const EMBEDDING_PROVIDERS = Object.freeze({
+  embeddinggemma2: Object.freeze({
+    model: GEMMA2_MODEL,
+    dimensions: GEMMA2_DIMENSIONS,
+    provider: 'embeddinggemma2-service',
+    vectorType: 'learned-audio',
+  }),
+});
+export const EMBEDDINGGEMMA2_VECTOR_SPACE = EMBEDDING_PROVIDERS.embeddinggemma2;
+
+export function getPreferredVectorSpace(rows = []) {
+  const items = Array.isArray(rows) ? rows : [];
+  if (items.some(row => (row.embeddingModel || row.model || row.embeddingModelId) === GEMMA2_MODEL)) {
+    return EMBEDDINGGEMMA2_VECTOR_SPACE;
+  }
+  const existing = items.find(row => (row?.vectorType || row?.embeddingType) === 'learned-audio');
+  return existing ? {
+    model: existing.model || existing.embeddingModel || DEFAULT_AUDIO_EMBEDDING_MODEL.model,
+    dimensions: Number(existing.dimensions || existing.embeddingDimensions) || DEFAULT_AUDIO_EMBEDDING_MODEL.dimensions,
+    provider: existing.provider || existing.embeddingProvider || DEFAULT_AUDIO_EMBEDDING_MODEL.provider,
+    vectorType: existing.vectorType || existing.embeddingType || 'learned-audio',
+  } : DEFAULT_AUDIO_EMBEDDING_MODEL;
+}
 
 let embeddingProvider = defaultSisicEmbeddingProvider;
 let audioEmbeddingProvider = null;
@@ -105,7 +130,10 @@ export function getAudioEmbeddingProvider() {
   return audioEmbeddingProvider ? { provider: audioEmbeddingProvider, meta: audioEmbeddingMeta } : null;
 }
 
-export async function loadLearnedAudioEmbeddings(records = []) {
+export async function loadLearnedAudioEmbeddings(records = [], librarySongs = []) {
+  if (records && !Array.isArray(records) && records.model === GEMMA2_MODEL) {
+    return importGemmaVectors(records, librarySongs);
+  }
   if (!Array.isArray(records) || !records.length) return 0;
   let count = 0;
   for (const record of records) {
