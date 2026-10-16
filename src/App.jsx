@@ -40,6 +40,7 @@ import { collectAudioFiles, importAudioFiles } from './services/importService.js
 import { buildUpNextRecommendations, enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, getSongVectors, importGemmaVectors } from './services/gemmaVectors.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
+import { getActiveRadio } from './services/infiniteRadio.js';
 import {
   formatDurationSeconds,
   getKnownDurationSeconds,
@@ -190,7 +191,7 @@ function buildAnalyticsExport({ songs = [], playlists = [], downloadJobs = [], i
   const events = [...eventsById.values()].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
   const starts = events.filter(event => ['playback-start', 'playback-resume'].includes(event.eventType));
   const listenedSeconds = events
-    .filter(event => ['playback-complete', 'playback-short-ended', 'playback-pause', 'playback-stop', 'user-skip', 'playback-stream-error'].includes(event.eventType))
+    .filter(event => ['playback-complete', 'playback-short-ended', 'playback-pause', 'playback-stop', 'user-skip', 'user-prev', 'playback-stream-error'].includes(event.eventType))
     .reduce((total, event) => total + Math.max(0, Number(event.positionSeconds) || 0), 0);
   const songByKey = new Map(songs.map(song => [song.songKey, song]));
   const countBy = (items, key) => items.reduce((counts, item) => {
@@ -206,7 +207,7 @@ function buildAnalyticsExport({ songs = [], playlists = [], downloadJobs = [], i
     artistListening[artist] = (artistListening[artist] || 0) + 1;
     startsBySong[event.songKey] = (startsBySong[event.songKey] || 0) + 1;
   }
-  for (const event of events.filter(item => ['playback-complete', 'playback-short-ended', 'playback-pause', 'playback-stop', 'user-skip', 'playback-stream-error'].includes(item.eventType))) {
+  for (const event of events.filter(item => ['playback-complete', 'playback-short-ended', 'playback-pause', 'playback-stop', 'user-skip', 'user-prev', 'playback-stream-error'].includes(item.eventType))) {
     const artist = event.artist || songByKey.get(event.songKey)?.artist || 'Unknown';
     artistListeningSeconds[artist] = (artistListeningSeconds[artist] || 0) + Math.max(0, Number(event.positionSeconds) || 0);
   }
@@ -1299,6 +1300,7 @@ function App() {
       enabled: isAuthenticated,
       resolveSong: resolvePlayableSong,
       getRecommendations: handleGetRecommendations,
+      getRadioExtension: getActiveRadio,
     });
   }, [configurePlayback, handleGetRecommendations, isAuthenticated, resolvePlayableSong]);
 

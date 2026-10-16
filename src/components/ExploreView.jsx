@@ -7,7 +7,8 @@ import {
   getExploreFacets,
   rankedExploreSearch,
 } from '../services/exploreService.js';
-import { buildLongMix, createInfiniteMix } from '../services/mixEngine.js';
+import { buildLongMix } from '../services/mixEngine.js';
+import { startRadio } from '../services/infiniteRadio.js';
 import { computeDevilMix } from '../services/devilMixClient.js';
 
 function hueFromLabel(label = '') {
@@ -135,13 +136,7 @@ export function ExploreView({
       const seed = ranked.find(song => gemmaVectors?.has(song.songKey) && gemmaVectors.get(song.songKey)?.vector)
         || librarySongs.find(song => gemmaVectors?.has(song.songKey) && gemmaVectors.get(song.songKey)?.vector);
       if (!seed) return;
-      const radio = createInfiniteMix(context, { seedKey: seed.songKey });
-      songs = [seed];
-      while (songs.length < 50) {
-        const next = radio.next();
-        if (!next) break;
-        songs.push(next);
-      }
+      songs = startRadio(context, seed.songKey).songs;
       sourceId = 'infinite-radio';
     }
     if (songs.length) onPlayMix?.(songs, { sourceType: 'mix', sourceId });

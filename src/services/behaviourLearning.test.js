@@ -29,12 +29,22 @@ test('outcome weights cover skip thresholds and engagement events', () => {
   assert.equal(skip(159.9), -0.15);
   assert.equal(skip(160), -0.05);
   assert.equal(outcomeWeight(event('playback-complete')), WEIGHTS.complete);
+  assert.equal(outcomeWeight(event('user-prev')), 0);
   assert.equal(outcomeWeight(event('playback-replay')), WEIGHTS.replay);
   assert.equal(outcomeWeight(event('song-like')), WEIGHTS.like);
   assert.equal(outcomeWeight(event('song-unlike')), WEIGHTS.unlike);
   assert.equal(outcomeWeight(event('playback-start', { sourceType: 'search' })), 0.8);
   assert.equal(outcomeWeight(event('playback-start', { sourceType: 'queue' })), 0);
   assert.equal(outcomeWeight(event('unknown')), 0);
+});
+
+test('user-prev ends a listen without creating a skip or negative affinity', () => {
+  const affinity = computeAffinities([
+    event('playback-start', { songKey: 'song' }),
+    event('user-prev', { songKey: 'song' }),
+  ]).get('song');
+  assert.equal(affinity.skips, 0);
+  assert.equal(affinity.score, 0);
 });
 
 test('affinities decay by half-life and daily buckets span 30 days', () => {

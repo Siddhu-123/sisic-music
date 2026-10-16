@@ -33,7 +33,7 @@ const shuffle = songs => {
 // One synchronous owner for transport intent, async requests and queue identity.
 // React observes snapshots; no queue mutation waits for an effect to update a ref.
 export class PlaybackController {
-  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations, followTimers, createVoice = createDjVoice } = {}) {
+  constructor({ resolveUrl, createAudio = () => new VinylAudioEngine(), storage, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), getRecommendations, getRadioExtension, followTimers, createVoice = createDjVoice } = {}) {
     this.sleep = sleep;
     this.followTimers = followTimers;
     this.resolveUrl = resolveUrl;
@@ -41,6 +41,7 @@ export class PlaybackController {
     this.storage = storage;
     this.now = now;
     this.getRecommendations = getRecommendations || null;
+    this.getRadioExtension = getRadioExtension || null;
     this.recommendationSequence = 0;
     this.recommendationAbort = null;
     this.voice = createVoice({ duck: (db, s) => this.setDuck(db, s) });
@@ -112,9 +113,10 @@ export class PlaybackController {
     this.audioRef.current = this.audio;
     this.checkSleep();
   };
-  configurePlayback = ({ enabled, resolveSong, getRecommendations }) => {
+  configurePlayback = ({ enabled, resolveSong, getRecommendations, getRadioExtension }) => {
     this.resolveSong = resolveSong || this.resolveSong;
     if (getRecommendations !== undefined) this.getRecommendations = getRecommendations;
+    if (getRadioExtension !== undefined) this.getRadioExtension = getRadioExtension;
     const shouldRestore = enabled && !this.enabled;
     if (enabled === this.enabled) return;
     this.enabled = enabled;
@@ -206,8 +208,14 @@ export class PlaybackController {
       sourceId: song?._playbackSourceId || this.state.sourceId || '', queueId: this.state.queueId, sessionId, ...detail,
     };
     this.update({ playbackEvent, playbackEventQueue: [...(this.state.playbackEventQueue || []), playbackEvent].slice(-100),
-      sessionId, lastEventAt: now, lastPlaybackAt: ['playback-start', 'playback-complete', 'playback-pause'].includes(eventType) ? now : this.state.lastPlaybackAt,
+      sessionId, lastEventAt: now, lastPlaybackAt: ['playback-start', 'playback-complete', 'playback-pause', 'user-prev'].includes(eventType) ? now : this.state.lastPlaybackAt,
       playedInQueue: eventType === 'playback-start' ? true : this.state.playedInQueue });
+    if (['user-skip', 'playback-complete'].includes(eventType)
+      && playbackEvent.sourceId === 'infinite-radio') {
+      this.getRadioExtension?.()?.observe?.({
+        songKey, eventType, positionSeconds: playbackEvent.positionSeconds, durationSeconds: playbackEvent.durationSeconds,
+      });
+    }
     this.persist();
     return playbackEvent;
   };
@@ -311,6 +319,7 @@ export class PlaybackController {
       currentSong, currentSongKey: currentKey, djPlan: this.djPlan ? this.state.djPlan : null, djPrediction: null,
       progress: 0, duration: 0, buffered: 0, isPlaying: false, isBuffering: true, error: '',
     });
+    this.maybeRefillInfiniteRadio();
     this.persist();
     if (autoLoad) this.prepareSelection();
     if (this.state.queue.length - index - 1 < 3) {
@@ -768,8 +777,7 @@ export class PlaybackController {
       if (raw < 0 && repeatMode !== 'all') break;
       const index = (raw + queue.length) % queue.length;
       if (playable(queue[index]) && !this.failed.has(keyOf(queue[index]))) {
-        this.update({ skipsInQueue: this.state.skipsInQueue + 1 });
-        this.event('user-skip', undefined, { userInitiated: true, message: 'user-prev' });
+        this.event('user-prev', undefined, { userInitiated: true });
         return this.select(index);
       }
     }
@@ -820,6 +828,7 @@ export class PlaybackController {
 
     const sourceType = SOURCE_TYPES.has(options?.sourceType) && options.sourceType ? options.sourceType : (isSearch ? 'search' : '');
     const sourceId = String(options?.sourceId || '');
+    if (this.state.sourceId === 'infinite-radio' && sourceId !== 'infinite-radio') this.getRadioExtension?.()?.stop?.();
     const previous = this.state;
     const previousQueueId = previous.queueId;
     const newQueueId = newId();
@@ -833,6 +842,27 @@ export class PlaybackController {
     }
     this.select(index);
     this.fetchRecommendations(queue[index]);
+  };
+  maybeRefillInfiniteRadio = () => {
+    const { queue, queueIndex, sourceId } = this.state;
+    if (sourceId !== 'infinite-radio' || queue.length - queueIndex - 1 > 10) return false;
+    const radio = this.getRadioExtension?.();
+    if (!radio?.next) return false;
+    const seen = new Set(queue.map(keyOf));
+    const additions = [];
+    for (let attempts = 0; additions.length < 25 && attempts < 250; attempts++) {
+      const song = radio.next();
+      if (!song) break;
+      const key = keyOf(song);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      additions.push({ ...cleanSong(song), _playbackSourceType: 'mix', _playbackSourceId: 'infinite-radio' });
+    }
+    if (!additions.length) return false;
+    this.update({ queue: [...queue, ...additions], queueRevision: this.state.queueRevision + 1 });
+    this.preloadNext();
+    this.persist();
+    return true;
   };
   editQueue(queue, originalQueue = queue) {
     this.clearDjPlan({ persist: false });

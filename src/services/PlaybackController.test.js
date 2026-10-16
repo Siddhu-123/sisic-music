@@ -165,6 +165,45 @@ test('end of queue stops UI state, repeat all replays a single track, previous r
   c.audio.currentTime = 20; c.playPrev(); assert.equal(c.audio.currentTime, 0);
 });
 
+test('previous logs a neutral user-prev event without incrementing skips', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs.slice(0, 3)); await settle();
+  c.playNext(); await settle();
+  c.update({ skipsInQueue: 2 });
+  c.audio.currentTime = 2;
+  c.playPrev();
+  const previous = c.state.playbackEventQueue.at(-1);
+  assert.equal(previous.eventType, 'user-prev');
+  assert.equal(previous.userInitiated, true);
+  assert.equal(c.state.skipsInQueue, 2);
+  assert.equal(c.state.playbackEventQueue.some(event => event.eventType === 'user-skip' && event.message === 'user-prev'), false);
+});
+
+test('infinite radio refills near the queue end and ignores other queues', async t => {
+  const queued = Array.from({ length: 20 }, (_, index) => ({ songKey: `queued-${index}`, driveFileId: `queued-${index}` }));
+  const picks = Array.from({ length: 25 }, (_, index) => ({ songKey: `radio-${index}`, driveFileId: `radio-${index}` }));
+  let nextIndex = 0;
+  const radio = { next: () => picks[nextIndex++], observe() {}, stop() {} };
+  const { c } = fixture(t, { getRadioExtension: () => radio });
+  c.setQueueAndPlay(queued, 0, { sourceType: 'mix', sourceId: 'infinite-radio' });
+  await settle();
+  const revision = c.state.queueRevision;
+  c.select(10);
+  assert.equal(c.state.queue.length, 45);
+  assert.equal(c.state.queueRevision, revision + 1 + 1); // selection and append each revise the queue
+  assert.equal(c.state.queue[20]._playbackSourceType, 'mix');
+  assert.equal(c.state.queue[20]._playbackSourceId, 'infinite-radio');
+
+  const other = fixture(t, { getRadioExtension: () => radio });
+  t.after(() => other.c.dispose());
+  other.c.setQueueAndPlay(queued, 0, { sourceType: 'playlist', sourceId: 'playlist-1' });
+  await settle();
+  const before = other.c.state.queue.length;
+  other.c.select(10);
+  assert.equal(other.c.state.queue.length, before);
+  assert.equal(nextIndex, 25);
+});
+
 test('all failed tracks stop once; blocked tracks are skipped without an infinite retry loop', async t => {
   const { c } = fixture(t, { resolveUrl: async () => { throw new Error('broken file'); } });
   c.setQueueAndPlay(songs.slice(0, 3)); await settle();

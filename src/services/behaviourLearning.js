@@ -25,7 +25,8 @@ function eventPosition(event) {
 
 export function outcomeWeight(event = {}) {
   switch (event.eventType) {
-    // playback-stop ends a session; it is not a judgement on the song, so only user-skip counts.
+    // Session-ending navigation is neutral; only user-skip carries a negative song judgement.
+    case 'user-prev': return 0;
     case 'user-skip': {
       const position = eventPosition(event);
       const duration = Number(event.durationSeconds);
@@ -123,7 +124,7 @@ export function queueReplaceSignals(events = [], vectorOf = () => null) {
     const cutoff = asTime(replacement.createdAt);
     const played = events.filter(event => event.queueId === previousQueueId
       && event.songKey
-      && ['playback-start', 'playback-complete', 'playback-replay'].includes(event.eventType)
+      && ['playback-start', 'playback-complete', 'playback-replay', 'user-prev'].includes(event.eventType)
       && (cutoff === null || asTime(event.createdAt) === null || asTime(event.createdAt) <= cutoff))
       .sort((a, b) => (asTime(a.createdAt) ?? 0) - (asTime(b.createdAt) ?? 0))
       .slice(-5);
