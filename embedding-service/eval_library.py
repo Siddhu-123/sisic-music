@@ -274,7 +274,7 @@ def evaluate(db_path: str, out_dir: str, *, seeds: int = 30, dims: int = 768, se
     report = {
         "model": core.MODEL_ID,
         "dimensions": dims,
-        "coverage": {"songs": len(songs), "clips": sum(k * v for k, v in counts.items()), "songs_with_at_least_3_clips": sum(n >= 3 for n in counts.values()),
+        "coverage": {"songs": len(songs), "clips": sum(k * v for k, v in counts.items()), "songs_with_at_least_3_clips": sum(v for k, v in counts.items() if k >= 3),
                      "songs_with_full_coverage": len(covered), "clip_count_histogram": {str(k): counts[k] for k in sorted(counts)}},
         "same_artist": retrieval_metrics(np.stack([r["vector"] for r in artist_records]) if artist_records else np.zeros((0, dims)), artist_labels),
         "same_album": retrieval_metrics(np.stack([r["vector"] for r in album_records]) if album_records else np.zeros((0, dims)), album_labels),
