@@ -1,0 +1,23 @@
+[Unit]
+Description=Sisic EmbeddingGemma clip embedding service
+After=network.target
+
+[Service]
+Type=simple
+User=sisic-embed
+Group=sisic-embed
+WorkingDirectory=/opt/sisic-embed
+EnvironmentFile=/etc/sisic-embed.env
+Environment=HF_HUB_OFFLINE=1 HF_HOME=/var/lib/sisic-embed/hf OMP_NUM_THREADS=1
+ExecStart=/opt/sisic-embed/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+MemoryMax=5G
+Nice=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sisic-embed
+
+[Install]
+WantedBy=multi-user.target

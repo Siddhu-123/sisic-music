@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+numpy
+sentence-transformers>=6.1
+transformers>=5.20
+torch
+scipy<1.14
+httpx
+pytest
