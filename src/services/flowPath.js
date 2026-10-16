@@ -340,7 +340,7 @@ export function nextFlowPick(currentItem, candidates, {
   rng = Math.random,
 } = {}) {
   if (!candidates?.length) return null;
-  const recent = new Set(history.slice(-Math.max(0, avoidRecent)).map(entry => (
+  const recent = new Set((avoidRecent > 0 ? history.slice(-avoidRecent) : []).map(entry => (
     entry && typeof entry === 'object' ? entry.id : entry
   )));
   let eligible = candidates.filter(candidate => !recent.has(candidate.id));

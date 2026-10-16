@@ -49,9 +49,30 @@ export function ExploreView({
 
   const genres = useMemo(() => getExploreFacets(browseSongs, 'genre'), [browseSongs]);
   const moods = useMemo(() => getExploreFacets(browseSongs, 'mood'), [browseSongs]);
+  // playbackEvents is a new array on every Dexie change (outbox, impressions); rebuild mixes
+  // (~0.75 s at 5,000 songs) only when the listening outcomes they learn from change.
+  const outcomeSignature = useMemo(() => {
+    const outcomes = (playbackEvents || []).filter(event => event?.eventType !== 'recommendation-shown');
+    const last = outcomes.reduce((latest, event) => (String(event.createdAt || '') > latest ? String(event.createdAt) : latest), '');
+    return `${outcomes.length}:${last}`;
+  }, [playbackEvents]);
+  const eventsSnapshot = useRef({ signature: null, events: playbackEvents });
+  if (eventsSnapshot.current.signature !== outcomeSignature) eventsSnapshot.current = { signature: outcomeSignature, events: playbackEvents };
+  const stableEvents = eventsSnapshot.current.events;
+  // Same for songs: the live query re-reads them on any write; keep the old array while mix inputs are unchanged.
+  const songSignature = useMemo(() => (librarySongs || [])
+    .map(song => [song.songKey, song.driveFileId, song.genre, song.year, song.durationSeconds].join('\u0001'))
+    .join('\u0002'), [librarySongs]);
+  const songsSnapshot = useRef({ signature: null, songs: librarySongs });
+  if (songsSnapshot.current.signature !== songSignature) songsSnapshot.current = { signature: songSignature, songs: librarySongs };
+  const stableSongs = songsSnapshot.current.songs;
+  const likedSignature = (likedSongKeys || []).join('\u0002');
+  const likedSnapshot = useRef({ signature: null, keys: likedSongKeys });
+  if (likedSnapshot.current.signature !== likedSignature) likedSnapshot.current = { signature: likedSignature, keys: likedSongKeys };
+  const stableLiked = likedSnapshot.current.keys;
   const taste = useMemo(
-    () => buildExploreMixes(librarySongs, { playbackEvents, likedSongKeys, ...(gemmaVectors?.size ? { gemmaVectors } : {}) }),
-    [librarySongs, playbackEvents, likedSongKeys, gemmaVectors],
+    () => buildExploreMixes(stableSongs, { playbackEvents: stableEvents, likedSongKeys: stableLiked, ...(gemmaVectors?.size ? { gemmaVectors } : {}) }),
+    [stableSongs, stableEvents, stableLiked, gemmaVectors],
   );
   const activeMix = taste.mixes.find(mix => mix.id === activeMixId) || null;
   const rankedSongs = useMemo(() => rankedExploreSearch(query, browseSongs), [browseSongs, query]);

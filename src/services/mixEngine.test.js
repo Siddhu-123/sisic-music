@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  buildArtistMix, buildDailyMixes, buildDecadeMix, buildDevilMix, buildGenreMix,
+  buildArtistMix, buildDailyMixes, buildDecadeMix, buildDevilMix, buildGenreMix, buildLongMix,
   buildMoodMix, buildNicheMix, buildTextMix, createInfiniteMix,
 } from './mixEngine.js';
 import { transitionCost } from './flowPath.js';
@@ -86,4 +86,15 @@ test('infinite mix avoids the last 50 songs and an early skip steers away from i
   const resultKeys = [first.songKey, second.songKey];
   for (let i = 0; i < 49; i++) resultKeys.push(mix.next().songKey);
   assert.equal(new Set(resultKeys).size, resultKeys.length);
+});
+
+test('long mix respects durationSeconds and small-library radio keeps going', () => {
+  const unitVec = i => Array.from({ length: 8 }, (_, d) => (d === i % 8 ? 1 : 0.1));
+  const songs = Array.from({ length: 10 }, (_, i) => ({ songKey: `d${i}`, artist: `A${i}`, track: `T${i}`, durationSeconds: 3600 }));
+  const gemmaVectors = new Map(songs.map((song, i) => [song.songKey, { vector: unitVec(i) }]));
+  const long = buildLongMix({ songs, gemmaVectors, events: [] }, { minutes: 180 });
+  assert.ok(long.length <= 3, `3 hours of 1-hour songs gave ${long.length}`);
+  const radio = createInfiniteMix({ songs, gemmaVectors, events: [] }, { rng: () => 0.5 });
+  const picks = Array.from({ length: 25 }, () => radio.next());
+  assert.ok(picks.every(Boolean), 'radio stalled on a 10-song library');
 });

@@ -5,6 +5,8 @@ import { getSongGenres, getSongMoods } from './exploreService.js';
 
 const keyOf = song => song?.songKey || song?.id || '';
 const rowOf = (ctx, key) => ctx?.gemmaVectors?.get?.(key) || ctx?.vectors?.get?.(key) || null;
+// Library records store durationSeconds; older/imported rows may only have duration.
+const songSeconds = song => Number(song?.durationSeconds ?? song?.duration) || 0;
 const unitCache = new WeakMap(); // stored rows are reused across mixes; normalise each vector once
 const unit = vector => {
   if (vector && typeof vector === 'object' && unitCache.has(vector)) return unitCache.get(vector);
@@ -216,13 +218,13 @@ export function buildLongMix(ctx = {}, { minutes = 180, seedKey } = {}) {
   // Seed = requested song, else the best-liked song; pool = its nearest songs (3x what the time needs).
   const seed = pool.find(song => keyOf(song) === (seedKey || ctx.seedKey))
     || [...pool].sort((a, b) => affinityValue(ctx, keyOf(b)) - affinityValue(ctx, keyOf(a)))[0];
-  const meanSeconds = pool.reduce((sum, song) => sum + (Number(song.duration) || 210), 0) / pool.length;
+  const meanSeconds = pool.reduce((sum, song) => sum + (songSeconds(song) || 210), 0) / pool.length;
   const needed = Math.max(1, Math.ceil(budget / Math.max(30, meanSeconds)));
   const near = byVector(vectorOf(ctx, seed), pool.filter(song => song !== seed), ctx).slice(0, needed * 3);
   const ordered = orderSongs([seed, ...near], ctx, { startId: keyOf(seed), timeBudgetMs: ctx.timeBudgetMs ?? 800 });
   let total = 0;
   return ordered.filter(song => {
-    const duration = Number(song.duration) || 0;
+    const duration = songSeconds(song);
     if (total && total + duration > budget) return false;
     total += duration;
     return true;
@@ -242,10 +244,12 @@ export function createInfiniteMix(ctx = {}, { seedKey, rng = Math.random } = {})
   return {
     next() {
       if (!items.length) return null;
-      const recent = new Set(history.slice(-50));
+      // Small libraries cannot fill a 50-song no-repeat window; shrink it so radio keeps going.
+      const window = Math.max(0, Math.min(50, items.length - 1));
+      const recent = new Set(window ? history.slice(-window) : []);
       let candidates = items.filter(item => !recent.has(item.id));
       if (!candidates.length) return null;
-      const base = current ? nextFlowPick(current, candidates, { history, avoidRecent: 50, opts, rng: random }) : candidates[0];
+      const base = current ? nextFlowPick(current, candidates, { history, avoidRecent: window, opts, rng: random }) : candidates[0];
       const ranked = candidates.map(item => ({ ...item, vector: item.vector, baseScore: current ? -transitionCost(current, item, opts) : 0 }));
       const steered = steer.rerank(ranked, { mix: 0.55 });
       const hasSteer = Boolean(steer.state);
