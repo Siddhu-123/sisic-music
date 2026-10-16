@@ -7,7 +7,8 @@ import {
   getExploreFacets,
   rankedExploreSearch,
 } from '../services/exploreService.js';
-import { buildDevilMix, buildLongMix, createInfiniteMix } from '../services/mixEngine.js';
+import { buildLongMix, createInfiniteMix } from '../services/mixEngine.js';
+import { computeDevilMix } from '../services/devilMixClient.js';
 
 function hueFromLabel(label = '') {
   return [...label].reduce((total, character) => total + character.charCodeAt(0), 0) % 360;
@@ -46,6 +47,8 @@ export function ExploreView({
   const [mood, setMood] = useState('');
   const [availability, setAvailability] = useState('all');
   const [activeMixId, setActiveMixId] = useState('');
+  const [devilMixBusy, setDevilMixBusy] = useState(false);
+  const devilMixBusyRef = useRef(false);
 
   const genres = useMemo(() => getExploreFacets(browseSongs, 'genre'), [browseSongs]);
   const moods = useMemo(() => getExploreFacets(browseSongs, 'mood'), [browseSongs]);
@@ -108,7 +111,7 @@ export function ExploreView({
     setAvailability('all');
   };
 
-  const playFlowMix = kind => {
+  const playFlowMix = async kind => {
     const context = { songs: librarySongs, gemmaVectors, events: playbackEvents };
     let songs = [];
     let sourceId = '';
@@ -116,8 +119,17 @@ export function ExploreView({
       songs = buildLongMix(context, { minutes: 180 });
       sourceId = '3-hour-flow';
     } else if (kind === 'devil') {
-      songs = buildDevilMix(context);
-      sourceId = 'devil-mix';
+      if (devilMixBusyRef.current) return;
+      devilMixBusyRef.current = true;
+      setDevilMixBusy(true);
+      try {
+        songs = await computeDevilMix(context);
+        if (songs.length) onPlayMix?.(songs, { sourceType: 'mix', sourceId: 'devil-mix' });
+      } finally {
+        devilMixBusyRef.current = false;
+        setDevilMixBusy(false);
+      }
+      return;
     } else {
       const ranked = taste.mixes.find(mix => mix.id === 'your-taste')?.songs || [];
       const seed = ranked.find(song => gemmaVectors?.has(song.songKey) && gemmaVectors.get(song.songKey)?.vector)
@@ -191,7 +203,7 @@ export function ExploreView({
           <div className="explore-section__heading"><div><h2>Flow mixes</h2></div></div>
           <div className="explore-filter-row">
             <button type="button" className="explore-chip" onClick={() => playFlowMix('long')}>3-hour flow</button>
-            <button type="button" className="explore-chip" onClick={() => playFlowMix('devil')}>Devil mix</button>
+            <button type="button" className="explore-chip" disabled={devilMixBusy} onClick={() => playFlowMix('devil')}>{devilMixBusy ? 'Ordering…' : 'Devil mix'}</button>
             <button type="button" className="explore-chip" onClick={() => playFlowMix('infinite')}>Infinite radio</button>
           </div>
         </section>
