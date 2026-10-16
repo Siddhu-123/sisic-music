@@ -5,11 +5,20 @@ import { getSongGenres, getSongMoods } from './exploreService.js';
 
 const keyOf = song => song?.songKey || song?.id || '';
 const rowOf = (ctx, key) => ctx?.gemmaVectors?.get?.(key) || ctx?.vectors?.get?.(key) || null;
+const unitCache = new WeakMap(); // stored rows are reused across mixes; normalise each vector once
 const unit = vector => {
+  if (vector && typeof vector === 'object' && unitCache.has(vector)) return unitCache.get(vector);
+  const result = unitUncached(vector);
+  if (vector && typeof vector === 'object') unitCache.set(vector, result);
+  return result;
+};
+const unitUncached = vector => {
   if (!vector || !vector.length) return null;
   const values = Array.from(vector, Number);
   if (values.some(value => !Number.isFinite(value))) return null;
-  const norm = Math.hypot(...values);
+  let squares = 0;
+  for (const value of values) squares += value * value;
+  const norm = Math.sqrt(squares);
   return norm ? values.map(value => value / norm) : null;
 };
 const cosine = (a, b) => {
@@ -79,8 +88,10 @@ function expand(seed, ctx, size) {
   const seedKeys = new Set(seed.map(keyOf));
   const target = ctx?.textVector ? unit(ctx.textVector) : centroid(seed, ctx);
   const ranked = byVector(target, pool, ctx);
-  const limit = Math.max(seed.length, Math.floor(size || 40));
-  return [...seed.filter(song => rowOf(ctx, keyOf(song))?.vector), ...ranked.filter(song => !seedKeys.has(keyOf(song)))].slice(0, limit);
+  const limit = Math.max(1, Math.floor(size || 40));
+  // Cap the seed (a decade or genre can hold 1,000+ songs): its closest ~60% of the mix, then sound-alikes.
+  const seedTake = byVector(target, seed.filter(song => rowOf(ctx, keyOf(song))?.vector), ctx).slice(0, Math.ceil(limit * 0.6));
+  return [...seedTake, ...ranked.filter(song => !seedKeys.has(keyOf(song)))].slice(0, limit);
 }
 
 export function buildArtistMix(seedArtist, ctx = {}, { size = 40 } = {}) {
@@ -198,8 +209,17 @@ export function buildDevilMix(ctx = {}) {
   return ordered;
 }
 export function buildLongMix(ctx = {}, { minutes = 180, seedKey } = {}) {
-  const ordered = buildDevilMix({ ...ctx, seedKey: seedKey || ctx.seedKey });
+  ctx = withAffinities(ctx);
+  const pool = vectorSongs(ctx);
+  if (!pool.length) return [];
   const budget = Math.max(0, Number(minutes)) * 60;
+  // Seed = requested song, else the best-liked song; pool = its nearest songs (3x what the time needs).
+  const seed = pool.find(song => keyOf(song) === (seedKey || ctx.seedKey))
+    || [...pool].sort((a, b) => affinityValue(ctx, keyOf(b)) - affinityValue(ctx, keyOf(a)))[0];
+  const meanSeconds = pool.reduce((sum, song) => sum + (Number(song.duration) || 210), 0) / pool.length;
+  const needed = Math.max(1, Math.ceil(budget / Math.max(30, meanSeconds)));
+  const near = byVector(vectorOf(ctx, seed), pool.filter(song => song !== seed), ctx).slice(0, needed * 3);
+  const ordered = orderSongs([seed, ...near], ctx, { startId: keyOf(seed), timeBudgetMs: ctx.timeBudgetMs ?? 800 });
   let total = 0;
   return ordered.filter(song => {
     const duration = Number(song.duration) || 0;

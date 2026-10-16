@@ -9,7 +9,7 @@ import {
   buildTextMix,
 } from './mixEngine.js';
 import { queryTextVector } from './gemmaVectors.js';
-import { createSessionSteer, outcomeWeight } from './behaviourLearning.js';
+import { computeAffinities, createSessionSteer, outcomeWeight } from './behaviourLearning.js';
 
 const GENRE_RULES = [
   ['Pop', ['pop', 'dance pop', 'synthpop']],
@@ -211,7 +211,8 @@ export function buildExploreMixes(songs = [], {
   ].filter(mix => mix?.songs?.length);
 
   if (gemmaVectors instanceof Map && gemmaVectors.size) {
-    const context = { songs: pool, gemmaVectors, affinities, events: playbackEvents, now, textVector };
+    // Affinities once for all mixes; size 12 keeps each flow ordering small.
+    const context = { songs: pool, gemmaVectors, affinities: affinities || computeAffinities(playbackEvents, { now: new Date(now) }), events: playbackEvents, now, textVector, size: 12, timeBudgetMs: 150 };
     const artists = [...new Set(ranked.map(song => song.artist).filter(Boolean))].slice(0, 2);
     const decades = [...new Set(pool.map(song => Math.floor(Number(song.year || String(song.releaseDate || '').slice(0, 4)) / 10) * 10).filter(Number.isFinite))].sort((a, b) => b - a).slice(0, 2);
     for (const artist of artists) mixes.push({ id: `artist-${normalizeText(artist)}`, title: `${artist} mix`, subtitle: 'Artist essentials and close matches', songs: buildArtistMix(artist, context, { size: 12 }).slice(0, 12) });
