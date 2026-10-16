@@ -38,6 +38,7 @@ import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
 import { buildUpNextRecommendations, enrichPlaybackEvent } from './services/contextualRecommendationService.js';
+import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, getSongVectors, importGemmaVectors } from './services/gemmaVectors.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import {
   formatDurationSeconds,
@@ -353,6 +354,7 @@ function App() {
   const [playlistToDelete, setPlaylistToDelete] = useState(null);
   const [isDeletingPlaylist, setIsDeletingPlaylist] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [gemmaVectors, setGemmaVectors] = useState(() => new Map());
   const [songInfo, setSongInfo] = useState(null);
   const [reviewSong, setReviewSong] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -364,6 +366,7 @@ function App() {
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
   const catalogueLoadStartedRef = useRef(false);
   const fileInputRef = useRef(null);
+  const gemmaFileInputRef = useRef(null);
   const mobileMoreRef = useRef(null);
   const storageDialogRef = useDialogFocus(showStoragePanel, () => setShowStoragePanel(false));
   const playlistDialogRef = useDialogFocus(Boolean(playlistPicker), () => setPlaylistPicker(null), { canClose: !playlistPicker?.busy });
@@ -438,6 +441,15 @@ function App() {
   const embeddingJobs = useMemo(() => safeLibraryData.embeddingJobs || [], [safeLibraryData.embeddingJobs]);
   const syncOutbox = useMemo(() => safeLibraryData.syncOutbox || [], [safeLibraryData.syncOutbox]);
   const playbackEvents = useMemo(() => safeLibraryData.playbackEvents || [], [safeLibraryData.playbackEvents]);
+
+  const reloadGemmaVectors = useCallback(async () => {
+    const rows = await getSongVectors(GEMMA2_MODEL);
+    setGemmaVectors(new Map(rows.map(row => [row.songKey, row])));
+  }, []);
+
+  useEffect(() => {
+    reloadGemmaVectors().catch(error => console.error('Failed to load EmbeddingGemma vectors:', error));
+  }, [reloadGemmaVectors]);
 
   const runImport = useCallback(async (files = []) => {
     const audioFiles = files.filter(file => file?.name);
@@ -1270,6 +1282,7 @@ function App() {
       currentSong,
       librarySongs: exploreLibrarySongs,
       playbackEvents: librarySummary.playbackEvents,
+      ...(gemmaVectors.size ? { gemmaVectors } : {}),
       likedSongKeys,
       recentlyPlayedKeys: Array.from(countedPlaybackRef.current || []),
       manualQueue,
@@ -1279,7 +1292,7 @@ function App() {
         try { return await db.songEmbeddings.get(key); } catch { return null; }
       },
     });
-  }, [exploreLibrarySongs, librarySummary.playbackEvents, likedSongKeys]);
+  }, [exploreLibrarySongs, gemmaVectors, librarySummary.playbackEvents, likedSongKeys]);
 
   useEffect(() => {
     configurePlayback({
@@ -1351,6 +1364,24 @@ function App() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     addToast(`Exported ${exportData.songs.length} songs and ${exportData.playbackEvents.length} playback events`);
   }, [addToast, allSongs, drivePlaybackEvents, embeddingJobs, importJobs, playbackEvents, playlists, safeLibraryData.downloadJobs, syncOutbox]);
+
+  const handleImportGemmaVectors = useCallback(async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      if (payload?.model !== GEMMA2_MODEL || payload?.dimensions !== GEMMA2_DIMENSIONS || !Array.isArray(payload?.songs)) {
+        throw new Error('This file is not a supported EmbeddingGemma vectors export.');
+      }
+      const result = await importGemmaVectors(payload, allSongs);
+      await reloadGemmaVectors();
+      addToast(`EmbeddingGemma import: ${result.imported} imported · ${result.unmatched} unmatched · ${result.skipped} skipped`);
+    } catch (error) {
+      addToast(`EmbeddingGemma import failed: ${errorMessage(error)}`);
+    } finally {
+      event.target.value = '';
+    }
+  }, [addToast, allSongs, reloadGemmaVectors]);
 
   // Drive audio uses native streaming; no whole-track JavaScript audio buffer is created.
 
@@ -1881,6 +1912,13 @@ function App() {
           multiple
           onChange={handleImportInput}
         />
+        <input
+          ref={gemmaFileInputRef}
+          className="import-input"
+          type="file"
+          accept=".json,application/json"
+          onChange={handleImportGemmaVectors}
+        />
 
           <div className="sidebar__playlists">
             <div className="sidebar__section-label">Playlists</div>
@@ -2055,10 +2093,12 @@ function App() {
             browseSongs={exploreBrowseSongs}
             librarySongs={exploreLibrarySongs}
             playbackEvents={librarySummary.playbackEvents}
+            {...(gemmaVectors.size ? { gemmaVectors } : {})}
             likedSongKeys={likedSongKeys}
             catalogueLoading={catalogueLoading}
             renderSong={renderSongCard}
             onRecommendationShown={handleRecommendationShown}
+            onPlayMix={(songs, options) => songs.length && handlePlaySong(songs[0], songs, options)}
           />
         )}
 
@@ -2207,6 +2247,10 @@ function App() {
               <button className="panel-action-btn" onClick={handleExportData}>
                 <FileDown size={16} />
                 <span>Export full data</span>
+              </button>
+              <button className="panel-action-btn" onClick={() => gemmaFileInputRef.current?.click()}>
+                <FileDown size={16} />
+                <span>Import EmbeddingGemma vectors</span>
               </button>
             </div>
             {largestReadySongs.length > 0 && (

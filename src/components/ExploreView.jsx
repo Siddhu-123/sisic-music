@@ -7,6 +7,7 @@ import {
   getExploreFacets,
   rankedExploreSearch,
 } from '../services/exploreService.js';
+import { buildDevilMix, buildLongMix, createInfiniteMix } from '../services/mixEngine.js';
 
 function hueFromLabel(label = '') {
   return [...label].reduce((total, character) => total + character.charCodeAt(0), 0) % 360;
@@ -33,10 +34,12 @@ export function ExploreView({
   browseSongs = [],
   librarySongs = [],
   playbackEvents = [],
+  gemmaVectors,
   likedSongKeys = [],
   catalogueLoading = false,
   renderSong,
   onRecommendationShown,
+  onPlayMix,
 }) {
   const [query, setQuery] = useState('');
   const [genre, setGenre] = useState('');
@@ -47,8 +50,8 @@ export function ExploreView({
   const genres = useMemo(() => getExploreFacets(browseSongs, 'genre'), [browseSongs]);
   const moods = useMemo(() => getExploreFacets(browseSongs, 'mood'), [browseSongs]);
   const taste = useMemo(
-    () => buildExploreMixes(librarySongs, { playbackEvents, likedSongKeys }),
-    [librarySongs, playbackEvents, likedSongKeys],
+    () => buildExploreMixes(librarySongs, { playbackEvents, likedSongKeys, ...(gemmaVectors?.size ? { gemmaVectors } : {}) }),
+    [librarySongs, playbackEvents, likedSongKeys, gemmaVectors],
   );
   const activeMix = taste.mixes.find(mix => mix.id === activeMixId) || null;
   const rankedSongs = useMemo(() => rankedExploreSearch(query, browseSongs), [browseSongs, query]);
@@ -82,6 +85,33 @@ export function ExploreView({
     setGenre('');
     setMood('');
     setAvailability('all');
+  };
+
+  const playFlowMix = kind => {
+    const context = { songs: librarySongs, gemmaVectors, events: playbackEvents };
+    let songs = [];
+    let sourceId = '';
+    if (kind === 'long') {
+      songs = buildLongMix(context, { minutes: 180 });
+      sourceId = '3-hour-flow';
+    } else if (kind === 'devil') {
+      songs = buildDevilMix(context);
+      sourceId = 'devil-mix';
+    } else {
+      const ranked = taste.mixes.find(mix => mix.id === 'your-taste')?.songs || [];
+      const seed = ranked.find(song => gemmaVectors?.has(song.songKey) && gemmaVectors.get(song.songKey)?.vector)
+        || librarySongs.find(song => gemmaVectors?.has(song.songKey) && gemmaVectors.get(song.songKey)?.vector);
+      if (!seed) return;
+      const radio = createInfiniteMix(context, { seedKey: seed.songKey });
+      songs = [seed];
+      while (songs.length < 50) {
+        const next = radio.next();
+        if (!next) break;
+        songs.push(next);
+      }
+      sourceId = 'infinite-radio';
+    }
+    if (songs.length) onPlayMix?.(songs, { sourceType: 'mix', sourceId });
   };
 
   return (
@@ -134,6 +164,17 @@ export function ExploreView({
           ))}
         </div>
       </section>
+
+      {gemmaVectors?.size > 0 && (
+        <section className="explore-section" aria-label="Flow mixes">
+          <div className="explore-section__heading"><div><h2>Flow mixes</h2></div></div>
+          <div className="explore-filter-row">
+            <button type="button" className="explore-chip" onClick={() => playFlowMix('long')}>3-hour flow</button>
+            <button type="button" className="explore-chip" onClick={() => playFlowMix('devil')}>Devil mix</button>
+            <button type="button" className="explore-chip" onClick={() => playFlowMix('infinite')}>Infinite radio</button>
+          </div>
+        </section>
+      )}
 
       {catalogueLoading && !browseSongs.length ? (
         <div className="empty-state" role="status"><Search size={48} color="var(--text-muted)" /><h3>Preparing Explore</h3><p>Loading your searchable music catalogue…</p></div>
