@@ -952,6 +952,37 @@ body {
 
 .panel-action-btn:hover { background: var(--bg-card-hover); }
 
+.gemma-service-panel {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.gemma-service-panel__field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.gemma-service-panel__field input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  font: inherit;
+}
+
+.gemma-service-panel__status {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
 .storage-list h3 {
   font-size: 0.78rem;
   text-transform: uppercase;

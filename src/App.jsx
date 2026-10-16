@@ -38,7 +38,9 @@ import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
 import { buildUpNextRecommendations, enrichPlaybackEvent } from './services/contextualRecommendationService.js';
-import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, getSongVectors, importGemmaVectors } from './services/gemmaVectors.js';
+import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, getSongVectors, importGemmaVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
+import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
+import { GemmaServicePanel } from './components/GemmaServicePanel.jsx';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import { getActiveRadio } from './services/infiniteRadio.js';
 import {
@@ -356,6 +358,8 @@ function App() {
   const [isDeletingPlaylist, setIsDeletingPlaylist] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [gemmaVectors, setGemmaVectors] = useState(() => new Map());
+  const [gemmaServiceStatus, setGemmaServiceStatus] = useState(null);
+  const [gemmaConfigRevision, setGemmaConfigRevision] = useState(0);
   const [songInfo, setSongInfo] = useState(null);
   const [reviewSong, setReviewSong] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -368,6 +372,7 @@ function App() {
   const catalogueLoadStartedRef = useRef(false);
   const fileInputRef = useRef(null);
   const gemmaFileInputRef = useRef(null);
+  const autoGemmaSyncFailureToastRef = useRef(false);
   const mobileMoreRef = useRef(null);
   const storageDialogRef = useDialogFocus(showStoragePanel, () => setShowStoragePanel(false));
   const playlistDialogRef = useDialogFocus(Boolean(playlistPicker), () => setPlaylistPicker(null), { canClose: !playlistPicker?.busy });
@@ -436,6 +441,9 @@ function App() {
   const libraryData = useLiveQuery(getLibrarySnapshot, [], EMPTY_LIBRARY);
   const safeLibraryData = libraryData || EMPTY_LIBRARY;
   const allSongs = safeLibraryData.songs;
+  const allSongsRef = useRef(allSongs);
+  allSongsRef.current = allSongs;
+  const libraryLoaded = libraryData !== undefined && libraryData !== EMPTY_LIBRARY;
   const playlists = safeLibraryData.playlists;
   const localDbError = safeLibraryData.error;
   const importJobs = useMemo(() => safeLibraryData.importJobs || [], [safeLibraryData.importJobs]);
@@ -451,6 +459,31 @@ function App() {
   useEffect(() => {
     reloadGemmaVectors().catch(error => console.error('Failed to load EmbeddingGemma vectors:', error));
   }, [reloadGemmaVectors]);
+
+  useEffect(() => {
+    if (!libraryLoaded) return undefined;
+    const sync = async () => {
+      const config = getGemmaServiceConfig();
+      if (!config?.baseUrl || !config?.token) return;
+      try {
+        const result = await syncGemmaVectorsFromService({ ...config, librarySongs: allSongsRef.current });
+        setGemmaServiceStatus({ ...result, lastSync: new Date().toISOString(), error: '' });
+        await reloadGemmaVectors();
+      } catch (error) {
+        setGemmaServiceStatus(current => ({ ...current, error: error?.message || 'Sync failed.' }));
+        if (!autoGemmaSyncFailureToastRef.current) {
+          autoGemmaSyncFailureToastRef.current = true;
+          addToast('EmbeddingGemma service sync failed. Check the service settings.');
+        }
+      }
+    };
+    const initialTimer = window.setTimeout(sync, 10_000);
+    const interval = window.setInterval(sync, 30 * 60 * 1000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [addToast, gemmaConfigRevision, libraryLoaded, reloadGemmaVectors]);
 
   const runImport = useCallback(async (files = []) => {
     const audioFiles = files.filter(file => file?.name);
@@ -2255,6 +2288,13 @@ function App() {
                 <span>Import EmbeddingGemma vectors</span>
               </button>
             </div>
+            <GemmaServicePanel
+              librarySongs={allSongs}
+              onSynced={reloadGemmaVectors}
+              status={gemmaServiceStatus}
+              onStatusChange={setGemmaServiceStatus}
+              onConfigChange={() => setGemmaConfigRevision(revision => revision + 1)}
+            />
             {largestReadySongs.length > 0 && (
               <div className="storage-list">
                 <h3>Largest Ready Songs</h3>
