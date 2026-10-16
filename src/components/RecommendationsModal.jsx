@@ -6,7 +6,7 @@ import { getSongVectors } from '../db.js';
 import { GEMMA2_MODEL, gemmaNeighbors } from '../services/gemmaVectors.js';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
-export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs = [], onPlaySong, onAddToQueue }) {
+export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs = [], onPlaySong, onAddToQueue, onRecommendationShown }) {
   const dialogRef = useDialogFocus(Boolean(isOpen && targetSong), onClose);
   const [gemmaRecommendations, setGemmaRecommendations] = useState(null);
   useEffect(() => {
@@ -30,6 +30,11 @@ export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs
     return findSimilarSongs(targetSong, librarySongs, { limit: 12 });
   }, [targetSong, librarySongs]);
   const recommendations = gemmaRecommendations ?? fallbackRecommendations;
+  useEffect(() => {
+    if (!isOpen || !targetSong) return;
+    const sourceId = targetSong.songKey || getSongKey(targetSong);
+    onRecommendationShown?.('recommendations-modal', recommendations.slice(0, 50).map(song => song.songKey || getSongKey(song)), sourceId);
+  }, [isOpen, targetSong, recommendations, onRecommendationShown]);
 
   if (!isOpen || !targetSong) return null;
 

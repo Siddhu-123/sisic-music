@@ -11,6 +11,11 @@ const keyOf = queueItemKey;
 const sameSource = (a, b) => Boolean(a && b && keyOf(a) === keyOf(b) && a.driveFileId === b.driveFileId);
 const bounded = (value, max, fallback = 0) => Number.isFinite(Number(value)) ? Math.max(0, Math.min(max, Number(value))) : fallback;
 const playable = song => Boolean(song?.driveFileId);
+const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const SESSION_TIMEOUT_MS = 20 * 60 * 1000;
+const REPLAY_WINDOW_MS = 10 * 60 * 1000;
+const IMPRESSION_WINDOW_MS = 60 * 1000;
+const SOURCE_TYPES = new Set(['mix', 'playlist', 'search', 'autoplay', 'library', 'queue', '']);
 const cleanSong = song => {
   const result = { ...song };
   for (const key of ['localFile', 'blob', 'isDownloaded', 'isCached', 'hasBlob', 'cacheSizeBytes', 'cachedAt']) delete result[key];
@@ -44,8 +49,12 @@ export class PlaybackController {
     this.state = {
       currentSong: null, currentSongKey: null, queue: saved?.queue || [], queueIndex: saved?.queueIndex || 0,
       manualQueue: saved?.manualQueue || [],
+      queueId: saved?.queueId || newId(), sourceType: saved?.sourceType || '', sourceId: saved?.sourceId || '',
+      sessionId: saved?.sessionId || newId(), lastEventAt: saved?.lastEventAt || 0,
+      lastPlaybackAt: saved?.lastPlaybackAt || 0,
+      skipsInQueue: saved?.skipsInQueue || 0, playedInQueue: Boolean(saved?.playedInQueue),
       queueRevision: 0, isPlaying: false, isSpinningDown: false, isBuffering: false,
-      progress: 0, duration: 0, buffered: 0, error: '', playbackEvent: null,
+      progress: 0, duration: 0, buffered: 0, error: '', playbackEvent: null, playbackEventQueue: [],
       shuffleMode: saved?.shuffleMode || 'off', repeatMode: saved?.repeatMode || 'off',
       resumeOnRestore: Boolean(saved?.isPlaying), resumePosition: saved?.positionSeconds || 0,
       volume: saved?.volume ?? 1, muted: saved?.muted || false, crossfadeSeconds: saved?.crossfadeSeconds || 0,
@@ -59,6 +68,8 @@ export class PlaybackController {
     this.listeners = new Set();
     this.failed = new Set();
     this.played = new Set();
+    this.replayCandidates = new Map();
+    this.impressions = new Map();
     this.sequence = 0;
     this.preloadSequence = 0;
     this.desiredPlaying = this.state.resumeOnRestore;
@@ -156,22 +167,49 @@ export class PlaybackController {
   }
   persist = () => {
     try {
+      const { playbackEvent, playbackEventQueue, ...persistedState } = this.state;
       this.storage?.setItem(QUEUE_STORAGE_KEY, serializeQueueState({
-        ...this.state, originalQueue: this.originalQueue,
+        ...persistedState, originalQueue: this.originalQueue,
         positionSeconds: this.loading ? this.state.resumePosition : this.audio?.currentTime || this.state.resumePosition,
         isPlaying: this.desiredPlaying,
       }));
     } catch { /* full or disabled storage must never interrupt playback */ }
   };
-  event(eventType, song = this.state.currentSong, detail = {}) {
-    if (!song) return;
-    this.update({ playbackEvent: {
-      id: `${this.now()}-${Math.random().toString(36).slice(2)}`, createdAt: new Date(this.now()).toISOString(),
-      eventType, songKey: keyOf(song), artist: song.artist || '', track: song.track || '', driveFileId: song.driveFileId || '',
+  event = (eventType, song = this.state.currentSong, detail = {}) => {
+    const now = this.now();
+    const sessionId = now - this.state.lastEventAt > SESSION_TIMEOUT_MS || !this.state.sessionId ? newId() : this.state.sessionId;
+    const songKey = keyOf(song) || detail.songKey || '';
+    // Only impressions may be songless; every other event keeps the old "no song, no event" rule.
+    if (!songKey && eventType !== 'recommendation-shown') return null;
+    for (const [key, timestamp] of this.replayCandidates) if (now - timestamp > REPLAY_WINDOW_MS) this.replayCandidates.delete(key);
+    if (eventType === 'recommendation-shown') {
+      const signature = `${detail.surface || ''}\u0000${JSON.stringify(detail.songKeys || [])}`;
+      const previous = this.impressions.get(signature);
+      if (previous != null && now - previous < IMPRESSION_WINDOW_MS) return null;
+      this.impressions.set(signature, now);
+    }
+    if (eventType === 'playback-start' && songKey) {
+      const qualifiedAt = this.replayCandidates.get(songKey);
+      if (qualifiedAt && now - qualifiedAt <= REPLAY_WINDOW_MS) {
+        this.replayCandidates.delete(songKey);
+        this.event('playback-replay', song, { replayOf: songKey });
+      }
+    }
+    if (['playback-complete', 'playback-short-ended'].includes(eventType) && songKey) this.replayCandidates.set(songKey, now);
+    const playbackEvent = {
+      id: `${now}-${Math.random().toString(36).slice(2)}`, createdAt: new Date(now).toISOString(),
+      eventType, songKey, artist: song?.artist || '', track: song?.track || '', driveFileId: song?.driveFileId || '',
       positionSeconds: this.audio?.currentTime || 0, durationSeconds: this.audio?.duration || 0,
-      userInitiated: false, expectedFullPlay: false, ...detail,
-    } });
-  }
+      userInitiated: false, expectedFullPlay: false,
+      sourceType: SOURCE_TYPES.has(song?._playbackSourceType) ? song._playbackSourceType : SOURCE_TYPES.has(this.state.sourceType) ? this.state.sourceType : '',
+      sourceId: song?._playbackSourceId || this.state.sourceId || '', queueId: this.state.queueId, sessionId, ...detail,
+    };
+    this.update({ playbackEvent, playbackEventQueue: [...(this.state.playbackEventQueue || []), playbackEvent].slice(-100),
+      sessionId, lastEventAt: now, lastPlaybackAt: ['playback-start', 'playback-complete', 'playback-pause'].includes(eventType) ? now : this.state.lastPlaybackAt,
+      playedInQueue: eventType === 'playback-start' ? true : this.state.playedInQueue });
+    this.persist();
+    return playbackEvent;
+  };
   cancelLoad() {
     this.sequence += 1;
     this.loadAbort?.abort();
@@ -607,6 +645,7 @@ export class PlaybackController {
       if (this.retiring && this.now() >= this.fadeDeadline) { this.finishFade({ glide: true }); this.preloadNext(); }
       if (this.checkSleep()) return;
       const duration = this.audio.duration || 0;
+      if (duration > 0 && this.audio.currentTime / duration > 0.8 && this.state.currentSongKey) this.replayCandidates.set(this.state.currentSongKey, this.now());
       let buffered = 0;
       const ranges = this.audio.element?.buffered;
       for (let i = 0; i < (ranges?.length || 0); i++) {
@@ -712,7 +751,10 @@ export class PlaybackController {
   playNext = ({ reason = 'auto-next' } = {}) => {
     const index = this.nextIndex();
     if (index < 0) return false;
-    if (reason.startsWith('user')) this.event('user-skip', undefined, { userInitiated: true, message: reason });
+    if (reason.startsWith('user')) {
+      this.update({ skipsInQueue: this.state.skipsInQueue + 1 });
+      this.event('user-skip', undefined, { userInitiated: true, message: reason });
+    }
     if (index === this.state.queueIndex && reason === 'ended') { this.audio.seek(0); this.play(); return true; }
     return this.select(index);
   };
@@ -725,6 +767,7 @@ export class PlaybackController {
       if (raw < 0 && repeatMode !== 'all') break;
       const index = (raw + queue.length) % queue.length;
       if (playable(queue[index]) && !this.failed.has(keyOf(queue[index]))) {
+        this.update({ skipsInQueue: this.state.skipsInQueue + 1 });
         this.event('user-skip', undefined, { userInitiated: true, message: 'user-prev' });
         return this.select(index);
       }
@@ -774,7 +817,19 @@ export class PlaybackController {
       index = 0;
     }
 
-    this.update({ queue, manualQueue });
+    const sourceType = SOURCE_TYPES.has(options?.sourceType) && options.sourceType ? options.sourceType : (isSearch ? 'search' : '');
+    const sourceId = String(options?.sourceId || '');
+    const previous = this.state;
+    const previousQueueId = previous.queueId;
+    const newQueueId = newId();
+    const wasRecentlyPlaying = previous.isPlaying || (previous.lastPlaybackAt && this.now() - previous.lastPlaybackAt <= SESSION_TIMEOUT_MS);
+    this.update({ queue, manualQueue, queueId: newQueueId, sourceType, sourceId, skipsInQueue: 0, playedInQueue: false });
+    if (wasRecentlyPlaying && previousQueueId !== newQueueId) {
+      this.event('queue-replaced', previous.currentSong, {
+        previousQueueId, newQueueId, previousSourceType: previous.sourceType || '', previousSourceId: previous.sourceId || '',
+        sourceType, sourceId, skipsInPreviousQueue: previous.skipsInQueue || 0, playedInPreviousQueue: Boolean(previous.playedInQueue),
+      });
+    }
     this.select(index);
     this.fetchRecommendations(queue[index]);
   };
@@ -793,7 +848,7 @@ export class PlaybackController {
     const key = keyOf(cleaned);
     if (!this.state.queue.length) {
       this.update({ manualQueue: [cleaned] });
-      this.setQueueAndPlay([cleaned]);
+      this.setQueueAndPlay([cleaned], 0, { sourceType: 'queue' });
       return true;
     }
     if (key === keyOf(this.state.queue[this.state.queueIndex])) return false;
@@ -813,7 +868,7 @@ export class PlaybackController {
     const key = keyOf(cleaned);
     if (!this.state.queue.length) {
       this.update({ manualQueue: [cleaned] });
-      this.setQueueAndPlay([cleaned]);
+      this.setQueueAndPlay([cleaned], 0, { sourceType: 'queue' });
       return true;
     }
     if (key === keyOf(this.state.queue[this.state.queueIndex])) return false;
@@ -904,8 +959,12 @@ export class PlaybackController {
       if (!cleanRecs.length || seq !== this.recommendationSequence || abort.signal.aborted) return;
       if (keyOf(this.state.currentSong) !== songKey) return;
 
+      this.event('recommendation-shown', null, {
+        surface: 'autoplay', songKeys: cleanRecs.slice(0, 50).map(keyOf), sourceId: songKey, sourceType: 'autoplay',
+      });
+
       // Append cleanRecs to queue (after any manual queue and context tracks)
-      const newQueue = [...this.state.queue, ...cleanRecs];
+      const newQueue = [...this.state.queue, ...cleanRecs.map(song => ({ ...song, _playbackSourceType: 'autoplay', _playbackSourceId: songKey }))];
       this.update({ queue: newQueue, queueRevision: this.state.queueRevision + 1 });
       this.preloadNext();
       this.persist();

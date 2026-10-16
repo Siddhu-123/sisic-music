@@ -58,6 +58,11 @@ const VIEWS = { HOME: 'home', EXPLORE: 'explore', LIBRARY: 'library', DUPLICATES
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
 const AUTO_QUEUE_LIMIT = 10;
 const LISTENING_HISTORY_KEY = 'listening history';
+function sourceHash(value = '') {
+  let hash = 2166136261;
+  for (const character of String(value)) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  return (hash >>> 0).toString(36);
+}
 
 function isDeletablePlaylist(playlist) {
   if (!playlist || !playlist.playlistKey) return false;
@@ -382,8 +387,9 @@ function App() {
   const songClickRequestRef = useRef(0);
   const countedPlaybackRef = useRef(new Set());
   const playbackSessionRef = useRef({ id: '', lastTimestamp: 0, sequence: 0 });
+  const processedPlaybackEventIdsRef = useRef(new Set());
   const autoQueuedSongKeysRef = useRef(new Set());
-  const { currentSongKey, isPlaying, playbackEvent, configurePlayback } = player;
+  const { currentSongKey, isPlaying, playbackEventQueue, configurePlayback } = player;
 
   useEffect(() => {
     if (![VIEWS.EXPLORE, VIEWS.DOWNLOADS].includes(view) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
@@ -1293,21 +1299,18 @@ function App() {
   }, [currentSongKey, isPlaying]);
 
   useEffect(() => {
-    if (!playbackEvent) return;
-    const event = enrichPlaybackEvent(playbackEvent, playbackSessionRef.current, {
-      userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
-    });
-    if (event.eventType === 'unexpected-playback-skip' || event.eventType === 'playback-short-ended') {
-      console.warn('Playback anomaly:', event);
-    }
-    const syncPlaybackEvent = async () => {
+    const pending = (playbackEventQueue || []).filter(item => item?.id && !processedPlaybackEventIdsRef.current.has(item.id));
+    if (!pending.length) return;
+    pending.forEach(item => processedPlaybackEventIdsRef.current.add(item.id));
+    if (processedPlaybackEventIdsRef.current.size > 500) processedPlaybackEventIdsRef.current = new Set(pending.map(item => item.id));
+    const syncPlaybackEvent = async playbackEvent => {
+      const event = enrichPlaybackEvent(playbackEvent, playbackSessionRef.current, {
+        userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+      });
+      if (event.eventType === 'unexpected-playback-skip' || event.eventType === 'playback-short-ended') console.warn('Playback anomaly:', event);
       await recordPlaybackEvent(event);
       if (!isAuthenticated || !DRIVE_FOLDER_ID || !driveService.isAuthenticated) {
-        await enqueueSyncOutbox({
-          entityType: 'playback-event',
-          entityKey: event.id,
-          payload: event,
-        });
+        await enqueueSyncOutbox({ entityType: 'playback-event', entityKey: event.id, payload: event });
         return;
       }
       try {
@@ -1322,8 +1325,8 @@ function App() {
         console.warn('Playback log write failed; queued for retry:', error);
       }
     };
-    syncPlaybackEvent().catch(error => console.warn('Playback telemetry queue failed:', error));
-  }, [isAuthenticated, playbackEvent]);
+    pending.forEach(item => syncPlaybackEvent(item).catch(error => console.warn('Playback telemetry queue failed:', error)));
+  }, [isAuthenticated, playbackEventQueue]);
 
   const handleExportData = useCallback(() => {
     const exportData = buildAnalyticsExport({
@@ -1355,6 +1358,8 @@ function App() {
     setActionError('');
     const selectedKey = getSongKey(song);
     const isSearch = Boolean(options.isSearch || (searchQuery.trim().length >= 1 && (!selectedPlaylistKey || view === VIEWS.LIBRARY || view === VIEWS.DUPLICATES)));
+    const sourceType = options.sourceType || (isSearch ? 'search' : selectedPlaylistKey ? 'playlist' : 'library');
+    const sourceId = options.sourceId || (sourceType === 'search' ? sourceHash(searchQuery.trim()) : sourceType === 'playlist' ? selectedPlaylistKey : '');
     const sourceSongs = (isSearch ? [song] : (songList || [song]))
       .map(asSongRecord)
       .map(item => mergeJob(allSongsByKey.get(item.songKey) || item, jobBySongKey));
@@ -1365,7 +1370,7 @@ function App() {
       if (request !== songClickRequestRef.current || resolved?.downloadBlocked) return;
       if (resolved) {
         const updated = sourceSongs.map(item => item.songKey === selectedKey ? { ...item, ...resolved } : item);
-        player.setQueueAndPlay(updated, startIdx, { isSearch });
+        player.setQueueAndPlay(updated, startIdx, { isSearch, sourceType, sourceId });
         return;
       }
 
@@ -1377,7 +1382,7 @@ function App() {
 
       const playable = sourceSongs.filter(isPlayable);
       if (playable.length > 0) {
-        player.setQueueAndPlay(playable, 0, { isSearch });
+        player.setQueueAndPlay(playable, 0, { isSearch, sourceType, sourceId });
       }
     } catch (error) {
       if (request !== songClickRequestRef.current) return;
@@ -1387,6 +1392,10 @@ function App() {
       addToast(message);
     }
   }, [addToast, allSongsByKey, jobBySongKey, player, resolvePlayableSong, searchQuery, selectedPlaylistKey, view]);
+
+  const handleRecommendationShown = useCallback((surface, songKeys, sourceId = '') => {
+    player.event('recommendation-shown', null, { surface, songKeys: (songKeys || []).slice(0, 50), sourceId });
+  }, [player]);
 
   const handlePrepare = useCallback(async (song) => {
     const selectedKey = getSongKey(song);
@@ -1539,13 +1548,15 @@ function App() {
     if (existingLiked) {
       await removeSongFromPlaylist(localSong.songKey, likedPlaylist.playlistKey);
       await persistPlaylistIndex();
+      player.event('song-unlike', localSong, { userInitiated: true });
       addToast(`Removed "${localSong.track}" from liked songs`);
     } else {
       await addSongToPlaylist(localSong, 'Liked Songs', 'sisic');
       await persistPlaylistIndex();
+      player.event('song-like', localSong, { userInitiated: true });
       addToast(`Liked "${localSong.track}"`);
     }
-  }, [addToast, ensureLocalSong, likedPlaylist, persistPlaylistIndex]);
+  }, [addToast, ensureLocalSong, likedPlaylist, persistPlaylistIndex, player]);
 
   const handleDeletePlaylist = useCallback(async (playlist) => {
     if (!playlist || !isDeletablePlaylist(playlist)) {
@@ -2044,6 +2055,7 @@ function App() {
             likedSongKeys={likedSongKeys}
             catalogueLoading={catalogueLoading}
             renderSong={renderSongCard}
+            onRecommendationShown={handleRecommendationShown}
           />
         )}
 
@@ -2362,7 +2374,8 @@ function App() {
             onClose={() => setRecommendationTarget(null)}
             targetSong={recommendationTarget}
             librarySongs={allSongs}
-            onPlaySong={song => handlePlaySong(song, [song], { isSearch: true })}
+            onRecommendationShown={handleRecommendationShown}
+            onPlaySong={song => handlePlaySong(song, [song], { sourceType: 'mix', sourceId: getSongKey(recommendationTarget) })}
             onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
           />
         </Suspense>
@@ -2379,7 +2392,7 @@ function App() {
             onPlayMix={mixSongs => {
               if (!mixSongs.length) return;
               setIsTasteProfileOpen(false);
-              handlePlaySong(mixSongs[0], mixSongs);
+              handlePlaySong(mixSongs[0], mixSongs, { sourceType: 'mix', sourceId: 'taste-profile' });
             }}
           />
         </Suspense>

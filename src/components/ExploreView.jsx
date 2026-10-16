@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Compass, Music2, Search, Sparkles } from 'lucide-react';
 import { AsyncArtworkImage } from './Components.jsx';
 import {
@@ -36,6 +36,7 @@ export function ExploreView({
   likedSongKeys = [],
   catalogueLoading = false,
   renderSong,
+  onRecommendationShown,
 }) {
   const [query, setQuery] = useState('');
   const [genre, setGenre] = useState('');
@@ -56,6 +57,13 @@ export function ExploreView({
     [availability, genre, mood, rankedSongs],
   );
   const isFiltering = Boolean(query || genre || mood || availability !== 'all' || activeMix);
+  useEffect(() => {
+    if (activeMix) {
+      onRecommendationShown?.('explore-mix', activeMix.songs.slice(0, 50).map(song => song.songKey), activeMix.id);
+    } else if (!isFiltering) {
+      onRecommendationShown?.('explore-mixes', taste.mixes.flatMap(mix => mix.songs).slice(0, 50).map(song => song.songKey), '');
+    }
+  }, [activeMix, isFiltering, onRecommendationShown, taste.mixes]);
   const genreShelves = useMemo(
     () => genres.slice(0, 4).map(facet => ({
       ...facet,
@@ -137,7 +145,7 @@ export function ExploreView({
             {activeMix && <button className="explore-clear" type="button" onClick={() => setActiveMixId('')}>Clear mix</button>}
           </div>
           {activeMix ? (
-            <div className="content-rail">{activeMix.songs.map(song => renderSong(song, activeMix.songs))}</div>
+            <div className="content-rail">{activeMix.songs.map(song => renderSong(song, activeMix.songs, { sourceType: 'mix', sourceId: activeMix.id }))}</div>
           ) : filteredSongs.length ? (
             <div className="songs-grid explore-results-grid">{filteredSongs.slice(0, 48).map(song => renderSong(song, query.trim() ? null : filteredSongs, { isSearch: Boolean(query.trim()) }))}</div>
           ) : (
@@ -172,7 +180,7 @@ export function ExploreView({
             </div>
           </section>
 
-          <SongRail title="Suggested for you" subtitle="A gentle next set from your own library" songs={taste.suggestions.slice(0, 10)} renderSong={renderSong} />
+          <SongRail title="Suggested for you" subtitle="A gentle next set from your own library" songs={taste.suggestions.slice(0, 10)} renderSong={(song, list) => renderSong(song, list, { sourceType: 'mix', sourceId: 'suggested-for-you' })} />
           {genreShelves.map(shelf => <SongRail key={shelf.label} title={shelf.label} subtitle={`${shelf.count} songs in your catalogue`} songs={shelf.songs} renderSong={renderSong} />)}
         </>
       )}

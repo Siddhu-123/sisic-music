@@ -45,6 +45,78 @@ function fixture(t, options = {}) {
   return { c: controller, storage };
 }
 
+test('playback events include persisted source, queue, and rolling session identities', t => {
+  let now = 1000;
+  const { c, storage } = fixture(t, { now: () => now });
+  c.setQueueAndPlay(songs, 0, { sourceType: 'playlist', sourceId: 'playlist-1' });
+  const first = c.event('test-event');
+  assert.equal(first.sourceType, 'playlist');
+  assert.equal(first.sourceId, 'playlist-1');
+  assert.ok(first.queueId);
+  assert.ok(first.sessionId);
+  now += 20 * 60 * 1000 + 1;
+  const rolled = c.event('test-event');
+  assert.notEqual(rolled.sessionId, first.sessionId);
+  const saved = JSON.parse(storage.getItem(QUEUE_STORAGE_KEY));
+  assert.equal(saved.queueId, first.queueId);
+  assert.equal(saved.sessionId, rolled.sessionId);
+  const restored = new PlaybackController({ storage, now: () => now });
+  assert.equal(restored.state.queueId, first.queueId);
+  assert.equal(restored.state.sessionId, rolled.sessionId);
+  restored.dispose();
+});
+
+test('replacing an active queue reports previous source, skips, and play state', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs, 0, { sourceType: 'playlist', sourceId: 'mix-list' });
+  await settle();
+  c.playNext({ reason: 'user-next' });
+  const newQueueId = c.state.queueId;
+  c.setQueueAndPlay([songs[3]], 0, { sourceType: 'mix', sourceId: 'focus' });
+  const replaced = c.state.playbackEventQueue.find(item => item.eventType === 'queue-replaced');
+  assert.equal(replaced.previousQueueId, newQueueId);
+  assert.equal(replaced.newQueueId, c.state.queueId);
+  assert.equal(replaced.previousSourceType, 'playlist');
+  assert.equal(replaced.previousSourceId, 'mix-list');
+  assert.equal(replaced.sourceType, 'mix');
+  assert.equal(replaced.sourceId, 'focus');
+  assert.equal(replaced.skipsInPreviousQueue, 1);
+  assert.equal(replaced.playedInPreviousQueue, true);
+});
+
+test('qualified songs emit playback-replay on restart', t => {
+  let now = 1000;
+  const { c } = fixture(t, { now: () => now });
+  c.event('playback-complete', songs[0]);
+  now += 5000;
+  c.event('playback-start', songs[0]);
+  assert.ok(c.state.playbackEventQueue.some(item => item.eventType === 'playback-replay' && item.songKey === 'a'));
+});
+
+test('recommendation impressions allow empty songs and debounce identical surfaces', t => {
+  let now = 1000;
+  const { c } = fixture(t, { now: () => now });
+  const first = c.event('recommendation-shown', null, { surface: 'explore-mixes', songKeys: [], sourceId: '' });
+  assert.equal(first.songKey, '');
+  assert.equal(c.event('recommendation-shown', null, { surface: 'explore-mixes', songKeys: [], sourceId: '' }), null);
+  now += 60 * 1000;
+  assert.ok(c.event('recommendation-shown', null, { surface: 'explore-mixes', songKeys: [], sourceId: '' }));
+});
+
+test('autoplay tags follow the queue item, not the song forever', t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs, 0, { sourceType: 'search', sourceId: 'q1' });
+  const tagged = { ...songs[1], _playbackSourceType: 'autoplay', _playbackSourceId: 'a' };
+  assert.equal(c.event('playback-start', tagged).sourceType, 'autoplay');
+  assert.equal(c.event('playback-start', songs[1]).sourceType, 'search');
+});
+
+test('events without a song are dropped except impressions', t => {
+  const { c } = fixture(t);
+  assert.equal(c.event('playback-error', null), null);
+  assert.ok(c.event('recommendation-shown', null, { surface: 'x', songKeys: ['a'] }));
+});
+
 test('rapid skipping rejects an older preparation without touching the newest source', async t => {
   const first = deferred();
   const { c } = fixture(t);

@@ -6,7 +6,7 @@ export const ACTIONS = ['loadAndPlay', 'configurePlayback', 'togglePlay', 'play'
   'setPitchModifier', 'setPitchRange', 'beginScratch', 'setScratchAngularVelocity', 'endScratch', 'setNeedleLifted', 'clearError',
   'setPlayerError', 'stop', 'playNext', 'playPrev', 'enqueueNext', 'addToQueue', 'removeFromQueue', 'reorderQueue', 'clearQueue',
   'setQueueAndPlay', 'playQueueItem', 'toggleShuffle', 'toggleRepeat', 'setEqPreset', 'setBandGain', 'setEqGains', 'setEqEnabled', 'setCrossfade', 'setSleepTimer',
-  'setDjModeEnabled', 'setDjVoiceEnabled', 'setDjPrediction', 'planDjTransition', 'clearDjPlan'];
+  'setDjModeEnabled', 'setDjVoiceEnabled', 'setDjPrediction', 'planDjTransition', 'clearDjPlan', 'event'];
 
 export function useAudioPlayer() {
   const [controller] = useState(() => {

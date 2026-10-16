@@ -128,6 +128,14 @@ export function restoreQueueState(raw) {
       ...restoreEqualizer(parsed),
       djModeEnabled: Boolean(parsed.djModeEnabled),
       djVoiceEnabled: Boolean(parsed.djVoiceEnabled),
+      queueId: typeof parsed.queueId === 'string' ? parsed.queueId : '',
+      sourceType: typeof parsed.sourceType === 'string' ? parsed.sourceType : '',
+      sourceId: typeof parsed.sourceId === 'string' ? parsed.sourceId : '',
+      sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : '',
+      lastEventAt: nonnegative(parsed.lastEventAt),
+      lastPlaybackAt: nonnegative(parsed.lastPlaybackAt),
+      skipsInQueue: nonnegative(parsed.skipsInQueue),
+      playedInQueue: Boolean(parsed.playedInQueue),
       djHistory: { candidateKeys: uniqueStrings(parsed.djHistory?.candidateKeys, 6), timingBuckets, styles: restoreMixStyles(parsed.djHistory?.styles) },
     };
   } catch { return null; }
