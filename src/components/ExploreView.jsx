@@ -60,20 +60,14 @@ export function ExploreView({
     const last = outcomes.reduce((latest, event) => (String(event.createdAt || '') > latest ? String(event.createdAt) : latest), '');
     return `${outcomes.length}:${last}`;
   }, [playbackEvents]);
-  const eventsSnapshot = useRef({ signature: null, events: playbackEvents });
-  if (eventsSnapshot.current.signature !== outcomeSignature) eventsSnapshot.current = { signature: outcomeSignature, events: playbackEvents };
-  const stableEvents = eventsSnapshot.current.events;
+  const stableEvents = useMemo(() => playbackEvents, [outcomeSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   // Same for songs: the live query re-reads them on any write; keep the old array while mix inputs are unchanged.
   const songSignature = useMemo(() => (librarySongs || [])
     .map(song => [song.songKey, song.driveFileId, song.genre, song.year, song.durationSeconds].join('\u0001'))
     .join('\u0002'), [librarySongs]);
-  const songsSnapshot = useRef({ signature: null, songs: librarySongs });
-  if (songsSnapshot.current.signature !== songSignature) songsSnapshot.current = { signature: songSignature, songs: librarySongs };
-  const stableSongs = songsSnapshot.current.songs;
+  const stableSongs = useMemo(() => librarySongs, [songSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const likedSignature = (likedSongKeys || []).join('\u0002');
-  const likedSnapshot = useRef({ signature: null, keys: likedSongKeys });
-  if (likedSnapshot.current.signature !== likedSignature) likedSnapshot.current = { signature: likedSignature, keys: likedSongKeys };
-  const stableLiked = likedSnapshot.current.keys;
+  const stableLiked = useMemo(() => likedSongKeys, [likedSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const taste = useMemo(
     () => buildExploreMixes(stableSongs, { playbackEvents: stableEvents, likedSongKeys: stableLiked, ...(gemmaVectors?.size ? { gemmaVectors } : {}) }),
     [stableSongs, stableEvents, stableLiked, gemmaVectors],
@@ -114,8 +108,8 @@ export function ExploreView({
 
   const playFlowMix = async kind => {
     const context = { songs: librarySongs, gemmaVectors, events: playbackEvents };
-    let songs = [];
-    let sourceId = '';
+    let songs;
+    let sourceId;
     if (kind === 'long') {
       songs = buildLongMix(context, { minutes: 180 });
       sourceId = '3-hour-flow';

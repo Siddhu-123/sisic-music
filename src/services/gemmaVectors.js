@@ -1,4 +1,4 @@
-import { db, getSongVectors, saveSongVector, saveSongVectors } from '../db.js';
+import { db, getSongVectors, saveSongVectors } from '../db.js';
 import { findSimilarSongMatch, getSongKey, tokenSet } from '../songIdentity.js';
 
 export const GEMMA2_MODEL = 'embeddinggemma-2@fp32/clip30/v1';
