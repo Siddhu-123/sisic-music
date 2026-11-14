@@ -35,8 +35,9 @@ import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
-import { buildUpNextRecommendations, enrichPlaybackEvent } from './services/contextualRecommendationService.js';
-import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, getSongVectors, importGemmaVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
+import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
+import { computeUpNextRecommendationsAsync } from './services/recsWorkerClient.js';
+import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, importGemmaVectors, loadPreferredSongVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
 import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import { getActiveRadio } from './services/infiniteRadio.js';
@@ -452,7 +453,7 @@ function App() {
   const playbackEvents = useMemo(() => safeLibraryData.playbackEvents || [], [safeLibraryData.playbackEvents]);
 
   const reloadGemmaVectors = useCallback(async () => {
-    const rows = await getSongVectors(GEMMA2_MODEL);
+    const { rows } = await loadPreferredSongVectors();
     setGemmaVectors(new Map(rows.map(row => [row.songKey, row])));
   }, []);
 
@@ -1322,20 +1323,24 @@ function App() {
   }, [addToast, ensureLocalSong, jobBySongKey, queueSongForDownload]);
 
   const handleGetRecommendations = useCallback(async ({ currentSong, manualQueue = [], signal }) => {
-    return await buildUpNextRecommendations({
+    const hasGemmaVectors = gemmaVectors.size > 0;
+    const recs = await computeUpNextRecommendationsAsync({
       currentSong,
       librarySongs: exploreLibrarySongs,
       playbackEvents: librarySummary.playbackEvents,
-      ...(gemmaVectors.size ? { gemmaVectors } : {}),
+      ...(hasGemmaVectors ? { gemmaVectors } : {}),
       likedSongKeys,
       recentlyPlayedKeys: Array.from(countedPlaybackRef.current || []),
       manualQueue,
       limit: 6,
       signal,
-      getEmbedding: async (key) => {
-        try { return await db.songEmbeddings.get(key); } catch { return null; }
-      },
+      ...(!hasGemmaVectors ? {
+        getEmbedding: async (key) => {
+          try { return await db.songEmbeddings.get(key); } catch { return null; }
+        },
+      } : {}),
     });
+    return signal?.aborted ? [] : recs;
   }, [exploreLibrarySongs, gemmaVectors, librarySummary.playbackEvents, likedSongKeys]);
 
   useEffect(() => {

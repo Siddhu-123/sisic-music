@@ -10,6 +10,7 @@ import {
   PLAYBACK_SESSION_GAP_MS,
   rankContextualSongs,
   resolveEmbeddingMetadata,
+  scoreWithMapFeatures,
   sessionizePlaybackEvents,
   validateAndNormalizeVector,
 } from './contextualRecommendationService.js';
@@ -651,4 +652,69 @@ test('currentSessionEvents keeps only events after the last 20-minute gap', asyn
   const at = minutes => new Date(Date.UTC(2026, 9, 16, 20, minutes)).toISOString();
   const events = [{ id: 'old', createdAt: at(0) }, { id: 'a', createdAt: at(30) }, { id: 'b', createdAt: at(40) }];
   assert.deepEqual(currentSessionEvents(events).map(event => event.id), ['a', 'b']);
+});
+
+test('buildUpNextRecommendations searches beyond 80 candidates and honors boundary seam continuity', async () => {
+  const { RECS_V3_MODEL } = await import('./gemmaVectors.js');
+  const unitVec = (idx, dims = 8) => Array.from({ length: dims }, (_, i) => (i === idx ? 1 : 0));
+  const librarySongs = [];
+  const gemmaVectors = new Map();
+  for (let i = 0; i < 140; i++) {
+    const key = `track-${i}`;
+    librarySongs.push({ songKey: key, artist: `Artist ${i}`, track: `Track ${i}`, driveFileId: `d-${i}` });
+    // Tracks 1..138 are orthogonal on dim 1; track 139 matches current song cleanly on dim 0 + end->start seam!
+    const vec = i === 0 || i === 139 ? unitVec(0) : unitVec(1);
+    const startVec = i === 139 ? unitVec(2) : unitVec(3);
+    const endVec = i === 0 ? unitVec(2) : unitVec(3);
+    gemmaVectors.set(key, { embeddingModel: RECS_V3_MODEL, vector: vec, startVector: startVec, endVector: endVec });
+  }
+  const recs = await buildUpNextRecommendations({
+    currentSong: librarySongs[0],
+    librarySongs,
+    gemmaVectors,
+    limit: 3,
+  });
+  assert.equal(recs[0].songKey, 'track-139');
+  assert.equal(recs[0].embeddingModel, RECS_V3_MODEL);
+  assert.ok(recs[0].seamSimilarity > 0.99);
+});
+
+test('scoreWithMapFeatures standardizes continuous features without blowing up rare flags', () => {
+  const rows = Array.from({ length: 100 }, (_, i) => ({
+    id: i,
+    // Rare flag on col 4 occurs 1% of the time; must remain bounded (-0.25 penalty, not -10x explosion)
+    features: [i / 100, (100 - i) / 100, 0.5, 0, i === 99 ? 1 : 0, 1],
+  }));
+  const ranked = scoreWithMapFeatures(rows);
+  const topScore = Math.max(...ranked.map(r => r.mapScore));
+  const penalized = ranked[99].mapScore;
+  assert.ok(Math.abs(topScore - penalized) < 5);
+});
+
+test('computeUpNextRecommendationsAsync routes large catalogs to worker and preserves results', async () => {
+  const { computeUpNextRecommendationsAsync } = await import('./recsWorkerClient.js');
+  const librarySongs = Array.from({ length: 320 }, (_, i) => ({
+    songKey: `w-${i}`,
+    artist: `A-${i}`,
+    track: `T-${i}`,
+    driveFileId: `f-${i}`,
+    vector: Array.from({ length: 64 }, (_, d) => (d === (i === 319 ? 0 : 1) ? 1 : 0)),
+  }));
+  const workerMsgs = [];
+  const mockFactory = () => {
+    const instance = {
+      postMessage(msg) {
+        workerMsgs.push(msg.mode);
+        setTimeout(() => instance.onmessage?.({ data: { requestId: msg.requestId, items: [librarySongs[319]] } }), 0);
+      },
+      terminate() {},
+    };
+    return instance;
+  };
+  const recs = await computeUpNextRecommendationsAsync(
+    { currentSong: librarySongs[0], librarySongs, limit: 3 },
+    { createWorker: mockFactory },
+  );
+  assert.deepEqual(workerMsgs, ['up-next']);
+  assert.equal(recs[0].songKey, 'w-319');
 });

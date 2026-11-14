@@ -89,6 +89,8 @@ test('cluster view projects songs to 3D and assigns bounded k-means groups', () 
     assert.ok(Number.isFinite(item.coordY));
     assert.ok(Number.isFinite(item.coordZ));
     assert.ok(item.clusterSize >= 1);
+    const norm = Math.sqrt(item.clusterCentroid.reduce((sum, value) => sum + value * value, 0));
+    assert.ok(Math.abs(norm - 1) < 0.001, 'k-means centroids remain unit normalized');
   }
 });
 

@@ -15,6 +15,8 @@ import {
   predictSkip,
   SKIP_MODEL_FEATURES,
   buildSkipTrainingRows,
+  MAP_PRIOR_WEIGHTS,
+  trainMapPairwiseWeights,
 } from './behaviourLearning.js';
 
 const event = (eventType, fields = {}) => ({ eventType, createdAt: '2026-10-16T00:00:00.000Z', ...fields });
@@ -45,6 +47,13 @@ test('user-prev ends a listen without creating a skip or negative affinity', () 
   ]).get('song');
   assert.equal(affinity.skips, 0);
   assert.equal(affinity.score, 0);
+});
+
+test('playback error outcomes are censored from affinity scores and skip counts', () => {
+  const errors = ['unexpected-playback-skip', 'playback-short-ended', 'playback-error'];
+  for (const eventType of errors) assert.equal(outcomeWeight(event(eventType)), 0);
+  const affinities = computeAffinities(errors.map(eventType => event(eventType, { songKey: 'song' })));
+  assert.deepEqual(affinities.get('song'), { score: 0, plays: 0, skips: 0, lastAt: '2026-10-16T00:00:00.000Z' });
 });
 
 test('affinities decay by half-life and daily buckets span 30 days', () => {
@@ -107,12 +116,40 @@ test('transition statistics smooth a single skip and accumulate early skips', ()
   const events = [
     event('playback-start', { songKey: 'a', queueId: 'q', createdAt: '2026-10-16T00:00:00Z' }),
     event('playback-start', { songKey: 'b', queueId: 'q', createdAt: '2026-10-16T00:01:00Z' }),
+    event('playback-error', { songKey: 'b', queueId: 'q', createdAt: '2026-10-16T00:01:02Z' }),
+    event('unexpected-playback-skip', { songKey: 'b', queueId: 'q', createdAt: '2026-10-16T00:01:04Z' }),
+    event('playback-short-ended', { songKey: 'b', queueId: 'q', createdAt: '2026-10-16T00:01:06Z' }),
     event('user-skip', { songKey: 'b', queueId: 'q', positionSeconds: 8, createdAt: '2026-10-16T00:01:08Z' }),
   ];
   const stats = pairTransitionStats(events);
   assert.deepEqual(stats.get('a=>b'), { plays: 1, skips: 1, earlySkips: 1 });
   same(transitionPenalty(stats, 'a', 'b'), 0.5);
   same(transitionPenalty(stats, 'b', 'a'), 0);
+});
+
+test('transition skips are isolated to the playback episode before the next start', () => {
+  const events = [
+    event('playback-start', { songKey: 'a', queueId: 'q', createdAt: '2026-10-16T00:00:00Z' }),
+    event('playback-start', { songKey: 'b', queueId: 'q', createdAt: '2026-10-16T00:01:00Z' }),
+    event('user-skip', { songKey: 'b', queueId: 'q', positionSeconds: 8, createdAt: '2026-10-16T00:01:08Z' }),
+    event('playback-start', { songKey: 'c', queueId: 'q', createdAt: '2026-10-16T00:02:00Z' }),
+    event('user-skip', { songKey: 'b', queueId: 'q', positionSeconds: 4, createdAt: '2026-10-16T00:02:01Z' }),
+  ];
+  assert.deepEqual(pairTransitionStats(events).get('a=>b'), { plays: 1, skips: 1, earlySkips: 1 });
+});
+
+test('MAP pairwise trainer learns within prior-centered sign-preserving bounds', () => {
+  const weights = trainMapPairwiseWeights([
+    { preferred: [1, 0, 0, 0, 0, 0], rejected: [0, 0, 0, 0, 0, 0] },
+  ]);
+  assert.equal(MAP_PRIOR_WEIGHTS.length, 6);
+  assert.ok(weights[0] > MAP_PRIOR_WEIGHTS[0]);
+  for (let index = 0; index < weights.length; index++) {
+    assert.ok(weights[index] >= MAP_PRIOR_WEIGHTS[index] - 0.4);
+    assert.ok(weights[index] <= MAP_PRIOR_WEIGHTS[index] + 0.4);
+    if (MAP_PRIOR_WEIGHTS[index] > 0) assert.ok(weights[index] > 0);
+    if (MAP_PRIOR_WEIGHTS[index] < 0) assert.ok(weights[index] < 0);
+  }
 });
 
 test('exploration is near epsilon over 10,000 seeded picks and selects below top five', () => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildInterests, dot, interestAffinity, unit } from './tasteInterests.js';
+import { buildInterests, dot, interestAffinity, scoreInterestsLogSumExp, unit } from './tasteInterests.js';
 
 const DIMS = 24;
 function axis(index, noiseSeed = 0) {
@@ -29,6 +29,21 @@ test('a tiny stray taste is not promoted to an interest', () => {
   const main = Array.from({ length: 30 }, (_, i) => ({ vector: axis(0, i), weight: 1 }));
   const stray = [{ vector: axis(5, 99), weight: 1 }];
   assert.equal(buildInterests([...main, ...stray]).length, 1);
+});
+
+test('clusters enforce minimum size of 3 and recover all 4 diverse interests', () => {
+  const items = [
+    ...Array.from({ length: 3 }, (_, i) => ({ vector: axis(0, i), weight: 1 })),
+    ...Array.from({ length: 2 }, (_, i) => ({ vector: axis(1, i + 10), weight: 1 })),
+  ];
+  assert.equal(buildInterests(items).length, 1);
+  const fourInterests = [
+    ...Array.from({ length: 5 }, (_, i) => ({ vector: axis(0, i), weight: 1 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ vector: axis(1, i + 10), weight: 1 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ vector: axis(2, i + 20), weight: 1 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ vector: axis(3, i + 30), weight: 1 })),
+  ];
+  assert.equal(buildInterests(fourInterests).length, 4);
 });
 
 test('interests are deterministic and ignore invalid items', () => {
@@ -75,4 +90,18 @@ test('interestAffinity never rewards a poor match for belonging to a small inter
   const small = interests[1].vector;
   assert.ok(interestAffinity(small, interests) >= 0.8 * dot(small, small) - 1e-9);
   assert.equal(interestAffinity(axis(0), []), null);
+});
+
+test('log-sum-exp interest scoring is smooth and session activated', () => {
+  const interests = [
+    { vector: axis(0), weight: 0.5 },
+    { vector: axis(1), weight: 0.5 },
+  ];
+  const candidate = axis(0);
+  const neutral = scoreInterestsLogSumExp(candidate, interests);
+  const active = scoreInterestsLogSumExp(candidate, interests, { sessionVector: axis(0) });
+  assert.ok(neutral > 0.5 && neutral < 1);
+  assert.ok(active > neutral);
+  assert.ok(Math.abs(scoreInterestsLogSumExp(candidate, [interests[0]]) - dot(candidate, interests[0].vector)) < 1e-12);
+  assert.equal(scoreInterestsLogSumExp(candidate, []), null);
 });

@@ -4,8 +4,15 @@ import {
   EMBEDDING_DIMENSIONS,
   getSongEmbedding,
 } from './tasteEmbeddingService.js';
-import { buildInterests, interestAffinity } from './tasteInterests.js';
-import { createSessionSteer, outcomeWeight } from './behaviourLearning.js';
+import { buildInterests, interestAffinity, scoreInterestsLogSumExp } from './tasteInterests.js';
+import {
+  MAP_PRIOR_WEIGHTS,
+  createSessionSteer,
+  outcomeWeight,
+  pairTransitionStats,
+  transitionPenalty,
+} from './behaviourLearning.js';
+import { GEMMA2_MODEL } from './gemmaVectors.js';
 
 export const PLAYBACK_SESSION_GAP_MS = 20 * 60 * 1000;
 export function currentSessionEvents(events = [], gapMs = PLAYBACK_SESSION_GAP_MS) {
@@ -23,10 +30,8 @@ export const PLAYBACK_START_EVENT_TYPES = Object.freeze(['playback-start', 'play
 const DAY_MS = 24 * 60 * 60 * 1000;
 // How quickly "what you were just listening to" fades into long-term taste.
 const SEQUENCE_HALF_LIFE_MS = 6 * 60 * 60 * 1000;
-// A time-of-day vector starts from long-term taste and moves toward that
-// bucket's own listening only as sessions accumulate (CoSeRNN: context matters
-// most, and is noisiest, in rarely seen contexts). This many sessions' worth of prior.
-const CONTEXT_PRIOR_SESSIONS = 2;
+// Time-of-day prior strength (kappa_ctx = 6 sessions) so sparse buckets shrink safely to longTerm.
+const CONTEXT_PRIOR_SESSIONS = 6;
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -445,12 +450,48 @@ function lookup(mapOrObject, key) {
   return mapOrObject instanceof Map ? mapOrObject.get(key) : mapOrObject?.[key];
 }
 
+export function scoreWithMapFeatures(rows = [], weights = MAP_PRIOR_WEIGHTS) {
+  if (!rows.length) return [];
+  const w = Array.isArray(weights) && weights.length === 6 ? weights : MAP_PRIOR_WEIGHTS;
+  const contMeans = [0, 0, 0];
+  const contStds = [1, 1, 1];
+  for (let col = 0; col < 3; col++) {
+    let mean = 0;
+    for (const row of rows) mean += Number(row.features?.[col] || 0);
+    mean /= rows.length;
+    contMeans[col] = mean;
+    let variance = 0;
+    for (const row of rows) {
+      const diff = Number(row.features?.[col] || 0) - mean;
+      variance += diff * diff;
+    }
+    contStds[col] = Math.max(1e-6, Math.sqrt(variance / rows.length));
+  }
+  return rows.map(row => {
+    const f = row.features || [0, 0, 0, 0, 0, 0];
+    // Standardize continuous scores (f0..f2) only; keep bounded flags/penalties (f3..f5) unscaled.
+    const z0 = (Number(f[0] || 0) - contMeans[0]) / contStds[0];
+    const z1 = (Number(f[1] || 0) - contMeans[1]) / contStds[1];
+    const z2 = (Number(f[2] || 0) - contMeans[2]) / contStds[2];
+    const s3 = Number(f[3] || 0);
+    const s4 = Number(f[4] || 0);
+    const s5 = Number(f[5] || 0);
+    const mapScore = (w[0] * z0) + (w[1] * z1) + (w[2] * z2) + (w[3] * s3) + (w[4] * s4) + (w[5] * s5);
+    return { ...row, mapScore };
+  });
+}
+
 export function rankContextualSongs(songs = [], options = {}) {
   const profile = options.profile;
   const likedSongKeys = new Set(options.likedSongKeys || []);
   const excluded = new Set(options.excludeSongKeys || []);
   const playCountByKey = options.playCountByKey || new Map();
   const now = timestampValue(options.now, Date.now());
+  const activeTimeBucket = options.currentContext?.timeBucket || profile?.currentContext?.timeBucket;
+  const contextEntry = activeTimeBucket ? profile?.contextVectors?.[activeTimeBucket] : null;
+  const contextBlendWeight = contextEntry?.vector
+    ? (contextEntry.sessions / (contextEntry.sessions + CONTEXT_PRIOR_SESSIONS))
+    : 0;
   // Stale sessions hand their weight back to long-term taste instead of
   // steering today's picks with what was played weeks ago.
   const sequenceWeight = Number.isFinite(profile?.sequenceWeight) ? Math.min(1, Math.max(0, profile.sequenceWeight)) : 1;
@@ -473,10 +514,18 @@ export function rankContextualSongs(songs = [], options = {}) {
       }
 
       const plays = Math.max(finiteNumber(song.playCount), playCountFor(playCountByKey, key));
-      // With several distinct interests a song is judged by the one it fits best; a
-      // single blended centroid would favour music that sits between them.
-      const multiInterest = vector && profile?.interests?.length > 1 ? interestAffinity(vector, profile.interests) : null;
-      const tasteAffinity = multiInterest ?? ((profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0);
+      // Session-activated LogSumExp multi-interest scoring prevents single-centroid averaging
+      // across distant styles while lifting tracks aligned with the active session mode.
+      const multiInterest = vector && profile?.interests?.length > 1
+        ? (scoreInterestsLogSumExp(vector, profile.interests, {
+          sessionVector: sequenceWeight > 0.15 ? profile.recentVector : null,
+          beta: 3.0,
+          tau: 8.0,
+        }) ?? interestAffinity(vector, profile.interests))
+        : null;
+      const baseTaste = multiInterest ?? ((profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0);
+      const contextFit = (contextEntry?.vector && vector) ? cosineSimilarity(contextEntry.vector, vector) : 0;
+      const tasteAffinity = (baseTaste * (1 - 0.25 * contextBlendWeight)) + (contextFit * (0.25 * contextBlendWeight));
       const sequenceAffinity = (profile?.recentVector && vector) ? cosineSimilarity(profile.recentVector, vector) : 0;
       const skipAffinity = (profile?.negativeVector && vector) ? cosineSimilarity(profile.negativeVector, vector) : 0;
       const likedBoost = likedSongKeys.has(key) ? 0.22 : 0;
@@ -681,8 +730,6 @@ export async function buildUpNextRecommendations({
 
     seenCandidateKeys.add(key);
     candidates.push(song);
-    // Bounded candidate pool: cap at 80 candidate tracks to keep recommendation computation fast
-    if (candidates.length >= 80) break;
   }
 
   if (candidates.length === 0) return [];
@@ -699,13 +746,23 @@ export async function buildUpNextRecommendations({
   }
   const gemmaDimensions = gemmaVectors?.values?.().next?.().value?.vector?.length;
 
-  // 2. Resolve embedding for current song
+  // 2. Resolve embedding and boundary endVector for current song
   let currentMeta = null;
   let currentVector = null;
+  let currentEndVector = null;
   const gemmaCurrent = gemmaVectors?.get?.(currentKey);
   if (gemmaCurrent?.vector) {
     currentVector = validateAndNormalizeVector(gemmaCurrent.vector, gemmaCurrent.vector.length);
-    if (currentVector) currentMeta = { vectorType: 'gemma', model: 'embeddinggemma-2@fp32/clip30/v1', dimensions: currentVector.length };
+    if (currentVector) {
+      currentMeta = {
+        vectorType: 'gemma',
+        model: gemmaCurrent.embeddingModel || GEMMA2_MODEL,
+        dimensions: currentVector.length,
+      };
+    }
+    if (gemmaCurrent.endVector?.length) {
+      currentEndVector = validateAndNormalizeVector(gemmaCurrent.endVector, gemmaCurrent.endVector.length);
+    }
   } else if (!gemmaVectors && currentSong.vector) {
     const rawDims = currentSong.dimensions || currentSong.embeddingDimensions || currentSong.vector.length;
     const norm = validateAndNormalizeVector(currentSong.vector, rawDims);
@@ -742,8 +799,9 @@ export async function buildUpNextRecommendations({
     likedSongKeys,
     now: Date.now(),
   });
+  const transStats = playbackEvents.length ? pairTransitionStats(playbackEvents) : null;
 
-  // 4. Rank candidates using embedding similarity when available and compatible, with honest fallback.
+  // 4. Rank full eligible catalog using acoustic + boundary seam continuity + contextual affinity.
   const hasEmbedding = Boolean(currentVector && currentMeta);
 
   const scored = [];
@@ -751,10 +809,20 @@ export async function buildUpNextRecommendations({
     const candKey = candidate.songKey || getSongKey(candidate);
     let candMeta = null;
     let candVector = null;
+    let candStartVector = null;
     const gemmaCandidate = gemmaVectors?.get?.(candKey);
     if (gemmaCandidate?.vector) {
       candVector = validateAndNormalizeVector(gemmaCandidate.vector, gemmaCandidate.vector.length);
-      if (candVector) candMeta = { vectorType: 'gemma', model: 'embeddinggemma-2@fp32/clip30/v1', dimensions: candVector.length };
+      if (candVector) {
+        candMeta = {
+          vectorType: 'gemma',
+          model: gemmaCandidate.embeddingModel || GEMMA2_MODEL,
+          dimensions: candVector.length,
+        };
+      }
+      if (gemmaCandidate.startVector?.length) {
+        candStartVector = validateAndNormalizeVector(gemmaCandidate.startVector, gemmaCandidate.startVector.length);
+      }
     } else if (!gemmaVectors && candidate.vector) {
       const rawDims = candidate.dimensions || candidate.embeddingDimensions || candidate.vector.length;
       const norm = validateAndNormalizeVector(candidate.vector, rawDims);
@@ -780,11 +848,19 @@ export async function buildUpNextRecommendations({
     }
 
     let embeddingSimilarity = null;
+    let seamSimilarity = null;
     let isCompatible = false;
     if (hasEmbedding && candMeta && candVector) {
       isCompatible = areVectorSpacesCompatible(currentMeta, candMeta);
       if (isCompatible) {
-        embeddingSimilarity = cosineSimilarity(currentVector, candVector);
+        const globalSim = cosineSimilarity(currentVector, candVector);
+        if (currentEndVector && candStartVector && currentEndVector.length === candStartVector.length) {
+          seamSimilarity = cosineSimilarity(currentEndVector, candStartVector);
+          // 55/45 acoustic + boundary seam blend measured in v3 evaluation (+0.26 seam lift)
+          embeddingSimilarity = (0.55 * globalSim) + (0.45 * seamSimilarity);
+        } else {
+          embeddingSimilarity = globalSim;
+        }
       }
     }
 
@@ -793,11 +869,12 @@ export async function buildUpNextRecommendations({
       candKey,
       candMeta,
       embeddingSimilarity,
+      seamSimilarity,
       isCompatible,
     });
   }
 
-  // Rank with contextual signals (play counts, skip affinity, sequence affinity, liked boost, recency penalty, artist diversity)
+  // Rank with contextual signals (LogSumExp interests, context shrinkage, play/skip signals, diversity)
   const rankedContextual = rankContextualSongs(
     scored.map(s => s.candidate),
     {
@@ -814,17 +891,18 @@ export async function buildUpNextRecommendations({
     item.recommendationScore ?? (1 - idx / Math.max(1, rankedContextual.length)),
   ]));
 
-  // Combine scores: embedding similarity (when available and compatible) + contextual affinity
+  // Combine scores: boundary-aware embedding similarity (when compatible) + contextual affinity
   const finalScored = scored.map(item => {
     const contextualScore = contextualScoreByKey.get(item.candKey) ?? 0;
     const hasEmbeddingMatch = typeof item.embeddingSimilarity === 'number' && item.isCompatible;
+    const badTransition = transStats ? transitionPenalty(transStats, currentKey, item.candKey) : 0;
 
     let finalScore;
     if (hasEmbeddingMatch) {
-      finalScore = item.embeddingSimilarity * 0.55 + contextualScore * 0.45;
+      finalScore = (item.embeddingSimilarity * 0.55) + (contextualScore * 0.45) - (badTransition * 0.18);
     } else {
       // Honest fallback: contextual score without pretending to have an embedding
-      finalScore = contextualScore;
+      finalScore = contextualScore - (badTransition * 0.18);
     }
 
     return {
@@ -834,6 +912,7 @@ export async function buildUpNextRecommendations({
       embeddingType: hasEmbeddingMatch ? item.candMeta?.vectorType : null,
       embeddingModel: hasEmbeddingMatch ? item.candMeta?.model : null,
       similarityScore: hasEmbeddingMatch ? item.embeddingSimilarity : undefined,
+      seamSimilarity: typeof item.seamSimilarity === 'number' ? item.seamSimilarity : undefined,
       isFallback: !hasEmbeddingMatch,
       _vector: item.candMeta?.vectorType === 'gemma' ? gemmaVectors?.get?.(item.candKey)?.vector : item.candidate.vector,
     };
@@ -852,6 +931,17 @@ export async function buildUpNextRecommendations({
   const artistCounts = new Map();
   const targetLimit = Math.min(limit, finalScored.length);
 
+  const formatResult = item => ({
+    ...item.song,
+    hasEmbedding: item.hasEmbedding,
+    embeddingType: item.embeddingType,
+    embeddingModel: item.embeddingModel,
+    similarityScore: item.similarityScore,
+    ...(typeof item.seamSimilarity === 'number' ? { seamSimilarity: item.seamSimilarity } : {}),
+    isFallback: item.isFallback,
+    recommendationScore: item.score,
+  });
+
   for (const item of finalScored) {
     if (result.length >= targetLimit) break;
     const artist = String(item.song.artist || '').trim().toLowerCase();
@@ -859,15 +949,7 @@ export async function buildUpNextRecommendations({
     if (count >= 2 && finalScored.length > targetLimit) continue;
     artistCounts.set(artist, count + 1);
 
-    result.push({
-      ...item.song,
-      hasEmbedding: item.hasEmbedding,
-      embeddingType: item.embeddingType,
-      embeddingModel: item.embeddingModel,
-      similarityScore: item.similarityScore,
-      isFallback: item.isFallback,
-      recommendationScore: item.score,
-    });
+    result.push(formatResult(item));
   }
 
   if (result.length < targetLimit) {
@@ -877,15 +959,7 @@ export async function buildUpNextRecommendations({
       const key = item.song.songKey || getSongKey(item.song);
       if (!includedKeys.has(key)) {
         includedKeys.add(key);
-        result.push({
-          ...item.song,
-          hasEmbedding: item.hasEmbedding,
-          embeddingType: item.embeddingType,
-          embeddingModel: item.embeddingModel,
-          similarityScore: item.similarityScore,
-          isFallback: item.isFallback,
-          recommendationScore: item.score,
-        });
+        result.push(formatResult(item));
       }
     }
   }

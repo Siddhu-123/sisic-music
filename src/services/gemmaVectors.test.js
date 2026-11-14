@@ -4,8 +4,13 @@ import { db } from '../db.js';
 import {
   GEMMA2_DIMENSIONS,
   GEMMA2_MODEL,
+  RECS_V3_BOUNDARY_DIMENSIONS,
+  RECS_V3_DIMENSIONS,
+  RECS_V3_MODEL,
+  decodeInt8Base64Unit,
   gemmaNeighbors,
   importGemmaVectors,
+  loadPreferredSongVectors,
   matchExportToLibrary,
   queryTextVector,
   syncGemmaVectorsFromService,
@@ -201,5 +206,64 @@ test('matchExportToLibrary uses filenames for untagged files and pruning keeps e
   for (const record of records.slice(2)) {
     const full = findSimilarSongMatch({ artist: record.artist, track: record.title }, library, 'high');
     assert.equal(full?.song, matches.find(m => m.record === record)?.song);
+  }
+});
+
+test('imports Recommender v3 int8 base64 vectors and boundary vectors with high cosine fidelity', async () => {
+  const originalBulkPut = db.songVectors.bulkPut;
+  const originalPut = db.songVectors.put;
+  const saved = [];
+  db.songVectors.bulkPut = async rows => { saved.push(...rows); };
+  db.songVectors.put = async row => { saved.push(row); };
+
+  const encodeI8 = (arr) => {
+    const maxAbs = Math.max(...arr.map(Math.abs), 1e-8);
+    const scale = maxAbs / 127;
+    const i8 = Int8Array.from(arr.map(v => Math.max(-127, Math.min(127, Math.round(v / scale)))));
+    return {
+      b64: globalThis.Buffer.from(i8.buffer).toString('base64'),
+      scale,
+    };
+  };
+
+  try {
+    const rawVec = Array.from({ length: RECS_V3_DIMENSIONS }, (_, i) => (i === 0 ? 0.8 : (i === 1 ? 0.6 : 0)));
+    const startVec = Array.from({ length: RECS_V3_BOUNDARY_DIMENSIONS }, (_, i) => (i === 2 ? 1 : 0));
+    const endVec = Array.from({ length: RECS_V3_BOUNDARY_DIMENSIONS }, (_, i) => (i === 3 ? 1 : 0));
+    const vEnc = encodeI8(rawVec);
+    const sEnc = encodeI8(startVec);
+    const eEnc = encodeI8(endVec);
+
+    const direct = decodeInt8Base64Unit(vEnc.b64, vEnc.scale, RECS_V3_DIMENSIONS);
+    assert.ok(Math.abs(direct[0] - 0.8) < 0.02 && Math.abs(direct[1] - 0.6) < 0.02);
+
+    const res = await importGemmaVectors({
+      model: RECS_V3_MODEL,
+      dimensions: RECS_V3_DIMENSIONS,
+      boundaryDimensions: RECS_V3_BOUNDARY_DIMENSIONS,
+      encoding: 'int8-b64',
+      songs: [
+        {
+          songKey: 'v3-song',
+          fileHash: 'fh-1',
+          vectorI8: vEnc.b64,
+          vectorScale: vEnc.scale,
+          startI8: sEnc.b64,
+          startScale: sEnc.scale,
+          endI8: eEnc.b64,
+          endScale: eEnc.scale,
+        },
+      ],
+    }, [{ songKey: 'v3-song', artist: 'A', track: 'One' }]);
+
+    assert.deepEqual(res, { imported: 1, unmatched: 0, skipped: 0 });
+    assert.equal(saved[0].embeddingModel, RECS_V3_MODEL);
+    assert.equal(saved[0].dimensions, RECS_V3_DIMENSIONS);
+    assert.equal(saved[0].startVector.length, RECS_V3_BOUNDARY_DIMENSIONS);
+    assert.ok(saved[0].endVector[3] > 0.99);
+    assert.equal(typeof loadPreferredSongVectors, 'function');
+  } finally {
+    db.songVectors.bulkPut = originalBulkPut;
+    db.songVectors.put = originalPut;
   }
 });

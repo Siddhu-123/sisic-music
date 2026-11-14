@@ -16,7 +16,7 @@ function cosine(a, b) {
 }
 
 function tempoDistance(a, b) {
-  if (!validNumber(a) || !validNumber(b) || a <= 0 || b <= 0) return 0;
+  if (!validNumber(a) || !validNumber(b) || a <= 0 || b <= 0) return 0.35;
   const ratios = [b, b * 2, b / 2];
   let difference = 1;
   for (const adjusted of ratios) difference = Math.min(difference, Math.abs(a - adjusted) / Math.max(a, adjusted));
@@ -32,11 +32,16 @@ function parseCamelot(key) {
 function keyDistance(a, b) {
   const left = parseCamelot(a);
   const right = parseCamelot(b);
-  if (!left || !right) return 0;
+  if (!left || !right) return 0.35;
   if (left.number === right.number && left.letter === right.letter) return 0;
   const linear = Math.abs(left.number - right.number);
   const wheel = Math.min(linear, 12 - linear);
   return Math.min(1, (wheel + (left.letter === right.letter ? 0 : 1)) / 4);
+}
+
+function energyDelta(a, b) {
+  if (!validNumber(a) || !validNumber(b)) return 0.25;
+  return Math.abs(a - b);
 }
 
 /** Lower transition costs indicate a smoother handoff from a to b. */
@@ -45,7 +50,7 @@ export function transitionCost(a, b, opts = {}) {
   const similarity = 1 - cosine(endpoint(a, 'end'), endpoint(b, 'start'));
   const tempo = tempoDistance(a?.bpm, b?.bpm);
   const key = keyDistance(a?.key, b?.key);
-  const energy = validNumber(a?.energy) && validNumber(b?.energy) ? Math.abs(a.energy - b.energy) : 0;
+  const energy = energyDelta(a?.energy, b?.energy);
   const learned = typeof opts.extraCost === 'function' ? (Number(opts.extraCost(a, b)) || 0) : 0;
   return (similarity * weights.wSim)
     + (tempo * weights.wTempo)

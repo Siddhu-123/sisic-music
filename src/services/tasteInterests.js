@@ -127,6 +127,8 @@ function sphericalKMeans(vectors, weights, k, { iterations = 25, seed = 11 } = {
 export function buildInterests(items = [], {
   maxInterests = 4,
   minShare = 0.12,
+  minClusterSize = 3,
+  kappa = 4.0,
   minRelativeGain = 0.3,
   minAbsoluteGain = 0.04,
   seed = 11,
@@ -145,6 +147,7 @@ export function buildInterests(items = [], {
   const vectors = valid.map(item => item.vector);
   const weights = valid.map(item => item.weight);
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const globalVector = unit(weightedSum(vectors, weights, vectors[0].length));
 
   const summarise = fit => fit.centroids
     .map((vector, c) => {
@@ -153,7 +156,11 @@ export function buildInterests(items = [], {
       valid.forEach((item, i) => {
         if (fit.assignments[i] === c) { members.push(item.index); weight += item.weight; }
       });
-      return { vector, weight: weight / totalWeight, size: members.length, members };
+      const shrink = members.length / (members.length + Math.max(0, Number(kappa) || 0));
+      const shrunk = globalVector
+        ? unit(vector.map((value, d) => (shrink * value) + ((1 - shrink) * globalVector[d])))
+        : vector;
+      return { vector: shrunk ?? vector, weight: weight / totalWeight, size: members.length, members };
     })
     .filter(interest => interest.size > 0)
     .sort((a, b) => b.weight - a.weight);
@@ -165,7 +172,9 @@ export function buildInterests(items = [], {
     const summary = summarise(candidate);
     const gain = best.cost - candidate.cost;
     const balanced = summary.length === k && summary.every(interest => interest.weight >= minShare);
-    if (!balanced || gain < minAbsoluteGain || gain < best.cost * minRelativeGain) break;
+    const largeEnough = valid.length < minClusterSize
+      || (summary.length === k && summary.every(interest => interest.size >= minClusterSize));
+    if (!balanced || !largeEnough || gain < minAbsoluteGain || gain < best.cost * minRelativeGain) break;
     best = candidate;
   }
   return summarise(best);
@@ -187,4 +196,28 @@ export function interestAffinity(vector, interests = []) {
     if (similarity > best) best = similarity;
   }
   return best;
+}
+
+/** Smooth, session-aware aggregation of similarity across a listener's interests. */
+export function scoreInterestsLogSumExp(vector, interests, {
+  sessionVector = null,
+  beta = 3.0,
+  tau = 8.0,
+} = {}) {
+  if (!vector || !interests?.length) return null;
+  const candidates = interests.filter(interest => interest?.vector
+    && Number.isFinite(interest.weight) && interest.weight > 0);
+  if (!candidates.length) return null;
+
+  const activation = candidates.map(interest => {
+    const sessionFit = sessionVector ? dot(sessionVector, interest.vector) : 0;
+    return Math.log(interest.weight) + (sessionVector ? beta * sessionFit : 0);
+  });
+  const maxActivation = Math.max(...activation);
+  const activated = activation.map(value => Math.exp(value - maxActivation));
+  const totalActivation = activated.reduce((sum, value) => sum + value, 0);
+  const similarities = candidates.map(interest => dot(vector, interest.vector));
+  const scaled = similarities.map((similarity, i) => Math.log(activated[i] / totalActivation) + tau * similarity);
+  const maxScaled = Math.max(...scaled);
+  return (maxScaled + Math.log(scaled.reduce((sum, value) => sum + Math.exp(value - maxScaled), 0))) / tau;
 }

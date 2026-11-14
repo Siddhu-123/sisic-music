@@ -3,8 +3,52 @@ import { findSimilarSongMatch, getSongKey, tokenSet } from '../songIdentity.js';
 
 export const GEMMA2_MODEL = 'embeddinggemma-2@fp32/clip30/v1';
 export const GEMMA2_DIMENSIONS = 256;
+export const RECS_V3_MODEL = 'sisic-recs-v3/softwhiten-128d-int8';
+export const RECS_V3_DIMENSIONS = 128;
+export const RECS_V3_BOUNDARY_DIMENSIONS = 64;
 const BOUNDARY_DIMENSIONS = 128;
 const CURSOR_KEY = `gemmaVectorsCursor:${GEMMA2_MODEL}`;
+
+function decodeBase64Bytes(b64) {
+  if (typeof b64 !== 'string' || !b64) return null;
+  try {
+    if (typeof globalThis.Buffer !== 'undefined') {
+      const buf = globalThis.Buffer.from(b64, 'base64');
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    }
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+export function decodeInt8Base64Unit(b64, scale = 1, expectedDims = null) {
+  const bytes = decodeBase64Bytes(b64);
+  if (!bytes || (expectedDims != null && bytes.length !== expectedDims) || bytes.length === 0) return null;
+  const s = Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1;
+  const view = new Int8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = new Array(view.length);
+  let normSq = 0;
+  for (let i = 0; i < view.length; i++) {
+    const val = view[i] * s;
+    out[i] = val;
+    normSq += val * val;
+  }
+  const norm = Math.sqrt(normSq);
+  if (norm <= 0) return null;
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
+}
+
+export async function loadPreferredSongVectors() {
+  const v3Rows = await getSongVectors(RECS_V3_MODEL);
+  if (v3Rows.length > 0) return { model: RECS_V3_MODEL, rows: v3Rows };
+  const legacyRows = await getSongVectors(GEMMA2_MODEL);
+  return { model: GEMMA2_MODEL, rows: legacyRows };
+}
 
 function normalizeVector(vector, dimensions) {
   if (!Array.isArray(vector) || vector.length !== dimensions) return null;
@@ -78,35 +122,61 @@ export function matchExportToLibrary(records = [], librarySongs = []) {
 }
 
 export async function importGemmaVectors(payload, librarySongs = []) {
-  if (!payload || payload.model !== GEMMA2_MODEL || payload.dimensions !== GEMMA2_DIMENSIONS || !Array.isArray(payload.songs)) {
+  const isLegacy = payload?.model === GEMMA2_MODEL && payload?.dimensions === GEMMA2_DIMENSIONS;
+  const isV3 = payload?.model === RECS_V3_MODEL && payload?.dimensions === RECS_V3_DIMENSIONS;
+  if (!payload || (!isLegacy && !isV3) || !Array.isArray(payload.songs)) {
     return { imported: 0, unmatched: 0, skipped: Array.isArray(payload?.songs) ? payload.songs.length : 0 };
   }
+  const targetModel = payload.model;
+  const targetDims = payload.dimensions;
+  const targetBoundaryDims = isV3
+    ? (Number(payload.boundaryDimensions) || RECS_V3_BOUNDARY_DIMENSIONS)
+    : BOUNDARY_DIMENSIONS;
+  const tagDims = isV3 ? (Number(payload.tagDimensions) || 0) : 0;
+
   const { matches, unmatched } = matchExportToLibrary(payload.songs, librarySongs);
   let skipped = 0;
   const rows = [];
   for (const { record, song } of matches) {
-    if (record.model && record.model !== GEMMA2_MODEL) {
+    if (record.model && record.model !== targetModel) {
       skipped++;
       continue;
     }
-    const vector = normalizeVector(record.vector, GEMMA2_DIMENSIONS);
-    // Boundary vectors may arrive at full song dims (service) or 128 (Mac export); Matryoshka-truncate to 128.
-    const boundary = value => (Array.isArray(value) && value.length >= BOUNDARY_DIMENSIONS
-      ? normalizeVector(value.slice(0, BOUNDARY_DIMENSIONS), BOUNDARY_DIMENSIONS) : null);
-    const startVector = record.startVector == null ? null : boundary(record.startVector);
-    const endVector = record.endVector == null ? null : boundary(record.endVector);
-    if (!vector || (record.startVector != null && !startVector) || (record.endVector != null && !endVector)) {
+    const vector = record.vectorI8
+      ? decodeInt8Base64Unit(record.vectorI8, record.vectorScale, targetDims)
+      : normalizeVector(record.vector, targetDims);
+
+    const resolveBoundary = (rawVec, rawI8, rawScale) => {
+      if (rawI8) return decodeInt8Base64Unit(rawI8, rawScale, targetBoundaryDims);
+      if (rawVec == null) return null;
+      return Array.isArray(rawVec) && rawVec.length >= targetBoundaryDims
+        ? normalizeVector(rawVec.slice(0, targetBoundaryDims), targetBoundaryDims)
+        : null;
+    };
+    const startVector = resolveBoundary(record.startVector, record.startI8, record.startScale);
+    const endVector = resolveBoundary(record.endVector, record.endI8, record.endScale);
+    const tagVector = isV3 && tagDims > 0
+      ? (record.tagI8
+        ? decodeInt8Base64Unit(record.tagI8, record.tagScale, tagDims)
+        : (Array.isArray(record.tagVector) ? normalizeVector(record.tagVector, tagDims) : null))
+      : null;
+
+    const badStart = (record.startVector != null || record.startI8 != null) && !startVector;
+    const badEnd = (record.endVector != null || record.endI8 != null) && !endVector;
+    if (!vector || badStart || badEnd) {
       skipped++;
       continue;
     }
     rows.push({
       songKey: song.songKey || getSongKey(song),
-      embeddingModel: GEMMA2_MODEL,
+      embeddingModel: targetModel,
       vector,
-      dimensions: GEMMA2_DIMENSIONS,
+      dimensions: targetDims,
+      boundaryDimensions: targetBoundaryDims,
       fileHash: record.fileHash || '',
       startVector,
       endVector,
+      ...(tagVector ? { tagVector, tagDimensions: tagDims } : {}),
       clipCount: Number.isFinite(Number(record.clipCount)) ? Number(record.clipCount) : 0,
       artist: record.artist || song.artist || '',
       title: record.title || record.track || song.track || '',

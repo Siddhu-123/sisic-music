@@ -33,6 +33,13 @@ test('tempo accepts half or double time and Camelot neighbours have low key cost
   assert.equal(transitionCost(a, relative, { wSim: 0, wTempo: 0, wEnergy: 0 }), 0.05);
 });
 
+test('missing transition metadata adds bounded uncertainty costs, disabled weights stay exact zero', () => {
+  const a = item('a', [1], {});
+  const b = item('b', [1], { bpm: null, key: null, energy: null });
+  assert.equal(transitionCost(a, b, { wSim: 0 }), (0.35 * 0.3) + (0.35 * 0.2) + (0.25 * 0.15));
+  assert.equal(transitionCost(a, b, { wSim: 0, wTempo: 0, wKey: 0, wEnergy: 0 }), 0);
+});
+
 test('nextFlowPick avoids recent ids and accepts object history entries', () => {
   const current = item('current', [1, 0]);
   const recent = item('recent', [1, 0]);

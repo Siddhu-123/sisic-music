@@ -13,6 +13,8 @@ export const WEIGHTS = Object.freeze({
   searchPlay: 0.8,
 });
 
+export const MAP_PRIOR_WEIGHTS = Object.freeze([1.0, 0.7, 0.35, -0.5, -0.25, 0.15]);
+
 const asTime = value => {
   const time = value instanceof Date ? value.getTime() : typeof value === 'number' ? value : Date.parse(value);
   return Number.isFinite(time) ? time : null;
@@ -25,6 +27,10 @@ function eventPosition(event) {
 
 export function outcomeWeight(event = {}) {
   switch (event.eventType) {
+    case 'unexpected-playback-skip':
+    case 'playback-short-ended':
+    case 'playback-error':
+      return 0;
     // Session-ending navigation is neutral; only user-skip carries a negative song judgement.
     case 'user-prev': return 0;
     case 'user-skip': {
@@ -204,9 +210,14 @@ export function pairTransitionStats(events = []) {
       const key = `${from.songKey}=>${to.songKey}`;
       const row = stats.get(key) || { plays: 0, skips: 0, earlySkips: 0 };
       row.plays++;
+      const startTime = asTime(to.createdAt);
+      const endTime = index + 1 < starts.length ? asTime(starts[index + 1].createdAt) : null;
       const outcomes = queueEvents.filter(event => event.songKey === to.songKey
-        && (event.eventType === 'user-skip')
-        && (asTime(event.createdAt) ?? 0) >= (asTime(to.createdAt) ?? 0));
+        && event.eventType === 'user-skip'
+        && startTime !== null
+        && asTime(event.createdAt) !== null
+        && asTime(event.createdAt) >= startTime
+        && (endTime === null || asTime(event.createdAt) < endTime));
       if (outcomes.length) {
         row.skips++;
         if (eventPosition(outcomes[0]) < 60) row.earlySkips++;
@@ -215,6 +226,67 @@ export function pairTransitionStats(events = []) {
     }
   }
   return stats;
+}
+
+function pairDifference(pair) {
+  if (Array.isArray(pair) && pair.length === 2) {
+    return pair[0].map((value, index) => Number(value) - Number(pair[1][index]));
+  }
+  if (Array.isArray(pair?.difference)) return pair.difference.map(Number);
+  if (Array.isArray(pair?.diff)) return pair.diff.map(Number);
+  const preferred = pair?.posFeatures ?? pair?.preferred ?? pair?.positive ?? pair?.winner;
+  const rejected = pair?.negFeatures ?? pair?.rejected ?? pair?.negative ?? pair?.loser;
+  if (Array.isArray(preferred) && Array.isArray(rejected)) {
+    return preferred.map((value, index) => Number(value) - Number(rejected[index]));
+  }
+  throw new TypeError('Each pair must contain preferred and rejected feature vectors, or a difference vector');
+}
+
+/** Fits six pairwise logistic weights with a Gaussian prior and sign-preserving bounds. */
+export function trainMapPairwiseWeights(pairs, {
+  prior = MAP_PRIOR_WEIGHTS,
+  lambda = 12.0,
+  delta = 0.4,
+  lr = 0.05,
+  epochs = 35,
+} = {}) {
+  const center = Array.from(prior, Number);
+  if (center.length !== 6 || center.some(value => !Number.isFinite(value))) {
+    throw new TypeError('prior must contain six finite weights');
+  }
+  const rows = Array.from(pairs || [], pair => ({
+    diff: pairDifference(pair),
+    weight: Math.max(0.01, Number(pair?.weight ?? 1) || 1),
+  }));
+  if (rows.some(r => r.diff.length !== center.length || r.diff.some(value => !Number.isFinite(value)))) {
+    throw new TypeError('Pair feature vectors must contain six finite values');
+  }
+  if (!rows.length) return [...center];
+  const bounds = center.map(value => {
+    let low = value - Math.abs(delta);
+    let high = value + Math.abs(delta);
+    if (value > 0) low = Math.max(low, value >= 0.05 ? 0.05 : Number.EPSILON);
+    if (value < 0) high = Math.min(high, value <= -0.05 ? -0.05 : -Number.EPSILON);
+    return [low, high];
+  });
+  const weights = [...center];
+  const step = Math.max(0, Number(lr) || 0);
+  const regularization = Math.max(0, Number(lambda) || 0);
+  const count = Math.max(0, Math.floor(Number(epochs) || 0));
+  const totalWeight = rows.reduce((sum, r) => sum + r.weight, 0) || 1;
+  for (let epoch = 0; epoch < count; epoch++) {
+    const dataGrad = new Array(weights.length).fill(0);
+    for (const { diff, weight } of rows) {
+      const margin = weights.reduce((sum, w, index) => sum + w * diff[index], 0);
+      const factor = (-1 / (1 + Math.exp(Math.max(-40, Math.min(40, margin))))) * weight;
+      for (let index = 0; index < weights.length; index++) dataGrad[index] += factor * diff[index];
+    }
+    for (let index = 0; index < weights.length; index++) {
+      const grad = (dataGrad[index] / totalWeight) + (regularization / totalWeight) * (weights[index] - center[index]);
+      weights[index] = Math.max(bounds[index][0], Math.min(bounds[index][1], weights[index] - step * grad));
+    }
+  }
+  return weights;
 }
 
 export function transitionPenalty(stats, fromKey, toKey) {

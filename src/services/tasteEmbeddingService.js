@@ -383,7 +383,15 @@ export function kMeansCluster(songs = [], options = {}) {
     });
     for (let clusterIndex = 0; clusterIndex < k; clusterIndex++) {
       if (!counts[clusterIndex]) continue;
-      for (let dimension = 0; dimension < dimensions; dimension++) centroids[clusterIndex][dimension] = sums[clusterIndex][dimension] / counts[clusterIndex];
+      let norm = 0;
+      for (let dimension = 0; dimension < dimensions; dimension++) {
+        sums[clusterIndex][dimension] /= counts[clusterIndex];
+        norm += sums[clusterIndex][dimension] ** 2;
+      }
+      norm = Math.sqrt(norm);
+      if (norm > 0) {
+        for (let dimension = 0; dimension < dimensions; dimension++) centroids[clusterIndex][dimension] = sums[clusterIndex][dimension] / norm;
+      }
     }
   }
 
@@ -395,6 +403,7 @@ export function kMeansCluster(songs = [], options = {}) {
     ...song,
     clusterId: assignments[index],
     clusterSize: clusterSizes[assignments[index]],
+    clusterCentroid: Array.from(centroids[assignments[index]]),
   }));
 }
 
