@@ -60,7 +60,7 @@ async function requestDriveToken() {
       tokenWaiters.delete(waiter);
       resolve(tokenAvailable);
     };
-    const timeout = setTimeout(() => waiter(false), 1500);
+    const timeout = setTimeout(() => waiter(false), 350);
     tokenWaiters.add(waiter);
   });
   clients.forEach(client => client.postMessage({ type: 'SISIC_DRIVE_TOKEN_REQUEST' }));

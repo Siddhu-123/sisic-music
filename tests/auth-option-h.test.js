@@ -306,3 +306,137 @@ test('Service Worker automatically refreshes access token via same-origin cookie
   assert.equal(authNotifications.some(m => m.type === 'SISIC_DRIVE_AUTH_ERROR'), false);
   assert.ok(fetchCalls.some(c => c.url.endsWith('/api/auth/refresh')));
 });
+
+test('Concurrent refresh race fence prevents stale epoch overwrite and false invalid_grant delete', async () => {
+  const env = makeEnv();
+  const store = createMemorySessionStore();
+  const sealed1 = await sealRefreshToken(TEST_ENC_KEY, { sid: 'sid-race', epoch: 1, refreshToken: 'rt-epoch-1' });
+  await store.put({
+    sid: 'sid-race',
+    enc_refresh_token: sealed1.ciphertext,
+    nonce: sealed1.nonce,
+    scope: env.GOOGLE_DRIVE_SCOPE,
+    token_epoch: 1,
+    expires_at: 2_000_000_000_000,
+    created_at: 1_700_000_000_000,
+    last_used_at: 1_700_000_000_000,
+  });
+
+  // Stale epoch put cannot downgrade a newer epoch
+  const sealed2 = await sealRefreshToken(TEST_ENC_KEY, { sid: 'sid-race', epoch: 2, refreshToken: 'rt-epoch-2' });
+  await store.put({
+    sid: 'sid-race',
+    enc_refresh_token: sealed2.ciphertext,
+    nonce: sealed2.nonce,
+    scope: env.GOOGLE_DRIVE_SCOPE,
+    token_epoch: 2,
+    expires_at: 2_000_000_000_000,
+    created_at: 1_700_000_000_000,
+    last_used_at: 1_700_000_000_000,
+  });
+  await store.put({ ...sealed1, sid: 'sid-race', enc_refresh_token: sealed1.ciphertext, nonce: sealed1.nonce, token_epoch: 1, expires_at: 2_000_000_000_000 });
+  assert.equal(store.rows.get('sid-race').token_epoch, 2);
+
+  // Concurrent refresh: reset store to epoch 1, then rotate to epoch 2 *while* upstream refresh is in flight
+  await store.delete('sid-race');
+  await store.put({
+    sid: 'sid-race',
+    enc_refresh_token: sealed1.ciphertext,
+    nonce: sealed1.nonce,
+    scope: env.GOOGLE_DRIVE_SCOPE,
+    token_epoch: 1,
+    expires_at: 2_000_000_000_000,
+    created_at: 1_700_000_000_000,
+    last_used_at: 1_700_000_000_000,
+  });
+
+  let call = 0;
+  const raceFetch = async (url, init) => {
+    assert.equal(String(url), 'https://oauth2.googleapis.com/token');
+    const params = new URLSearchParams(init.body);
+    call += 1;
+    if (call === 1) {
+      assert.equal(params.get('refresh_token'), 'rt-epoch-1');
+      // Another worker/tab rotated epoch 1 -> 2 before our response finished
+      await store.put({
+        sid: 'sid-race',
+        enc_refresh_token: sealed2.ciphertext,
+        nonce: sealed2.nonce,
+        scope: env.GOOGLE_DRIVE_SCOPE,
+        token_epoch: 2,
+        expires_at: 2_000_000_000_000,
+        created_at: 1_700_000_000_000,
+        last_used_at: 1_700_000_000_000,
+      });
+      return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 });
+    }
+    assert.equal(params.get('refresh_token'), 'rt-epoch-2');
+    return new Response(JSON.stringify({ access_token: 'recovered-epoch-2', expires_in: 3600 }), { status: 200 });
+  };
+
+  const res = await handleAuthRequest({
+    request: new Request('https://sisic-music.pages.dev/api/auth/refresh', {
+      method: 'POST',
+      headers: {
+        Origin: 'https://sisic-music.pages.dev',
+        Cookie: '__Host-sisic_session=sid-race',
+      },
+    }),
+    env,
+    fetchImpl: raceFetch,
+    sessionStore: store,
+    now: () => 1_700_000_100_000,
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.access_token, 'recovered-epoch-2');
+  assert.equal(store.rows.get('sid-race')?.token_epoch, 2);
+});
+
+test('Account-switch callback never inherits previous refresh_token, preserves returnTo, and attaches security headers', async () => {
+  const env = makeEnv();
+  const store = createMemorySessionStore();
+  const oldSealed = await sealRefreshToken(TEST_ENC_KEY, { sid: 'old-user-a-sid', epoch: 1, refreshToken: 'user-a-refresh' });
+  await store.put({
+    sid: 'old-user-a-sid',
+    enc_refresh_token: oldSealed.ciphertext,
+    nonce: oldSealed.nonce,
+    scope: env.GOOGLE_DRIVE_SCOPE,
+    token_epoch: 1,
+    expires_at: 2_000_000_000_000,
+    created_at: 1_700_000_000_000,
+    last_used_at: 1_700_000_000_000,
+  });
+
+  const loginRes = await handleAuthRequest({
+    request: new Request('https://sisic-music.pages.dev/api/auth/login?prompt=select_account&returnTo=%2Fexplore', { method: 'GET' }),
+    env,
+    sessionStore: store,
+    now: () => 1_700_000_000_000,
+  });
+  assert.equal(loginRes.headers.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(loginRes.headers.get('Referrer-Policy'), 'same-origin');
+  assert.equal(loginRes.headers.get('X-Frame-Options'), 'DENY');
+  const loc = new URL(loginRes.headers.get('Location'));
+  const state = loc.searchParams.get('state');
+  const txVal = extractCookies(loginRes).get('__Host-sisic_oauth_tx');
+
+  // Simulate Google returning User B access_token WITHOUT refresh_token on select_account
+  const cbRes = await handleAuthRequest({
+    request: new Request(`https://sisic-music.pages.dev/api/auth/callback?code=user-b-code&state=${encodeURIComponent(state)}`, {
+      method: 'GET',
+      headers: {
+        Cookie: `__Host-sisic_oauth_tx=${encodeURIComponent(txVal)}; __Host-sisic_session=old-user-a-sid`,
+      },
+    }),
+    env,
+    fetchImpl: async () => new Response(JSON.stringify({ access_token: 'user-b-access', expires_in: 3600 }), { status: 200 }),
+    sessionStore: store,
+    now: () => 1_700_000_000_000,
+  });
+  assert.equal(cbRes.status, 302);
+  // Old User A session deleted, User A token NOT inherited, returnTo preserved on prompt=consent escalation
+  assert.equal(store.rows.has('old-user-a-sid'), false);
+  assert.equal(cbRes.headers.get('Location'), '/api/auth/login?prompt=consent&returnTo=%2Fexplore');
+  assert.equal(cbRes.headers.get('X-Frame-Options'), 'DENY');
+});

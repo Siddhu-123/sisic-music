@@ -25,10 +25,17 @@ const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 const DEFAULT_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
 
+const SECURITY_HEADERS = {
+  'Cache-Control': 'no-store',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'same-origin',
+  'X-Frame-Options': 'DENY',
+};
+
 function jsonResponse(body, status = 200, headers = {}) {
   const respHeaders = new Headers({
     'Content-Type': 'application/json',
-    'Cache-Control': 'no-store',
+    ...SECURITY_HEADERS,
     ...headers,
   });
   return new Response(JSON.stringify(body), { status, headers: respHeaders });
@@ -37,7 +44,7 @@ function jsonResponse(body, status = 200, headers = {}) {
 function redirectResponse(location, cookies = []) {
   const headers = new Headers({
     Location: location,
-    'Cache-Control': 'no-store',
+    ...SECURITY_HEADERS,
   });
   for (const cookie of cookies) headers.append('Set-Cookie', cookie);
   return new Response(null, { status: 302, headers });
@@ -200,35 +207,22 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
       return redirectResponse('/?auth_error=code_exchange_failed', [clearTxCookie]);
     }
 
+    const safeReturnTo = sanitizeReturnTo(tx.returnTo || '/');
     const existingSid = cookies.get(sessCookie);
-    let refreshToken = tokenData.refresh_token || '';
-    if (existingSid && !refreshToken) {
-      const existingRow = await store.get(existingSid);
-      if (existingRow) {
-        try {
-          refreshToken = await unsealRefreshToken(env.AUTH_ENC_KEY, {
-            sid: existingRow.sid,
-            epoch: existingRow.token_epoch,
-            encRefreshToken: existingRow.enc_refresh_token,
-            nonce: existingRow.nonce,
-          });
-        } catch {
-          refreshToken = '';
-        }
-      }
+    if (existingSid) {
+      await store.delete(existingSid);
     }
+
+    const refreshToken = tokenData.refresh_token || '';
     if (!refreshToken) {
       if (!url.searchParams.has('consent_retried') && tx.prompt !== 'consent') {
-        // Force Google consent screen once if Google withheld an offline refresh token on select_account.
-        return redirectResponse('/api/auth/login?prompt=consent', [clearTxCookie]);
+        // Force Google consent screen once while preserving returnTo and clearing prior account session.
+        return redirectResponse(`/api/auth/login?prompt=consent&returnTo=${encodeURIComponent(safeReturnTo)}`, [clearTxCookie]);
       }
       return redirectResponse('/?auth_error=missing_refresh_token', [clearTxCookie]);
     }
 
-    // Rotate session identifier on interactive authentication to prevent session fixation.
-    if (existingSid) {
-      await store.delete(existingSid);
-    }
+    await store.pruneExpired?.(currentNow);
     const sid = randomTokenId(32);
     const epoch = 1;
     const sealed = await sealRefreshToken(env.AUTH_ENC_KEY, { sid, epoch, refreshToken });
@@ -284,6 +278,8 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
 
     const headers = {};
     if (tokenData.refresh_token) {
+      const priorSid = cookies.get(sessCookie);
+      if (priorSid) await store.delete(priorSid);
       const sid = randomTokenId(32);
       const epoch = 1;
       const sealed = await sealRefreshToken(env.AUTH_ENC_KEY, { sid, epoch, refreshToken: tokenData.refresh_token });
@@ -343,7 +339,7 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
       });
     }
 
-    const tokenResp = await fetchImpl(GOOGLE_TOKEN_URL, {
+    let tokenResp = await fetchImpl(GOOGLE_TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -353,9 +349,46 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
         grant_type: 'refresh_token',
       }).toString(),
     });
-    const tokenData = await tokenResp.json().catch(() => ({}));
+    let tokenData = await tokenResp.json().catch(() => ({}));
+    let activeRow = row;
+    let activeRefresh = refreshToken;
+
+    if ((!tokenResp.ok || !tokenData.access_token) && (tokenResp.status === 400 || tokenResp.status === 401 || tokenData.error === 'invalid_grant')) {
+      // Check if a concurrent tab/SW already rotated this sid's refresh token before declaring invalid_grant.
+      const latest = await store.get(sid);
+      if (latest && Number(latest.token_epoch) > Number(row.token_epoch)) {
+        try {
+          const latestRefresh = await unsealRefreshToken(env.AUTH_ENC_KEY, {
+            sid: latest.sid,
+            epoch: latest.token_epoch,
+            encRefreshToken: latest.enc_refresh_token,
+            nonce: latest.nonce,
+          });
+          activeRow = latest;
+          activeRefresh = latestRefresh;
+          tokenResp = await fetchImpl(GOOGLE_TOKEN_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              refresh_token: latestRefresh,
+              client_id: env.GOOGLE_CLIENT_ID,
+              client_secret: env.GOOGLE_CLIENT_SECRET,
+              grant_type: 'refresh_token',
+            }).toString(),
+          });
+          tokenData = await tokenResp.json().catch(() => ({}));
+        } catch {
+          return jsonResponse({ error: 'refresh_conflict', message: 'Concurrent refresh updated session; retry.' }, 409);
+        }
+      }
+    }
+
     if (!tokenResp.ok || !tokenData.access_token) {
       if (tokenResp.status === 400 || tokenResp.status === 401 || tokenData.error === 'invalid_grant') {
+        const latestBeforeDelete = await store.get(sid);
+        if (latestBeforeDelete && Number(latestBeforeDelete.token_epoch) > Number(activeRow.token_epoch)) {
+          return jsonResponse({ error: 'refresh_conflict', message: 'Concurrent refresh updated session; retry.' }, 409);
+        }
         await store.delete(sid);
         return jsonResponse({
           error: tokenData.error || 'invalid_grant',
@@ -370,20 +403,20 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
       }, 502);
     }
 
-    const nextEpoch = tokenData.refresh_token ? Number(row.token_epoch || 1) + 1 : Number(row.token_epoch || 1);
-    const nextRefresh = tokenData.refresh_token || refreshToken;
+    const nextEpoch = tokenData.refresh_token ? Number(activeRow.token_epoch || 1) + 1 : Number(activeRow.token_epoch || 1);
+    const nextRefresh = tokenData.refresh_token || activeRefresh;
     const sealed = tokenData.refresh_token
       ? await sealRefreshToken(env.AUTH_ENC_KEY, { sid, epoch: nextEpoch, refreshToken: nextRefresh })
-      : { ciphertext: row.enc_refresh_token, nonce: row.nonce };
+      : { ciphertext: activeRow.enc_refresh_token, nonce: activeRow.nonce };
 
     await store.put({
       sid,
       enc_refresh_token: sealed.ciphertext,
       nonce: sealed.nonce,
-      scope: String(tokenData.scope || row.scope || ''),
+      scope: String(tokenData.scope || activeRow.scope || ''),
       token_epoch: nextEpoch,
       expires_at: currentNow + SESSION_TTL_MS,
-      created_at: row.created_at,
+      created_at: activeRow.created_at,
       last_used_at: currentNow,
     });
 
@@ -397,7 +430,7 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
       access_token: tokenData.access_token,
       expires_in: tokenData.expires_in,
       token_type: tokenData.token_type || 'Bearer',
-      scope: tokenData.scope || row.scope,
+      scope: tokenData.scope || activeRow.scope,
       session_active: true,
     }, 200, { 'Set-Cookie': sessSetCookie });
   }
@@ -438,6 +471,7 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
         revoked = false;
       }
     }
+    await store.pruneExpired?.(currentNow);
     return jsonResponse({ signedOut: true, revoked }, 200, {
       'Set-Cookie': buildSetCookie(sessCookie, '', { maxAgeSeconds: 0, path: '/', secure }),
     });

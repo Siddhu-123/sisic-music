@@ -172,7 +172,8 @@ export function createD1SessionStore(db) {
            scope = excluded.scope,
            token_epoch = excluded.token_epoch,
            expires_at = excluded.expires_at,
-           last_used_at = excluded.last_used_at`
+           last_used_at = excluded.last_used_at
+         WHERE excluded.token_epoch >= auth_sessions.token_epoch`
       ).bind(
         record.sid,
         record.enc_refresh_token,
@@ -188,6 +189,9 @@ export function createD1SessionStore(db) {
       if (!sid) return;
       await db.prepare('DELETE FROM auth_sessions WHERE sid = ?').bind(sid).run();
     },
+    async pruneExpired(nowTs = Date.now()) {
+      await db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').bind(nowTs).run();
+    },
   };
 }
 
@@ -199,10 +203,19 @@ export function createMemorySessionStore() {
       return rows.get(sid) || null;
     },
     async put(record) {
+      const existing = rows.get(record.sid);
+      if (existing && Number(existing.token_epoch ?? 1) > Number(record.token_epoch ?? 1)) {
+        return;
+      }
       rows.set(record.sid, { ...record });
     },
     async delete(sid) {
       rows.delete(sid);
+    },
+    async pruneExpired(nowTs = Date.now()) {
+      for (const [sid, row] of rows.entries()) {
+        if (Number(row.expires_at) <= nowTs) rows.delete(sid);
+      }
     },
   };
 }

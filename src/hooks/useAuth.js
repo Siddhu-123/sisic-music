@@ -117,25 +117,35 @@ export function useAuth() {
     const shouldAttemptSilentRestore = backendAvailable || driveService.hasAuthorizedSession || Boolean(getStoredRefreshToken());
     if (!shouldAttemptSilentRestore) return undefined;
     let cancelled = false;
+    const restoreSessionFromBackend = async () => {
+      if (!backendAvailable || driveService.isAuthenticated || navigator.onLine === false) return false;
+      let canRefresh = Boolean(driveService.hasAuthorizedSession || getStoredRefreshToken());
+      if (isSameOriginAuthAvailable()) {
+        const session = await checkServerSession();
+        canRefresh = Boolean(session?.authenticatedSession);
+      }
+      if (!canRefresh) return false;
+      const refreshed = await driveService.refreshTokenSilently();
+      if (refreshed && !cancelled) {
+        setIsAuthenticated(true);
+        setHasAuthorizedSession(true);
+        setSignedOutExplicitly(false);
+        setError('');
+        driveService.syncTokenToServiceWorker();
+        return true;
+      }
+      return false;
+    };
+
+    // Check Option H HttpOnly session immediately on mount to avoid a LoginScreen flash after redirect.
+    if (backendAvailable && isSameOriginAuthAvailable() && !driveService.isAuthenticated && navigator.onLine !== false) {
+      restoreSessionFromBackend().catch(() => {});
+    }
+
     const init = async () => {
       try {
-        if (backendAvailable && !driveService.isAuthenticated && navigator.onLine !== false) {
-          let canRefresh = Boolean(driveService.hasAuthorizedSession || getStoredRefreshToken());
-          if (isSameOriginAuthAvailable()) {
-            const session = await checkServerSession();
-            canRefresh = Boolean(session?.authenticatedSession);
-          }
-          if (canRefresh) {
-            const refreshed = await driveService.refreshTokenSilently();
-            if (refreshed && !cancelled) {
-              setIsAuthenticated(true);
-              setHasAuthorizedSession(true);
-              setSignedOutExplicitly(false);
-              setError('');
-              driveService.syncTokenToServiceWorker();
-              return;
-            }
-          }
+        if (!isSameOriginAuthAvailable()) {
+          if (await restoreSessionFromBackend()) return;
         }
 
         if (!CLIENT_ID) return;
@@ -315,7 +325,7 @@ export function useAuth() {
       if (isSameOriginAuthAvailable()) {
         const currentPath = `${window.location.pathname || '/'}${window.location.search || ''}`;
         startTopLevelLogin({
-          prompt: driveService.hasAuthorizedSession ? 'select_account' : 'consent',
+          prompt: 'select_account',
           returnTo: currentPath,
         });
         return;

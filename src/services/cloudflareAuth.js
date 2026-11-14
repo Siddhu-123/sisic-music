@@ -143,6 +143,7 @@ export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') 
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
+      ...(isSameOriginAuthAvailable() ? { 'X-Sisic-SW': '1' } : {}),
     },
     body: JSON.stringify({ code, redirect_uri: redirectUri }),
   });
@@ -177,6 +178,7 @@ export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefre
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
+      ...(sameOrigin ? { 'X-Sisic-SW': '1' } : {}),
     },
     body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
   });
@@ -225,6 +227,7 @@ export async function revokeGoogleToken(token = getStoredRefreshToken(), { fetch
         headers: {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-store',
+          ...(sameOrigin ? { 'X-Sisic-SW': '1' } : {}),
         },
         body: JSON.stringify(targetToken ? { token: targetToken } : {}),
       });
