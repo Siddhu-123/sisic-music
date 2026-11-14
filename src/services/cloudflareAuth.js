@@ -7,8 +7,22 @@
 
 export const REFRESH_TOKEN_STORAGE_KEY = 'sisic_refresh_token';
 
+let volatileRefreshToken = null;
+
+function clearPersistentRefreshToken() {
+  try {
+    if (typeof localStorage !== 'undefined' && typeof localStorage?.removeItem === 'function') {
+      localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore inaccessible storage errors
+  }
+}
+
 export function getAuthWorkerUrl() {
-  const url = import.meta.env.VITE_AUTH_WORKER_URL?.trim() || '';
+  const url = import.meta.env?.VITE_AUTH_WORKER_URL?.trim()
+    || globalThis.process?.env?.VITE_AUTH_WORKER_URL?.trim()
+    || '';
   return url.replace(/\/$/, '');
 }
 
@@ -17,7 +31,12 @@ export function isAuthWorkerConfigured() {
 }
 
 export function getStoredRefreshToken() {
+  if (volatileRefreshToken) return volatileRefreshToken;
   try {
+    if (typeof sessionStorage !== 'undefined' && typeof sessionStorage?.getItem === 'function') {
+      clearPersistentRefreshToken();
+      return sessionStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+    }
     return typeof localStorage !== 'undefined' ? localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY) : null;
   } catch {
     return null;
@@ -25,7 +44,17 @@ export function getStoredRefreshToken() {
 }
 
 export function setStoredRefreshToken(token) {
+  volatileRefreshToken = token ? String(token) : null;
   try {
+    if (typeof sessionStorage !== 'undefined' && typeof sessionStorage?.setItem === 'function') {
+      clearPersistentRefreshToken();
+      if (token) {
+        sessionStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, String(token));
+      } else {
+        sessionStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+      }
+      return;
+    }
     if (typeof localStorage !== 'undefined') {
       if (token) {
         localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, token);
@@ -34,16 +63,25 @@ export function setStoredRefreshToken(token) {
       }
     }
   } catch (err) {
-    console.warn('Failed to persist refresh token in localStorage:', err);
+    console.warn('Failed to persist refresh token in storage:', err);
   }
 }
 
 export function clearStoredRefreshToken() {
-  setStoredRefreshToken(null);
+  volatileRefreshToken = null;
+  try {
+    if (typeof sessionStorage !== 'undefined' && typeof sessionStorage?.removeItem === 'function') {
+      sessionStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore inaccessible sessionStorage
+  }
+  clearPersistentRefreshToken();
 }
 
 /**
  * Exchange an OAuth authorization code with the Cloudflare Worker.
+ * Keeps any returned refresh token only in volatile memory (never in localStorage).
  */
 export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') {
   const workerUrl = getAuthWorkerUrl();
@@ -51,7 +89,11 @@ export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') 
 
   const res = await fetch(`${workerUrl}/auth/exchange`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
     body: JSON.stringify({ code, redirect_uri: redirectUri }),
   });
 
@@ -61,15 +103,16 @@ export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') 
     throw new Error(errorMsg);
   }
 
+  clearPersistentRefreshToken();
   if (data.refresh_token) {
-    setStoredRefreshToken(data.refresh_token);
+    volatileRefreshToken = String(data.refresh_token);
   }
 
   return data;
 }
 
 /**
- * Silently refresh the access token using the stored refresh token.
+ * Silently refresh the access token using the volatile refresh token or server session.
  */
 export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefreshToken()) {
   const workerUrl = getAuthWorkerUrl();
@@ -78,7 +121,11 @@ export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefre
 
   const res = await fetch(`${workerUrl}/auth/refresh`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
     body: JSON.stringify({ refresh_token: refreshToken }),
   });
 
@@ -91,9 +138,71 @@ export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefre
     throw new Error(errorMsg);
   }
 
+  clearPersistentRefreshToken();
   if (data.refresh_token) {
-    setStoredRefreshToken(data.refresh_token);
+    volatileRefreshToken = String(data.refresh_token);
   }
 
   return data;
+}
+
+/**
+ * Revoke the Google OAuth token/grant remotely (via the auth worker if configured
+ * and via Google's OAuth2 revocation endpoint) while always clearing local token state.
+ */
+export async function revokeGoogleToken(token = getStoredRefreshToken(), { fetchImpl = fetch } = {}) {
+  const targetToken = String(token || getStoredRefreshToken() || '').trim();
+  clearStoredRefreshToken();
+
+  const workerUrl = getAuthWorkerUrl();
+  let workerRevoked = false;
+  let googleRevoked = false;
+  let attempted = false;
+
+  if (workerUrl && typeof fetchImpl === 'function') {
+    attempted = true;
+    try {
+      const workerRes = await fetchImpl(`${workerUrl}/auth/revoke`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        },
+        body: JSON.stringify(targetToken ? { token: targetToken } : {}),
+      });
+      if (workerRes?.ok) {
+        workerRevoked = true;
+      }
+    } catch {
+      // Fall through to direct Google revocation
+    }
+  }
+
+  if (targetToken && typeof fetchImpl === 'function') {
+    attempted = true;
+    try {
+      const googleRes = await fetchImpl('https://oauth2.googleapis.com/revoke', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ token: targetToken }).toString(),
+      });
+      if (googleRes?.ok) {
+        googleRevoked = true;
+      }
+    } catch {
+      // Handled below
+    }
+  }
+
+  if (!attempted || workerRevoked || googleRevoked) {
+    return { revoked: attempted ? (workerRevoked || googleRevoked) : false, warning: '' };
+  }
+
+  return {
+    revoked: false,
+    warning: 'Signed out locally, but remote Google grant revocation could not be completed.',
+  };
 }

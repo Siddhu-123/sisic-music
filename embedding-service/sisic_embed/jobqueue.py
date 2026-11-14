@@ -34,8 +34,13 @@ def reset_stale(con: sqlite3.Connection) -> int:
     return cur.rowcount
 
 
+class QueueFullError(RuntimeError):
+    """Raised when the job queue has reached its configured capacity."""
+
+
 def enqueue(con: sqlite3.Connection, file_hash: str, song_key: str, offset_s: float,
-            model: str, priority: int, pcm_path: str) -> tuple[str | None, str]:
+            model: str, priority: int, pcm_path: str,
+            max_queued: int | None = None) -> tuple[str | None, str]:
     """Add a clip unless its vector or a matching queued job already exists."""
     con.execute("BEGIN IMMEDIATE")
     try:
@@ -45,14 +50,19 @@ def enqueue(con: sqlite3.Connection, file_hash: str, song_key: str, offset_s: fl
             return None, "done"
         row = con.execute("SELECT id, state FROM jobs WHERE file_hash=? AND offset_s=? AND model=?",
                           (file_hash, offset_s, model)).fetchone()
+        if row and row[1] != "error":
+            con.execute("COMMIT")
+            return row[0], row[1]
+        if max_queued is not None and max_queued > 0:
+            active = con.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0]
+            if active >= int(max_queued):
+                con.execute("ROLLBACK")
+                raise QueueFullError(f"job queue is full (max {int(max_queued)} queued jobs)")
         if row and row[1] == "error":  # a resubmitted clip gets another try with the fresh PCM
             con.execute("UPDATE jobs SET state='queued',error=NULL,pcm_path=?,priority=MIN(priority,?),updated_at=? "
                         "WHERE id=?", (pcm_path, int(priority), time.time(), row[0]))
             con.execute("COMMIT")
             return row[0], "queued"
-        if row:
-            con.execute("COMMIT")
-            return row[0], row[1]
         job_id, now = uuid.uuid4().hex, time.time()
         con.execute("INSERT INTO jobs (id,file_hash,song_key,offset_s,model,priority,state,attempts,error,pcm_path,created_at,updated_at) "
                     "VALUES (?,?,?,?,?,?,'queued',0,NULL,?,?,?)",
@@ -60,7 +70,8 @@ def enqueue(con: sqlite3.Connection, file_hash: str, song_key: str, offset_s: fl
         con.execute("COMMIT")
         return job_id, "queued"
     except Exception:
-        con.execute("ROLLBACK")
+        if con.in_transaction:
+            con.execute("ROLLBACK")
         raise
 
 

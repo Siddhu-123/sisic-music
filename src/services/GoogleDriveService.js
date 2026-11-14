@@ -17,12 +17,16 @@ import {
   exchangeCodeWithWorker,
   refreshAccessTokenWithWorker,
   clearStoredRefreshToken,
+  revokeGoogleToken,
+  REFRESH_TOKEN_STORAGE_KEY,
 } from './cloudflareAuth.js';
 
-// Full Drive access is required because the local worker and the browser may
-// create and update the shared index files through different OAuth clients.
+// Full Drive access is required by default because the local worker and the
+// browser may create and update the shared index files through different OAuth
+// clients. Deployments using a unified OAuth client can override via VITE_GOOGLE_DRIVE_SCOPE.
+const CONFIGURED_DRIVE_SCOPE = typeof import.meta !== 'undefined' && import.meta.env?.VITE_GOOGLE_DRIVE_SCOPE?.trim();
 export const SCOPES = [
-  'https://www.googleapis.com/auth/drive',
+  CONFIGURED_DRIVE_SCOPE || 'https://www.googleapis.com/auth/drive',
 ].join(' ');
 
 const TOKEN_STORAGE_KEY = 'sisic_access_token';
@@ -298,6 +302,7 @@ export class GoogleDriveService {
     safeStorageRemove(EXPIRY_STORAGE_KEY);
     safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
     safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
+    safeStorageRemove(REFRESH_TOKEN_STORAGE_KEY);
 
     // Active session tokens are stored in sessionStorage so page refreshes
     // seamlessly preserve the authenticated session without asking the user
@@ -401,6 +406,7 @@ export class GoogleDriveService {
     safeStorageRemove(EXPIRY_STORAGE_KEY);
     safeStorageRemove(TOKEN_SCOPE_STORAGE_KEY);
     safeStorageRemove(TOKEN_VERSION_STORAGE_KEY);
+    safeStorageRemove(REFRESH_TOKEN_STORAGE_KEY);
     return false;
   }
 
@@ -474,9 +480,30 @@ export class GoogleDriveService {
     return this.tokenRefreshPromise;
   }
 
-  logout() {
+  async logout({ fetchImpl = fetch } = {}) {
+    const refreshToken = getStoredRefreshToken();
+    const accessToken = this.accessToken;
+    const tokenToRevoke = refreshToken || accessToken || '';
     clearStoredRefreshToken();
+    safeStorageRemove(AUTH_HISTORY_STORAGE_KEY);
+    this.hasAuthorizedSession = false;
     this.requireAuthentication(new Error('User signed out.'));
+
+    if (!tokenToRevoke && !isAuthWorkerConfigured()) {
+      return { signedOut: true, revoked: false, warning: '' };
+    }
+
+    let result = await revokeGoogleToken(tokenToRevoke, { fetchImpl });
+    if (!result.revoked && refreshToken && accessToken && accessToken !== refreshToken) {
+      result = await revokeGoogleToken(accessToken, { fetchImpl });
+    }
+    if (!result.revoked) {
+      const warning = result.warning || 'Signed out locally, but remote Google grant revocation could not be completed.';
+      this.authRequired = false;
+      this.requireAuthentication(new Error(warning));
+      return { signedOut: true, revoked: false, warning };
+    }
+    return { signedOut: true, revoked: true, warning: '' };
   }
 
   requestToken({ prompt } = {}) {

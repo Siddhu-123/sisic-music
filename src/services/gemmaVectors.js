@@ -121,8 +121,42 @@ export async function importGemmaVectors(payload, librarySongs = []) {
   return { imported, unmatched: unmatched.length, skipped };
 }
 
+function normalizeServiceBaseUrl(baseUrl) {
+  const parsed = new URL(`${String(baseUrl).replace(/\/+$/, '')}/`);
+  const isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]';
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopback)) {
+    throw new Error('Embedding service baseUrl must use HTTPS (or loopback HTTP).');
+  }
+  return parsed.toString();
+}
+
+export async function exchangeGemmaSessionToken({ baseUrl, token, scope = 'read', ttlSeconds = 900, fetchImpl = fetch } = {}) {
+  if (!baseUrl || !token || typeof fetchImpl !== 'function') throw new Error('baseUrl, token, and fetchImpl are required.');
+  const normalizedBase = normalizeServiceBaseUrl(baseUrl);
+  const response = await fetchImpl(new URL('auth/session', normalizedBase).toString(), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, ttlSeconds }),
+  });
+  if (!response.ok) throw new Error(`Gemma session exchange failed: ${response.status}`);
+  return response.json();
+}
+
+export async function revokeGemmaSessionToken({ baseUrl, token, fetchImpl = fetch } = {}) {
+  if (!baseUrl || !token || typeof fetchImpl !== 'function') throw new Error('baseUrl, token, and fetchImpl are required.');
+  const normalizedBase = normalizeServiceBaseUrl(baseUrl);
+  const response = await fetchImpl(new URL('auth/revoke', normalizedBase).toString(), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (!response.ok) throw new Error(`Gemma session revoke failed: ${response.status}`);
+  return response.json();
+}
+
 export async function syncGemmaVectorsFromService({ baseUrl, token, since, fetchImpl = fetch, librarySongs = [] } = {}) {
   if (!baseUrl || !token || typeof fetchImpl !== 'function') throw new Error('baseUrl, token, and fetchImpl are required.');
+  const normalizedBase = normalizeServiceBaseUrl(baseUrl);
   let cursor = since ?? (await db.metadata.get(CURSOR_KEY))?.value ?? '';
   let imported = 0;
   let unmatched = 0;
@@ -131,7 +165,7 @@ export async function syncGemmaVectorsFromService({ baseUrl, token, since, fetch
   let holdCursor = false;
   while (!seen.has(String(cursor))) {
     seen.add(String(cursor));
-    const url = new URL('vectors', `${String(baseUrl).replace(/\/+$/, '')}/`);
+    const url = new URL('vectors', normalizedBase);
     if (cursor) url.searchParams.set('since', cursor);
     url.searchParams.set('dims', String(GEMMA2_DIMENSIONS));
     const response = await fetchImpl(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
@@ -159,7 +193,8 @@ export async function syncGemmaVectorsFromService({ baseUrl, token, since, fetch
 
 export async function queryTextVector({ baseUrl, token, text, fetchImpl = fetch } = {}) {
   if (!baseUrl || !token || typeof fetchImpl !== 'function') throw new Error('baseUrl, token, and fetchImpl are required.');
-  const response = await fetchImpl(new URL('query', `${String(baseUrl).replace(/\/+$/, '')}/`).toString(), {
+  const normalizedBase = normalizeServiceBaseUrl(baseUrl);
+  const response = await fetchImpl(new URL('query', normalizedBase).toString(), {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),

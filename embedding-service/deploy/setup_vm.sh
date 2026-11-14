@@ -32,7 +32,8 @@ fi
 grep -qE '^/swapfile\s' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
 id sisic-embed >/dev/null 2>&1 || useradd --system --home-dir /var/lib/sisic-embed --shell /usr/sbin/nologin sisic-embed
-install -d -o sisic-embed -g sisic-embed /opt/sisic-embed /var/lib/sisic-embed/spool
+install -d -m 0750 -o sisic-embed -g sisic-embed /opt/sisic-embed
+install -d -m 0700 -o sisic-embed -g sisic-embed /var/lib/sisic-embed /var/lib/sisic-embed/spool /var/lib/sisic-embed/hf
 rsync -a --delete --exclude='.venv' "$SRC/" /opt/sisic-embed/
 python3 -m venv /opt/sisic-embed/.venv
 /opt/sisic-embed/.venv/bin/pip install --upgrade pip
@@ -40,6 +41,8 @@ python3 -m venv /opt/sisic-embed/.venv
 /opt/sisic-embed/.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
 /opt/sisic-embed/.venv/bin/pip install -r /opt/sisic-embed/requirements.txt
 chown -R sisic-embed:sisic-embed /opt/sisic-embed /var/lib/sisic-embed
+chmod 0700 /var/lib/sisic-embed /var/lib/sisic-embed/spool /var/lib/sisic-embed/hf
+find /var/lib/sisic-embed -maxdepth 2 -type f \( -name "*.sqlite*" -o -name "*.db*" -o -name "*.f32" \) -exec chmod 0600 {} +
 install -m 0644 /opt/sisic-embed/deploy/sisic-embed.service /etc/systemd/system/sisic-embed.service
 if [[ ! -e /etc/sisic-embed.env ]]; then
   umask 077

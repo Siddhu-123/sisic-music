@@ -5,8 +5,11 @@ songs holds metadata per file hash; song_key is the web app's getSongKey().
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 import time
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -47,11 +50,36 @@ CREATE INDEX IF NOT EXISTS clips_created ON clips(created_at);
 """
 
 
+def _is_file_db(path: str) -> bool:
+    return bool(path) and path != ":memory:" and not path.startswith("file:")
+
+
+def secure_db_permissions(path: str) -> None:
+    if not _is_file_db(path):
+        return
+    owner_rw = stat.S_IRUSR | stat.S_IWUSR
+    for suffix in ("", "-wal", "-shm"):
+        candidate = f"{path}{suffix}"
+        if os.path.exists(candidate):
+            try:
+                os.chmod(candidate, owner_rw)
+            except OSError:
+                pass
+
+
 def connect(path: str) -> sqlite3.Connection:
-    con = sqlite3.connect(path, timeout=60, isolation_level=None, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.executescript(SCHEMA)
+    if _is_file_db(path):
+        parent = Path(path).parent
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    old_umask = os.umask(0o077)
+    try:
+        con = sqlite3.connect(path, timeout=60, isolation_level=None, check_same_thread=False)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.executescript(SCHEMA)
+    finally:
+        os.umask(old_umask)
+    secure_db_permissions(path)
     return con
 
 

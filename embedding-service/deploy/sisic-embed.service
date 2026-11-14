@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=sisic-embed
 Group=sisic-embed
+UMask=0077
 WorkingDirectory=/opt/sisic-embed
 EnvironmentFile=/etc/sisic-embed.env
 Environment=HF_HUB_OFFLINE=1 HF_HOME=/var/lib/sisic-embed/hf OMP_NUM_THREADS=1
