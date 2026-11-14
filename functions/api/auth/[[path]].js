@@ -126,7 +126,7 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
 
     const txSealed = await sealJsonAead(
       env.AUTH_ENC_KEY,
-      { state, codeVerifier, returnTo, exp: currentNow + TX_TTL_MS },
+      { state, codeVerifier, returnTo, prompt: requestedPrompt, exp: currentNow + TX_TTL_MS },
       'sisic-oauth-tx',
     );
     const txSetCookie = buildSetCookie(txCookie, `${txSealed.nonce}.${txSealed.ciphertext}`, {
@@ -202,7 +202,7 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
 
     const existingSid = cookies.get(sessCookie);
     let refreshToken = tokenData.refresh_token || '';
-    if (!refreshToken && existingSid) {
+    if (existingSid && !refreshToken) {
       const existingRow = await store.get(existingSid);
       if (existingRow) {
         try {
@@ -218,11 +218,18 @@ export async function handleAuthRequest({ request, env, fetchImpl = fetch, sessi
       }
     }
     if (!refreshToken) {
-      // Force Google consent screen once if Google withheld an offline refresh token on first grant.
-      return redirectResponse('/api/auth/login?prompt=consent', [clearTxCookie]);
+      if (!url.searchParams.has('consent_retried') && tx.prompt !== 'consent') {
+        // Force Google consent screen once if Google withheld an offline refresh token on select_account.
+        return redirectResponse('/api/auth/login?prompt=consent', [clearTxCookie]);
+      }
+      return redirectResponse('/?auth_error=missing_refresh_token', [clearTxCookie]);
     }
 
-    const sid = existingSid || randomTokenId(32);
+    // Rotate session identifier on interactive authentication to prevent session fixation.
+    if (existingSid) {
+      await store.delete(existingSid);
+    }
+    const sid = randomTokenId(32);
     const epoch = 1;
     const sealed = await sealRefreshToken(env.AUTH_ENC_KEY, { sid, epoch, refreshToken });
     await store.put({
