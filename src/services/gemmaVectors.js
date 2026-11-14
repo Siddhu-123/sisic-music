@@ -274,12 +274,14 @@ export async function queryTextVector({ baseUrl, token, text, fetchImpl = fetch 
 }
 
 export function gemmaNeighbors(seedKey, rows, k = 12) {
-  const seed = rows.find(row => row.songKey === seedKey && row.embeddingModel === GEMMA2_MODEL);
-  const vector = seed && normalizeVector(seed.vector, GEMMA2_DIMENSIONS);
+  const seed = rows.find(row => row.songKey === seedKey && (row.embeddingModel === RECS_V3_MODEL || row.embeddingModel === GEMMA2_MODEL));
+  const seedModel = seed?.embeddingModel || GEMMA2_MODEL;
+  const dims = seed?.dimensions || seed?.vector?.length || (seedModel === RECS_V3_MODEL ? RECS_V3_DIMENSIONS : GEMMA2_DIMENSIONS);
+  const vector = seed && normalizeVector(seed.vector, dims);
   if (!vector) return [];
   return rows.flatMap(row => {
-    if (row.songKey === seedKey || row.embeddingModel !== GEMMA2_MODEL) return [];
-    const candidate = normalizeVector(row.vector, GEMMA2_DIMENSIONS);
+    if (row.songKey === seedKey || row.embeddingModel !== seedModel) return [];
+    const candidate = normalizeVector(row.vector, dims);
     if (!candidate) return [];
     const similarityScore = vector.reduce((sum, value, index) => sum + value * candidate[index], 0);
     return [{ ...row, similarityScore }];

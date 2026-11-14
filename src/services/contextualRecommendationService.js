@@ -518,9 +518,9 @@ export function rankContextualSongs(songs = [], options = {}) {
       // across distant styles while lifting tracks aligned with the active session mode.
       const multiInterest = vector && profile?.interests?.length > 1
         ? (scoreInterestsLogSumExp(vector, profile.interests, {
-          sessionVector: sequenceWeight > 0.15 ? profile.recentVector : null,
-          beta: 3.0,
-          tau: 8.0,
+          sessionVector: sequenceWeight > 0.05 ? profile.recentVector : null,
+          beta: 6.0 * sequenceWeight,
+          tau: 10.0,
         }) ?? interestAffinity(vector, profile.interests))
         : null;
       const baseTaste = multiInterest ?? ((profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0);
@@ -883,7 +883,7 @@ export async function buildUpNextRecommendations({
       excludeSongKeys: Array.from(recentKeys),
       limit: candidates.length,
       gemmaVectors,
-      sessionSteer: activeSteer,
+      sessionSteer: null,
     }
   );
   const contextualScoreByKey = new Map(rankedContextual.map((item, idx) => [

@@ -2,8 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sparkles, Play, Plus, X, ListPlus } from 'lucide-react';
 import { findSimilarSongs } from '../services/tasteEmbeddingService.js';
 import { getSongKey } from '../songIdentity.js';
-import { getSongVectors } from '../db.js';
-import { GEMMA2_MODEL, gemmaNeighbors } from '../services/gemmaVectors.js';
+import { loadPreferredSongVectors, gemmaNeighbors } from '../services/gemmaVectors.js';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
 export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs = [], onPlaySong, onAddToQueue, onRecommendationShown }) {
@@ -15,7 +14,7 @@ export function RecommendationsModal({ isOpen, onClose, targetSong, librarySongs
     let cancelled = false;
     if (!seedKey) return () => { cancelled = true; };
     const songsByKey = new Map(librarySongs.map(song => [song.songKey || getSongKey(song), song]));
-    getSongVectors(GEMMA2_MODEL).then(rows => {
+    loadPreferredSongVectors().then(({ rows }) => {
       if (cancelled) return;
       if (!rows.some(row => row.songKey === seedKey)) { setGemmaLookup({ seedKey, recommendations: null }); return; }
       // Filter to library songs before taking the top 12 so the list is not short.
