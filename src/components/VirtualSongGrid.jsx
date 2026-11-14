@@ -79,14 +79,15 @@ export function VirtualSongGrid({
       setViewportHeight(currentViewportHeight);
       setContainerTop(relativeTop);
 
-      // Auto-paginate when scrolled near bottom
+      // Auto-paginate when scrolled near bottom; release lock only after load settles or timeout safety net
       if (hasMore && typeof onLoadMore === 'function' && !loadingMoreRef.current) {
         const scrollBottom = currentScrollTop + currentViewportHeight;
         const containerBottom = relativeTop + (containerRef.current.offsetHeight || 0);
         if (scrollBottom >= containerBottom - 600) {
           loadingMoreRef.current = true;
-          onLoadMore();
-          setTimeout(() => { loadingMoreRef.current = false; }, 400);
+          Promise.resolve(onLoadMore()).finally(() => {
+            requestAnimationFrame(() => { loadingMoreRef.current = false; });
+          });
         }
       }
     };

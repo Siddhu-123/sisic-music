@@ -20,6 +20,10 @@ body:has(.expanded-player--reference) .sidebar {
   opacity: .6;
   pointer-events: none;
 }
+body:has(.expanded-player--reference) .player-bar {
+  visibility: hidden;
+  pointer-events: none;
+}
 body:has(.expanded-player--reference) .queue-panel { z-index: 90; }
 .expanded-player--reference .expanded-player__header {
   flex: 0 0 auto;

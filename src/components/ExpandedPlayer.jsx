@@ -138,7 +138,7 @@ export function ExpandedPlayer({
             <Turntable
               showCrate={false}
               currentSong={currentSong}
-              artwork={<AsyncArtworkImage song={currentSong} alt={`${currentSong.track} cover`} className="turntable__art" fallbackSize={28} size={400} priority />}
+              artwork={<AsyncArtworkImage defaultCover song={currentSong} alt={`${currentSong.track} cover`} className="turntable__art" fallbackSize={28} size={400} priority />}
               isPlaying={isPlaying}
               isBraking={isSpinningDown}
               isBuffering={isBuffering}
@@ -334,7 +334,7 @@ export function ExpandedPlayer({
                     }}
                   >
                     <div className="crate-card__art-wrap">
-                      <AsyncArtworkImage song={song} alt={`${song.track} cover`} className="crate-card__art" fallbackSize={22} size={260} />
+                      <AsyncArtworkImage defaultCover song={song} alt={`${song.track} cover`} className="crate-card__art" fallbackSize={22} size={260} />
                       <span className="crate-card__play-badge" aria-hidden="true">
                         <Play size={16} fill="currentColor" />
                       </span>

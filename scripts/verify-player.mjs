@@ -5,7 +5,7 @@ const output = process.env.PLAYER_TEST_OUTPUT || '/tmp/sisic-player-checks';
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ headless: true,
   ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
-  args: ['--autoplay-policy=no-user-gesture-required'],
+  args: ['--autoplay-policy=no-user-gesture-required', '--disable-features=HardwareMediaKeyHandling'],
 });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
 const page = await context.newPage();

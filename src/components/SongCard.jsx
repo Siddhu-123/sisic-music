@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { FolderOpen, LoaderCircle } from 'lucide-react';
 import { statusDetails } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
+import { useSongArtworkUrl } from '../hooks/useSongArtworkUrl.js';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 import '../song-tiles.css';
 import nextGlyph from '../assets/song-tile/next-arrow.svg';
@@ -20,17 +21,40 @@ import deleteIcon from '../assets/song-tile/delete.png';
 const ROW_SLOTS = ['next', 'play', 'queue', 'playlist', 'like', 'similar'];
 
 export function TileFace({ song, statusText, statusTitle, title = song.track, subtitle = song.artist, cover, children }) {
+  const { src, isDefaultCover, onError } = useSongArtworkUrl(song, { size: 300, defaultCover: true });
   return (
     <div className="tile-face">
       <div className="tile-face__backdrop" aria-hidden="true">
-        {[0, 1, 2, 3].map(level => (
-          <div key={level} className={`tile-face__layer tile-face__layer--${level}`}>
-            <AsyncArtworkImage defaultCover song={song} className="tile-face__bg" size={300} alt="" />
-            <span className="tile-face__vignette" />
-          </div>
-        ))}
+        <div className="tile-face__layer tile-face__layer--single">
+          <img
+            src={src}
+            onError={isDefaultCover ? undefined : onError}
+            alt=""
+            className={isDefaultCover ? 'tile-face__bg artwork-default-cover' : 'tile-face__bg'}
+            width={300}
+            height={300}
+            style={{ aspectRatio: '1 / 1', objectFit: 'cover' }}
+            loading="lazy"
+            decoding="async"
+          />
+          <span className="tile-face__vignette" />
+        </div>
       </div>
-      <div className="tile-face__cover">{cover ?? <AsyncArtworkImage defaultCover song={song} className="tile-face__cover-img" size={300} alt={`${song.track} cover`} />}</div>
+      <div className="tile-face__cover">
+        {cover ?? (
+          <img
+            src={src}
+            onError={isDefaultCover ? undefined : onError}
+            alt={`${song.track} cover`}
+            className={isDefaultCover ? 'tile-face__cover-img artwork-default-cover' : 'tile-face__cover-img'}
+            width={300}
+            height={300}
+            style={{ aspectRatio: '1 / 1', objectFit: 'cover' }}
+            loading="lazy"
+            decoding="async"
+          />
+        )}
+      </div>
       {children}
       <div className="tile-face__meta">
         <span className="tile-face__meta-bg" aria-hidden="true" />

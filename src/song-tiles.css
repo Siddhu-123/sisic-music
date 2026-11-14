@@ -45,13 +45,8 @@
 /* Any aspect ratio: a square box as tall as the tile, so the image's short side equals the tile's long side and cover never leaves bars. */
 .tile-face__bg{position:absolute;left:-6cqw;top:0;display:block;width:112cqw!important;height:112cqw!important;max-width:none;object-fit:cover;aspect-ratio:auto!important}
 .tile-face__vignette{position:absolute;left:0;top:-33.3333cqw;width:100cqw;height:176cqw;pointer-events:none;background:url("data:image/svg+xml;utf8,<svg viewBox='0 0 300 528' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='none'><g transform='matrix(-17 17.45 -15.808 -15.4 150 264)' opacity='1'><rect height='251.11' width='151.78' fill='url(%23grad)' id='quad' shape-rendering='crispEdges'/><use href='%23quad' transform='scale(1 -1)'/><use href='%23quad' transform='scale(-1 1)'/><use href='%23quad' transform='scale(-1 -1)'/></g><defs><linearGradient id='grad' gradientUnits='userSpaceOnUse' x2='5' y2='5'><stop stop-color='rgba(0,0,0,0)' offset='0.80752'/><stop stop-color='rgba(0,0,0,1)' offset='1'/></linearGradient></defs></svg>") center/100% 100% no-repeat}
-/* Figma progressive layer blur 12.1 from (167,264.5) to (275.5,41.5) in tile space = 26deg, 31.7% -> 88.9%.
-   Each step fades in over the one below; a lower step drops out only once the step above is fully in,
-   so the blurred edges of the top steps reveal the white card fill (Figma's light rim at the top-right). */
-.tile-face__layer--0{-webkit-mask-image:linear-gradient(26deg,#000 50.7%,transparent 60%);mask-image:linear-gradient(26deg,#000 50.7%,transparent 60%)}
-.tile-face__layer--1{filter:blur(.6667cqw);-webkit-mask-image:linear-gradient(26deg,transparent 31.7%,#000 50.7%,#000 69.9%,transparent 79%);mask-image:linear-gradient(26deg,transparent 31.7%,#000 50.7%,#000 69.9%,transparent 79%)}
-.tile-face__layer--2{filter:blur(1.3333cqw);-webkit-mask-image:linear-gradient(26deg,transparent 50.7%,#000 69.9%,#000 88.9%,transparent 95%);mask-image:linear-gradient(26deg,transparent 50.7%,#000 69.9%,#000 88.9%,transparent 95%)}
-.tile-face__layer--3{filter:blur(2.0167cqw);-webkit-mask-image:linear-gradient(26deg,transparent 69.9%,#000 88.9%);mask-image:linear-gradient(26deg,transparent 69.9%,#000 88.9%)}
+/* Single blurred album backdrop + diagonal mask preserves Group 25 color bleed and top-right rim with 1 shared decode. */
+.tile-face__layer--single{filter:blur(1.25cqw);-webkit-mask-image:linear-gradient(26deg,#000 58%,rgba(0,0,0,.68) 78%,rgba(0,0,0,.22) 95%);mask-image:linear-gradient(26deg,#000 58%,rgba(0,0,0,.68) 78%,rgba(0,0,0,.22) 95%)}
 .tile-face__cover{position:absolute;left:7.6667cqw;top:8.3333cqw;width:84.6667cqw;height:80.3333cqw;overflow:hidden;border-radius:3cqw;opacity:.9;background:rgba(255,255,255,.1)}
 .tile-face__cover-img{position:absolute;left:-13.6667cqw;top:-8.3333cqw;width:112cqw!important;height:112cqw!important;max-width:none;object-fit:cover;aspect-ratio:auto!important}
 /* Glass name box: Figma 177x55 at (13,268), radius 10; hairline rim brightest on the left and upper-right edges. */

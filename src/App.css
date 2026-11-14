@@ -6704,3 +6704,64 @@ body,
 :root[data-theme="light"] .expanded-player__title {
   color: #0f172a;
 }
+
+/* Pillar 1 UI & layout polish */
+.drive-summary__label {
+  white-space: nowrap;
+}
+
+:root[data-theme="dark"] .drive-summary > div,
+:root[data-theme="dark"] .drive-summary__button {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+:root[data-theme="dark"] .drive-summary__button:hover {
+  border-color: rgba(148, 163, 184, 0.34);
+}
+
+.sidebar {
+  gap: 14px;
+  padding: 18px 16px 16px;
+}
+
+.sidebar__nav {
+  gap: 4px;
+}
+
+.sidebar__nav-item {
+  padding: 9px 12px;
+}
+
+.sidebar__playlists {
+  gap: 8px;
+}
+
+.sidebar__playlists > .panel-action-btn {
+  flex-shrink: 0;
+}
+
+.sidebar__playlist-list {
+  padding-bottom: 14px;
+}
+
+.content-rail {
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+}
+
+.explore-mix-card__mosaic {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  height: 100%;
+}
+
+.explore-mix-card__mosaic-img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto !important;
+  display: block;
+  object-fit: cover;
+}

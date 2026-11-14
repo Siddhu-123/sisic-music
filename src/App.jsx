@@ -29,8 +29,6 @@ import { useAuth, DRIVE_FOLDER_ID } from './hooks/useAuth.js';
 import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, MacWorkerTasksPanel, PlayerBar, SongCard, SongInfoPanel, SongReviewPanel, LoginScreen, SyncBanner } from './components/Components.jsx';
 import { PlaylistTile } from './components/PlaylistTile.jsx';
 import { VirtualSongGrid } from './components/VirtualSongGrid.jsx';
-import { ExploreView } from './components/ExploreView.jsx';
-import { DeletePlaylistModal } from './components/DeletePlaylistModal.jsx';
 import { ThemeToggle } from './components/ThemeToggle.jsx';
 import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
@@ -40,7 +38,6 @@ import { collectAudioFiles, importAudioFiles } from './services/importService.js
 import { buildUpNextRecommendations, enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, getSongVectors, importGemmaVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
 import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
-import { GemmaServicePanel } from './components/GemmaServicePanel.jsx';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import { getActiveRadio } from './services/infiniteRadio.js';
 import {
@@ -52,6 +49,9 @@ import './App.css';
 import './responsive-ui.css';
 import './player-reference.css';
 
+const ExploreView = lazy(() => import('./components/ExploreView.jsx').then(module => ({ default: module.ExploreView })));
+const DeletePlaylistModal = lazy(() => import('./components/DeletePlaylistModal.jsx').then(module => ({ default: module.DeletePlaylistModal })));
+const GemmaServicePanel = lazy(() => import('./components/GemmaServicePanel.jsx').then(module => ({ default: module.GemmaServicePanel })));
 const QueuePanel = lazy(() => import('./components/QueuePanel.jsx').then(module => ({ default: module.QueuePanel })));
 const ConstellationView = lazy(() => import('./components/views/ConstellationView.jsx').then(module => ({ default: module.ConstellationView })));
 const EqualizerModal = lazy(() => import('./components/EqualizerModal.jsx').then(module => ({ default: module.EqualizerModal })));
@@ -677,13 +677,20 @@ function App() {
     [allSongs, duplicateSongKeySet],
   );
 
-  const driveSongKeySet = useMemo(() => {
-    return new Set(driveIndexSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
-  }, [driveIndexSongs]);
-
   const deletedSongKeySet = useMemo(() => {
     return new Set(driveDeletedSongs.map(song => song.songKey).filter(Boolean));
   }, [driveDeletedSongs]);
+
+  // Keep driveSongKeySet and driveReadySongs derived from the same authoritative source
+  // so Ready, Playlist coverage, and downloads stay consistent offline or before Drive sync.
+  const effectiveDriveSongs = useMemo(() => {
+    if (driveIndexSongs.length > 0) return driveIndexSongs;
+    return allSongs.filter(song => song?.songKey && song.driveFileId && !deletedSongKeySet.has(song.songKey));
+  }, [allSongs, deletedSongKeySet, driveIndexSongs]);
+
+  const driveSongKeySet = useMemo(() => {
+    return new Set(effectiveDriveSongs.filter(song => song.driveFileId).map(song => song.songKey).filter(Boolean));
+  }, [effectiveDriveSongs]);
 
   const workerTasks = useMemo(() => {
     const priority = { downloading: 0, queued: 1, 'needs-review': 2, error: 3, failed: 4, blocked: 5 };
@@ -712,7 +719,7 @@ function App() {
   }, [allSongs, allSongsByKey, duplicateSongKeySet, jobBySongKey]);
 
   const driveReadySongs = useMemo(() => {
-    return driveIndexSongs
+    return effectiveDriveSongs
       .filter(song => song.songKey && song.driveFileId)
       .filter(song => !duplicateSongKeySet.has(song.songKey))
       .map(indexedSong => {
@@ -730,7 +737,7 @@ function App() {
         }, jobBySongKey);
       })
       .sort((a, b) => (a.track || '').localeCompare(b.track || ''));
-  }, [allSongsByKey, driveIndexSongs, duplicateSongKeySet, jobBySongKey]);
+  }, [allSongsByKey, duplicateSongKeySet, effectiveDriveSongs, jobBySongKey]);
 
   const availableSongs = driveReadySongs;
 
@@ -1246,6 +1253,9 @@ function App() {
     let resolved = { ...song, ...localSong, downloadJob: jobBySongKey.get(localSong.songKey) || localSong.downloadJob || null };
 
     if (resolved.driveFileId) {
+      if (!driveService.isAuthenticated || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        return resolved;
+      }
       const metadata = await driveService.getAudioFileMetadata(resolved.driveFileId);
       if (metadata) return resolved;
       await clearSongPlayable(resolved.songKey);
@@ -2124,17 +2134,19 @@ function App() {
         )}
 
         {view === VIEWS.EXPLORE && (
-          <ExploreView
-            browseSongs={exploreBrowseSongs}
-            librarySongs={exploreLibrarySongs}
-            playbackEvents={librarySummary.playbackEvents}
-            {...(gemmaVectors.size ? { gemmaVectors } : {})}
-            likedSongKeys={likedSongKeys}
-            catalogueLoading={catalogueLoading}
-            renderSong={renderSongCard}
-            onRecommendationShown={handleRecommendationShown}
-            onPlayMix={(songs, options) => songs.length && handlePlaySong(songs[0], songs, options)}
-          />
+          <Suspense fallback={<div className="view-loading" role="status">Loading Explore…</div>}>
+            <ExploreView
+              browseSongs={exploreBrowseSongs}
+              librarySongs={exploreLibrarySongs}
+              playbackEvents={librarySummary.playbackEvents}
+              {...(gemmaVectors.size ? { gemmaVectors } : {})}
+              likedSongKeys={likedSongKeys}
+              catalogueLoading={catalogueLoading}
+              renderSong={renderSongCard}
+              onRecommendationShown={handleRecommendationShown}
+              onPlayMix={(songs, options) => songs.length && handlePlaySong(songs[0], songs, options)}
+            />
+          </Suspense>
         )}
 
         {view === VIEWS.LIBRARY && (
@@ -2185,9 +2197,11 @@ function App() {
                 <>
                   <div className="library-count">
                     {filtered.length} songs
-                    <button type="button" className="btn-primary" style={{ marginLeft: 12, padding: "4px 12px" }} onClick={handleRemoveAllDuplicates}>
-                      Remove duplicates ({duplicateSongs.length})
-                    </button>
+                    {duplicateSongs.length > 0 && (
+                      <button type="button" className="btn-primary" style={{ marginLeft: 12, padding: "4px 12px" }} onClick={handleRemoveAllDuplicates}>
+                        Remove duplicates ({duplicateSongs.length})
+                      </button>
+                    )}
                   </div>
                   <VirtualSongGrid
                     songs={filtered}
@@ -2288,13 +2302,15 @@ function App() {
                 <span>Import EmbeddingGemma vectors</span>
               </button>
             </div>
-            <GemmaServicePanel
-              librarySongs={allSongs}
-              onSynced={reloadGemmaVectors}
-              status={gemmaServiceStatus}
-              onStatusChange={setGemmaServiceStatus}
-              onConfigChange={() => setGemmaConfigRevision(revision => revision + 1)}
-            />
+            <Suspense fallback={<div className="view-loading" role="status">Loading embedding controls…</div>}>
+              <GemmaServicePanel
+                librarySongs={allSongs}
+                onSynced={reloadGemmaVectors}
+                status={gemmaServiceStatus}
+                onStatusChange={setGemmaServiceStatus}
+                onConfigChange={() => setGemmaConfigRevision(revision => revision + 1)}
+              />
+            </Suspense>
             {largestReadySongs.length > 0 && (
               <div className="storage-list">
                 <h3>Largest Ready Songs</h3>
@@ -2488,13 +2504,15 @@ function App() {
       )}
 
       {playlistToDelete && (
-        <DeletePlaylistModal
-          isOpen={Boolean(playlistToDelete)}
-          playlist={playlistToDelete}
-          onClose={() => { if (!isDeletingPlaylist) setPlaylistToDelete(null); }}
-          onConfirm={handleDeletePlaylist}
-          isDeleting={isDeletingPlaylist}
-        />
+        <Suspense fallback={null}>
+          <DeletePlaylistModal
+            isOpen={Boolean(playlistToDelete)}
+            playlist={playlistToDelete}
+            onClose={() => { if (!isDeletingPlaylist) setPlaylistToDelete(null); }}
+            onConfirm={handleDeletePlaylist}
+            isDeleting={isDeletingPlaylist}
+          />
+        </Suspense>
       )}
 
       <nav className="mobile-nav" aria-label="Mobile navigation">

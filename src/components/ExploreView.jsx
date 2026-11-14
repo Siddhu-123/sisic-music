@@ -61,10 +61,28 @@ export function ExploreView({
     return `${outcomes.length}:${last}`;
   }, [playbackEvents]);
   const stableEvents = useMemo(() => playbackEvents, [outcomeSignature]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Same for songs: the live query re-reads them on any write; keep the old array while mix inputs are unchanged.
-  const songSignature = useMemo(() => (librarySongs || [])
-    .map(song => [song.songKey, song.driveFileId, song.genre, song.year, song.durationSeconds].join('\u0001'))
-    .join('\u0002'), [librarySongs]);
+  // Keep the old songs array reference unless mix-relevant fields change, avoiding large string joins per render.
+  const songSignature = useMemo(() => {
+    let hash = 0x811c9dc5;
+    const list = librarySongs || [];
+    const mixStr = value => {
+      for (let i = 0; i < value.length; i += 1) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+      }
+      hash ^= 0xff;
+      hash = Math.imul(hash, 0x01000193);
+    };
+    for (let i = 0; i < list.length; i += 1) {
+      const song = list[i];
+      mixStr(String(song.songKey || ''));
+      mixStr(String(song.driveFileId || ''));
+      mixStr(String(song.genre || ''));
+      mixStr(String(song.year || ''));
+      mixStr(String(song.durationSeconds || ''));
+    }
+    return `${list.length}:${hash >>> 0}`;
+  }, [librarySongs]);
   const stableSongs = useMemo(() => librarySongs, [songSignature]); // eslint-disable-line react-hooks/exhaustive-deps
   const likedSignature = (likedSongKeys || []).join('\u0002');
   const stableLiked = useMemo(() => likedSongKeys, [likedSignature]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -93,7 +111,7 @@ export function ExploreView({
   const genreShelves = useMemo(
     () => genres.slice(0, 4).map(facet => ({
       ...facet,
-      songs: filterExploreSongs(browseSongs, { genre: facet.label }).slice(0, 10),
+      songs: filterExploreSongs(browseSongs, { genre: facet.label }).slice(0, 7),
     })).filter(shelf => shelf.songs.length),
     [browseSongs, genres],
   );
@@ -231,12 +249,28 @@ export function ExploreView({
             </div>
             <div className="explore-mix-grid">
               {taste.mixes.map(mix => {
-                const hero = mix.songs[0];
+                const seenArt = new Set();
+                const mosaicSongs = [];
+                for (const candidate of mix.songs) {
+                  if (!candidate?.songKey || seenArt.has(candidate.songKey)) continue;
+                  seenArt.add(candidate.songKey);
+                  mosaicSongs.push(candidate);
+                  if (mosaicSongs.length === 4) break;
+                }
+                const hero = mosaicSongs[0] || mix.songs[0];
                 const hue = hueFromLabel(mix.title);
                 return (
                   <button key={mix.id} type="button" className="explore-mix-card" onClick={() => chooseMix(mix)}>
                     <div className="explore-mix-card__art" style={{ '--mix-hue': hue }}>
-                      {hero && <AsyncArtworkImage song={hero} className="explore-mix-card__image" fallbackSize={22} size={180} />}
+                      {mosaicSongs.length >= 4 ? (
+                        <div className="explore-mix-card__mosaic">
+                          {mosaicSongs.map(song => (
+                            <AsyncArtworkImage key={song.songKey} defaultCover song={song} className="explore-mix-card__mosaic-img" fallbackSize={16} size={140} />
+                          ))}
+                        </div>
+                      ) : (
+                        hero && <AsyncArtworkImage defaultCover song={hero} className="explore-mix-card__image" fallbackSize={22} size={180} />
+                      )}
                     </div>
                     <span>Smart mix · Explore only</span>
                     <strong>{mix.title}</strong>
@@ -247,7 +281,7 @@ export function ExploreView({
             </div>
           </section>
 
-          <SongRail title="Suggested for you" subtitle="A gentle next set from your own library" songs={taste.suggestions.slice(0, 10)} renderSong={(song, list) => renderSong(song, list, { sourceType: 'mix', sourceId: 'suggested-for-you' })} />
+          <SongRail title="Suggested for you" subtitle="A gentle next set from your own library" songs={taste.suggestions.slice(0, 8)} renderSong={(song, list) => renderSong(song, list, { sourceType: 'mix', sourceId: 'suggested-for-you' })} />
           {genreShelves.map(shelf => <SongRail key={shelf.label} title={shelf.label} subtitle={`${shelf.count} songs in your catalogue`} songs={shelf.songs} renderSong={renderSong} />)}
         </>
       )}

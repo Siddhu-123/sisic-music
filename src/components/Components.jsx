@@ -1,5 +1,4 @@
 export { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
-export { ExpandedPlayer } from './ExpandedPlayer.jsx';
 export { PlayerBar } from './PlayerBar.jsx';
 export { SongCard } from './SongCard.jsx';
 export { SongInfoPanel } from './SongInfoPanel.jsx';

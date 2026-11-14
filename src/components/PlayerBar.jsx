@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Shuffle, Repeat, Repeat1, ListMusic, Info, LoaderCircle } from 'lucide-react';
 import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { ProgressSlider } from './ProgressSlider.jsx';
 import { PlaybackSettings } from './PlaybackSettings.jsx';
-import { ExpandedPlayer } from './ExpandedPlayer.jsx';
+
+const ExpandedPlayer = lazy(() => import('./ExpandedPlayer.jsx').then(module => ({ default: module.ExpandedPlayer })));
 
 export function PlayerBar({
   player,
@@ -48,7 +49,7 @@ export function PlayerBar({
               onClick={() => setIsExpanded(true)}
               aria-label={`Open player for ${currentSong.track} by ${currentSong.artist}`}
             >
-              <AsyncArtworkImage song={currentSong} className="player-thumb" fallbackSize={16} size={96} sizes="64px" priority />
+              <AsyncArtworkImage defaultCover song={currentSong} className="player-thumb" fallbackSize={16} size={96} sizes="64px" priority />
               <span className="player-meta">
                 <span className="player-track">{currentSong.track}</span>
                 <span className="player-artist">{currentSong.artist}</span>
@@ -112,22 +113,24 @@ export function PlayerBar({
       <PlaybackSettings player={player} />
 
       {isExpanded && (
-        <ExpandedPlayer
-          player={player}
-          onClose={() => setIsExpanded(false)}
-          hue={hue}
-          onToggleQueue={onToggleQueue}
-          onOpenSongInfo={onOpenSongInfo}
-          onAddToPlaylist={onAddToPlaylist}
-          onDelete={onDelete}
-          onReview={onReview}
-          onPrepare={onPrepare}
-          onPlayNext={onPlayNext}
-          onAddToQueue={onAddToQueue}
-          onOpenEqualizer={onOpenEqualizer}
-          onMoreLikeThis={onMoreLikeThis}
-          onSearchLibrary={onSearchLibrary}
-        />
+        <Suspense fallback={<div className="view-loading" role="status">Loading player…</div>}>
+          <ExpandedPlayer
+            player={player}
+            onClose={() => setIsExpanded(false)}
+            hue={hue}
+            onToggleQueue={onToggleQueue}
+            onOpenSongInfo={onOpenSongInfo}
+            onAddToPlaylist={onAddToPlaylist}
+            onDelete={onDelete}
+            onReview={onReview}
+            onPrepare={onPrepare}
+            onPlayNext={onPlayNext}
+            onAddToQueue={onAddToQueue}
+            onOpenEqualizer={onOpenEqualizer}
+            onMoreLikeThis={onMoreLikeThis}
+            onSearchLibrary={onSearchLibrary}
+          />
+        </Suspense>
       )}
     </div>
   );

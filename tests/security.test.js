@@ -319,9 +319,52 @@ test('Finding 5 & dependencies: VM setup script, systemd unit, and requirements.
   }
 });
 
-test('Findings 3, 4, 5: embedding-service enforces scoped sessions, body/PCM/text/queue/spool/rate limits, and 0600 DB permissions', () => {
-  const venvPython = '/Users/sidslaptop/dev/gemini embedding 2/.venv/bin/python';
-  const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python3';
+test('Findings 3, 4, 5: embedding-service enforces scoped sessions, body/PCM/text/queue/spool/rate limits, and 0600 DB permissions', t => {
+  const candidates = [
+    process.env.SISIC_PYTHON,
+    path.join(ROOT_DIR, 'embedding-service', '.venv', 'bin', 'python'),
+    path.join(ROOT_DIR, '..', 'mac-app', '.venv', 'bin', 'python'),
+    '/Users/sidslaptop/dev/gemini embedding 2/.venv/bin/python',
+    'python3',
+  ].filter(Boolean);
+  const pythonBin = candidates.find(bin => (
+    (bin === 'python3' || fs.existsSync(bin)) &&
+    spawnSync(bin, ['-c', 'import fastapi, httpx, numpy'], { encoding: 'utf8' }).status === 0
+  )) || candidates.find(bin => bin === 'python3' || fs.existsSync(bin)) || 'python3';
+  const hasFastApi = spawnSync(pythonBin, ['-c', 'import fastapi, httpx, numpy'], { encoding: 'utf8' }).status === 0;
+
+  const corePyScript = `
+import os, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(path.join(ROOT_DIR, 'embedding-service'))})
+from sisic_embed import jobqueue, store
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    tmp = Path(tmpdir)
+    db_file = tmp / "clips.sqlite"
+    db_file.write_bytes(b"")
+    os.chmod(db_file, 0o644)
+    con = store.connect(str(db_file))
+    con.close()
+    assert (db_file.stat().st_mode & 0o777) == 0o600, f"Expected 0600 on db, got {oct(db_file.stat().st_mode)}"
+
+    qcon = jobqueue.connect(str(tmp / "queue_limit.sqlite"))
+    jobqueue.enqueue(qcon, "f1", "a::1", 0, "m", 0, "/tmp/1", max_queued=2)
+    jobqueue.enqueue(qcon, "f2", "a::2", 0, "m", 0, "/tmp/2", max_queued=2)
+    try:
+        jobqueue.enqueue(qcon, "f3", "a::3", 0, "m", 0, "/tmp/3", max_queued=2)
+        raise AssertionError("Expected QueueFullError")
+    except jobqueue.QueueFullError:
+        pass
+    qcon.close()
+`;
+  const coreRes = spawnSync(pythonBin, ['-c', corePyScript], { encoding: 'utf8' });
+  assert.equal(coreRes.status, 0, `Python SQLite/jobqueue security test failed:\n${coreRes.stderr || coreRes.stdout}`);
+
+  if (!hasFastApi) {
+    t.skip('fastapi/httpx not installed in available python3 environment (SQLite 0600 & queue limits still verified)');
+    return;
+  }
 
   const pyScript = `
 import base64

@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { queueItemKey } from '../queueManager.js';
 import { X, Shuffle, Repeat, Clock3, AlertTriangle, Cloud, Trash2, ChevronUp, ChevronDown, GripVertical, Search } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus';
@@ -35,8 +35,21 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
   const drag = useRef(null);
   const listRef = useRef(null);
   const positions = useRef(new Map());
-  const filtered = queue.map((song, position) => ({ song, position })).slice(queueIndex + 1)
-    .filter(({ song }) => `${song.track} ${song.artist} ${song.album || ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const searchableUpcoming = useMemo(
+    () => queue.slice(queueIndex + 1).map((song, idx) => ({
+      song,
+      position: queueIndex + 1 + idx,
+      searchText: `${song.track || ''} ${song.artist || ''} ${song.album || ''}`.toLocaleLowerCase(),
+    })),
+    [queue, queueIndex],
+  );
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filtered = useMemo(
+    () => (normalizedQuery
+      ? searchableUpcoming.filter(item => item.searchText.includes(normalizedQuery))
+      : searchableUpcoming),
+    [searchableUpcoming, normalizedQuery],
+  );
   const upcoming = filtered.slice(0, limit);
   useLayoutEffect(() => {
     const rows = [...(listRef.current?.querySelectorAll('[data-song-key]') || [])];
