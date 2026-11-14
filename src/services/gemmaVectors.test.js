@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { db } from '../db.js';
+import { getPreferredVectorSpace, loadLearnedAudioEmbeddings } from './embeddingService.js';
+import { transitionCost } from './flowPath.js';
 import {
   GEMMA2_DIMENSIONS,
   GEMMA2_MODEL,
@@ -262,6 +264,32 @@ test('imports Recommender v3 int8 base64 vectors and boundary vectors with high 
     assert.equal(saved[0].startVector.length, RECS_V3_BOUNDARY_DIMENSIONS);
     assert.ok(saved[0].endVector[3] > 0.99);
     assert.equal(typeof loadPreferredSongVectors, 'function');
+
+    const space = getPreferredVectorSpace(saved);
+    assert.equal(space.model, RECS_V3_MODEL);
+    assert.equal(space.dimensions, RECS_V3_DIMENSIONS);
+
+    const viaLoader = await loadLearnedAudioEmbeddings({
+      model: RECS_V3_MODEL,
+      dimensions: RECS_V3_DIMENSIONS,
+      boundaryDimensions: RECS_V3_BOUNDARY_DIMENSIONS,
+      encoding: 'int8-b64',
+      songs: [{ songKey: 'v3-song', vectorI8: vEnc.b64, vectorScale: vEnc.scale }],
+    }, [{ songKey: 'v3-song', artist: 'A', track: 'One' }]);
+    assert.equal(viaLoader.imported, 1);
+
+    // Mismatched 64d end vs 128d full fallback vector falls back cleanly to 128d vector cosine
+    const global128A = new Array(128).fill(0);
+    global128A[100] = 1;
+    const global128B = new Array(128).fill(0);
+    global128B[100] = 1;
+    const end64A = new Array(64).fill(0);
+    end64A[0] = 1;
+    const costMatchGlobal = transitionCost(
+      { vector: global128A, end: end64A, bpm: 120, key: '8A', energy: 0.5 },
+      { vector: global128B, start: null, bpm: 120, key: '8A', energy: 0.5 },
+    );
+    assert.ok(Math.abs(costMatchGlobal - 0) < 1e-6);
   } finally {
     db.songVectors.bulkPut = originalBulkPut;
     db.songVectors.put = originalPut;

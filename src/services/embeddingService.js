@@ -1,7 +1,7 @@
 import { db, saveSongEmbedding, updateSongPipelineStatus } from '../db.js';
 import { defaultSisicEmbeddingProvider } from './tasteEmbeddingService.js';
 import { validateAndNormalizeVector } from './contextualRecommendationService.js';
-import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, importGemmaVectors } from './gemmaVectors.js';
+import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, RECS_V3_DIMENSIONS, RECS_V3_MODEL, importGemmaVectors } from './gemmaVectors.js';
 
 export const DEFAULT_AUDIO_EMBEDDING_MODEL = Object.freeze({
   provider: 'local-mac-worker',
@@ -13,6 +13,12 @@ export const DEFAULT_AUDIO_EMBEDDING_MODEL = Object.freeze({
 });
 
 export const EMBEDDING_PROVIDERS = Object.freeze({
+  recsV3: Object.freeze({
+    model: RECS_V3_MODEL,
+    dimensions: RECS_V3_DIMENSIONS,
+    provider: 'sisic-recs-v3-pack',
+    vectorType: 'learned-audio',
+  }),
   embeddinggemma2: Object.freeze({
     model: GEMMA2_MODEL,
     dimensions: GEMMA2_DIMENSIONS,
@@ -24,6 +30,9 @@ export const EMBEDDINGGEMMA2_VECTOR_SPACE = EMBEDDING_PROVIDERS.embeddinggemma2;
 
 export function getPreferredVectorSpace(rows = []) {
   const items = Array.isArray(rows) ? rows : [];
+  if (items.some(row => (row.embeddingModel || row.model || row.embeddingModelId) === RECS_V3_MODEL)) {
+    return EMBEDDING_PROVIDERS.recsV3;
+  }
   if (items.some(row => (row.embeddingModel || row.model || row.embeddingModelId) === GEMMA2_MODEL)) {
     return EMBEDDINGGEMMA2_VECTOR_SPACE;
   }
@@ -131,7 +140,7 @@ export function getAudioEmbeddingProvider() {
 }
 
 export async function loadLearnedAudioEmbeddings(records = [], librarySongs = []) {
-  if (records && !Array.isArray(records) && records.model === GEMMA2_MODEL) {
+  if (records && !Array.isArray(records) && (records.model === GEMMA2_MODEL || records.model === RECS_V3_MODEL)) {
     return importGemmaVectors(records, librarySongs);
   }
   if (!Array.isArray(records) || !records.length) return 0;

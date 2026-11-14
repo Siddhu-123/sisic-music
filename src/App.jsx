@@ -37,7 +37,7 @@ import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
 import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import { computeUpNextRecommendationsAsync } from './services/recsWorkerClient.js';
-import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, importGemmaVectors, loadPreferredSongVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
+import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, RECS_V3_DIMENSIONS, RECS_V3_MODEL, importGemmaVectors, loadPreferredSongVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
 import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
 import { getActiveRadio } from './services/infiniteRadio.js';
@@ -1420,7 +1420,9 @@ function App() {
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
-      if (payload?.model !== GEMMA2_MODEL || payload?.dimensions !== GEMMA2_DIMENSIONS || !Array.isArray(payload?.songs)) {
+      const isSupportedModel = (payload?.model === GEMMA2_MODEL && payload?.dimensions === GEMMA2_DIMENSIONS)
+        || (payload?.model === RECS_V3_MODEL && payload?.dimensions === RECS_V3_DIMENSIONS);
+      if (!isSupportedModel || !Array.isArray(payload?.songs)) {
         throw new Error('This file is not a supported EmbeddingGemma vectors export.');
       }
       const result = await importGemmaVectors(payload, allSongs);
@@ -1922,7 +1924,7 @@ function App() {
               <button
                 type="button"
                 className="sidebar__signout-btn"
-                onClick={logout}
+                onClick={() => { player.stop(); logout(); }}
                 disabled={isAuthorizing}
                 title="Sign out of Google Drive"
                 aria-label="Sign out of Google Drive"
@@ -2574,7 +2576,7 @@ function App() {
                 Equalizer
               </button>
               {(isAuthenticated || hasAuthorizedSession) && (
-                <button type="button" role="menuitem" onClick={() => { setIsMobileMoreOpen(false); logout(); }} disabled={isAuthorizing}>
+                <button type="button" role="menuitem" onClick={() => { setIsMobileMoreOpen(false); player.stop(); logout(); }} disabled={isAuthorizing}>
                   <LogOut size={18} />
                   Sign out
                 </button>

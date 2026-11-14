@@ -123,6 +123,10 @@ export function useAuth() {
       if (isSameOriginAuthAvailable()) {
         const session = await checkServerSession();
         canRefresh = Boolean(session?.authenticatedSession);
+        if (canRefresh && !cancelled) {
+          setHasAuthorizedSession(true);
+          setSignedOutExplicitly(false);
+        }
       }
       if (!canRefresh) return false;
       const refreshed = await driveService.refreshTokenSilently();

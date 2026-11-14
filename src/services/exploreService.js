@@ -177,7 +177,9 @@ export function buildExploreMixes(songs = [], {
     if (event.songKey) playCountByKey.set(event.songKey, (playCountByKey.get(event.songKey) || 0) + 1);
   }
   const hasGemma = gemmaVectors instanceof Map && gemmaVectors.size > 0;
-  const dimensions = hasGemma ? gemmaVectors.values().next().value?.vector?.length : null;
+  const firstGemmaRow = hasGemma ? gemmaVectors.values().next().value : null;
+  const dimensions = firstGemmaRow?.vector?.length || null;
+  const targetModel = firstGemmaRow?.embeddingModel || 'embeddinggemma-2@fp32/clip30/v1';
   const sessionSteer = hasGemma ? createSessionSteer() : null;
   if (sessionSteer) currentSessionEvents(playbackEvents).forEach(event => {
     const vector = gemmaVectors.get(event.songKey)?.vector;
@@ -186,7 +188,7 @@ export function buildExploreMixes(songs = [], {
   });
   const profile = buildContextualTasteProfile(pool, playbackEvents, {
     now, currentContext, likedSongKeys: liked, gemmaVectors,
-    ...(hasGemma ? { targetSpace: 'gemma', targetModel: 'embeddinggemma-2@fp32/clip30/v1', targetDimensions: dimensions } : {}),
+    ...(hasGemma ? { targetSpace: 'gemma', targetModel, targetDimensions: dimensions } : {}),
   });
   const ranked = rankContextualSongs(pool, {
     profile,

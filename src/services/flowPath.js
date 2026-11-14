@@ -47,7 +47,11 @@ function energyDelta(a, b) {
 /** Lower transition costs indicate a smoother handoff from a to b. */
 export function transitionCost(a, b, opts = {}) {
   const weights = { ...DEFAULT_WEIGHTS, ...opts };
-  const similarity = 1 - cosine(endpoint(a, 'end'), endpoint(b, 'start'));
+  const endVec = endpoint(a, 'end');
+  const startVec = endpoint(b, 'start');
+  const similarity = 1 - (endVec && startVec && endVec.length === startVec.length
+    ? cosine(endVec, startVec)
+    : cosine(a?.vector, b?.vector));
   const tempo = tempoDistance(a?.bpm, b?.bpm);
   const key = keyDistance(a?.key, b?.key);
   const energy = energyDelta(a?.energy, b?.energy);
