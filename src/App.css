@@ -6425,6 +6425,48 @@ body,
   flex: 1 1 auto;
 }
 
+.sidebar__top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sidebar__signout-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm, 0 2px 6px rgba(15, 23, 42, 0.08));
+  transition: color 0.18s ease, background 0.18s ease, transform 0.14s ease;
+}
+
+.sidebar__signout-btn:hover:not(:disabled) {
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.sidebar__signout-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+:root[data-theme="dark"] .sidebar__signout-btn {
+  background: rgba(20, 30, 52, 0.85);
+  border-color: rgba(56, 92, 160, 0.36);
+  color: #94a3b8;
+}
+
+:root[data-theme="dark"] .sidebar__signout-btn:hover:not(:disabled) {
+  color: #f8fafc;
+}
+
 .mobile-more-theme-row {
   display: flex;
   align-items: center;

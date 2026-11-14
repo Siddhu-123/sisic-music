@@ -1917,11 +1917,11 @@ function App() {
           >
             <span>♪</span> Sisic Music
           </button>
-          <div className="sidebar__top-actions" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div className="sidebar__top-actions">
             {(isAuthenticated || hasAuthorizedSession) && (
               <button
                 type="button"
-                className="theme-toggle"
+                className="sidebar__signout-btn"
                 onClick={logout}
                 disabled={isAuthorizing}
                 title="Sign out of Google Drive"

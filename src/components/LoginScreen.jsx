@@ -26,11 +26,15 @@ export function LoginScreen({ onLogin, error, busy = false, setupStatus = {} }) 
             </span>
           </div>
           <p className="setup-card__copy">
-            GitHub Pages hosts the interface only. Your music stays private in your Google Drive and is accessed after you authorize this site.
+            {setupStatus.hasOptionHAuth
+              ? 'This Cloudflare Pages app keeps your Google Drive credentials sealed server-side in a D1 AEAD vault behind an HttpOnly cookie. Your music stays private in your Drive.'
+              : 'GitHub Pages hosts the interface only. Your music stays private in your Google Drive and is accessed after you authorize this site.'}
           </p>
           <ol className="setup-card__steps">
             <li>Create a Google Cloud OAuth web client and enable the Google Drive API.</li>
-            <li>Add this GitHub Pages address as an authorized JavaScript origin.</li>
+            <li>{setupStatus.hasOptionHAuth
+              ? 'Add this site’s /api/auth/callback URL as an authorized OAuth redirect URI and set CLIENT_ID, CLIENT_SECRET, and AUTH_ENC_KEY secrets in Cloudflare Pages.'
+              : 'Add this GitHub Pages address as an authorized JavaScript origin.'}</li>
             <li>Build the site with the client ID, Drive folder ID, and library JSON file ID.</li>
           </ol>
           <div className="setup-card__links">
