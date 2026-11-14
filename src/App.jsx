@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, MoreHorizontal, Plus, Trash2 } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, LogOut, MoreHorizontal, Plus, Trash2 } from 'lucide-react';
 import {
   addSongToPlaylist,
   createPlaylist,
@@ -284,7 +284,7 @@ function playableStatus(song) {
 }
 
 function App() {
-  const { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error: authError, login, syncLibrary, setupStatus } = useAuth();
+  const { isAuthenticated, hasAuthorizedSession, signedOutExplicitly, isAuthorizing, isSyncing, syncStatus, error: authError, login, logout, syncLibrary, setupStatus } = useAuth();
   const player = useAudioPlayer();
   const { toasts, addToast } = useToast();
 
@@ -1864,7 +1864,7 @@ function App() {
     }
   }, []);
 
-  if (!isAuthenticated && !hasAuthorizedSession) {
+  if (signedOutExplicitly || (!isAuthenticated && !hasAuthorizedSession && allSongs.length === 0)) {
     return <LoginScreen onLogin={login} error={authError} busy={isAuthorizing} setupStatus={setupStatus} />;
   }
 
@@ -1917,7 +1917,21 @@ function App() {
           >
             <span>♪</span> Sisic Music
           </button>
-          <ThemeToggle theme={theme} onToggle={toggleTheme} />
+          <div className="sidebar__top-actions" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {(isAuthenticated || hasAuthorizedSession) && (
+              <button
+                type="button"
+                className="theme-toggle"
+                onClick={logout}
+                disabled={isAuthorizing}
+                title="Sign out of Google Drive"
+                aria-label="Sign out of Google Drive"
+              >
+                <LogOut size={15} />
+              </button>
+            )}
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+          </div>
         </div>
 
         <nav className="sidebar__nav" aria-label="Main navigation">
@@ -2559,6 +2573,12 @@ function App() {
                 <Sliders size={18} />
                 Equalizer
               </button>
+              {(isAuthenticated || hasAuthorizedSession) && (
+                <button type="button" role="menuitem" onClick={() => { setIsMobileMoreOpen(false); logout(); }} disabled={isAuthorizing}>
+                  <LogOut size={18} />
+                  Sign out
+                </button>
+              )}
               <div className="mobile-more-theme-row">
                 <span>Theme</span>
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />

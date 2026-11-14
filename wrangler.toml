@@ -1,0 +1,12 @@
+name = "sisic-music"
+pages_build_output_dir = "dist"
+compatibility_date = "2024-09-01"
+
+[vars]
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "sisic-auth-vault"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"

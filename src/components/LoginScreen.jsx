@@ -41,7 +41,7 @@ export function LoginScreen({ onLogin, error, busy = false, setupStatus = {} }) 
               Enable Drive API <ExternalLink size={13} />
             </a>
           </div>
-          <p className="setup-card__permissions"><strong>Session mode:</strong> {setupStatus.hasAuthWorker ? 'Cloudflare Auth Relay active — background token refresh keeps you logged in across refreshes.' : 'Client-only session — tokens expire after 1 hour.'}</p>
+          <p className="setup-card__permissions"><strong>Session mode:</strong> {setupStatus.hasOptionHAuth ? 'Same-origin D1 Encrypted Session Vault + HttpOnly cookie active — stays signed in across reloads, PWAs, and multi-day wakes.' : setupStatus.hasAuthWorker ? 'Cloudflare Auth Relay active — background token refresh keeps you logged in across refreshes.' : 'Client-only session — tokens expire after 1 hour.'}</p>
           <p className="setup-card__automation"><strong>Automated:</strong> Google sign-in, Drive authorization, library sync, and Mac-worker source preparation. <strong>One-time manual step:</strong> Google Cloud OAuth and build variables.</p>
           {missing.length > 0 && <p className="setup-card__missing">Missing from this build: {missing.join(', ')}</p>}
         </div>

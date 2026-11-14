@@ -2,8 +2,44 @@ const MAX_FILE_METADATA_ENTRIES = 128;
 
 let driveAccessToken = '';
 let driveTokenVersion = '';
+let cookieRefreshPromise = null;
 const fileMetadataCache = new Map();
 const tokenWaiters = new Set();
+
+async function refreshTokenViaSessionCookie() {
+  if (cookieRefreshPromise) return await cookieRefreshPromise;
+  if (typeof fetch !== 'function' || !self.location?.origin) return false;
+  cookieRefreshPromise = (async () => {
+    try {
+      const refreshUrl = new URL('./api/auth/refresh', self.location.href).toString();
+      const response = await fetch(refreshUrl, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          'X-Sisic-SW': '1',
+        },
+        body: '{}',
+      });
+      if (!response?.ok) return false;
+      const data = await response.json().catch(() => null);
+      const nextToken = typeof data?.access_token === 'string' ? data.access_token.trim() : '';
+      if (!nextToken || nextToken.length > 4096) return false;
+      const nextVersion = `sw-${Date.now()}`;
+      if (nextToken !== driveAccessToken) fileMetadataCache.clear();
+      driveAccessToken = nextToken;
+      driveTokenVersion = nextVersion;
+      tokenWaiters.forEach(resolve => resolve(true));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      cookieRefreshPromise = null;
+    }
+  })();
+  return await cookieRefreshPromise;
+}
 
 function rememberFileMetadata(fileId, metadata) {
   fileMetadataCache.delete(fileId);
@@ -128,7 +164,7 @@ function partialContentRange(start, end, totalSize) {
 }
 
 async function streamDriveFile(fileId, request) {
-  if (!driveAccessToken && !(await requestDriveToken())) {
+  if (!driveAccessToken && !(await requestDriveToken()) && !(await refreshTokenViaSessionCookie())) {
     return new Response('Drive connection is not ready.', {
       status: 503,
       headers: {
@@ -140,13 +176,18 @@ async function streamDriveFile(fileId, request) {
   }
 
   try {
-    const metadata = await getFileMetadata(fileId, request.signal);
+    let metadata = await getFileMetadata(fileId, request.signal);
     const rangeHeader = request.headers.get('Range');
     const range = requestedRange(rangeHeader, metadata.size);
     if (!range) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${metadata.size}`, 'Cache-Control': 'no-store' } });
     const { start, end } = range;
-    const requestVersion = driveTokenVersion;
-    const upstream = await fetchDriveRange(fileId, start, end, request.signal);
+    let requestVersion = driveTokenVersion;
+    let upstream = await fetchDriveRange(fileId, start, end, request.signal);
+
+    if (upstream.status === 401 && await refreshTokenViaSessionCookie()) {
+      requestVersion = driveTokenVersion;
+      upstream = await fetchDriveRange(fileId, start, end, request.signal);
+    }
 
     if (!upstream.ok && upstream.status !== 206) {
       const message = await upstream.text();
@@ -190,11 +231,11 @@ async function streamDriveFile(fileId, request) {
 }
 
 async function getFileMetadata(fileId, signal) {
-  const requestVersion = driveTokenVersion;
+  let requestVersion = driveTokenVersion;
   const cached = fileMetadataCache.get(fileId);
   if (cached) return rememberFileMetadata(fileId, cached);
 
-  const response = await fetch(
+  let response = await fetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=size,mimeType`,
     {
       cache: 'no-store',
@@ -204,6 +245,20 @@ async function getFileMetadata(fileId, signal) {
       },
     }
   );
+
+  if (response.status === 401 && await refreshTokenViaSessionCookie()) {
+    requestVersion = driveTokenVersion;
+    response = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=size,mimeType`,
+      {
+        cache: 'no-store',
+        signal,
+        headers: {
+          Authorization: `Bearer ${driveAccessToken}`,
+        },
+      }
+    );
+  }
 
   if (!response.ok) {
     const message = await response.text();

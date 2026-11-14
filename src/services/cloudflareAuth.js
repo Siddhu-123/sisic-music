@@ -26,8 +26,58 @@ export function getAuthWorkerUrl() {
   return url.replace(/\/$/, '');
 }
 
+export function isSameOriginAuthAvailable() {
+  const disabled = (import.meta.env?.VITE_DISABLE_SAME_ORIGIN_AUTH || globalThis.process?.env?.VITE_DISABLE_SAME_ORIGIN_AUTH || '') === '1';
+  if (disabled) return false;
+  if (getAuthWorkerUrl()) return false;
+  if (typeof window === 'undefined' || !window.location?.protocol) return false;
+  return window.location.protocol === 'http:' || window.location.protocol === 'https:';
+}
+
 export function isAuthWorkerConfigured() {
   return Boolean(getAuthWorkerUrl());
+}
+
+export function isAuthBackendAvailable() {
+  return isAuthWorkerConfigured() || isSameOriginAuthAvailable();
+}
+
+export function getAuthApiBaseUrl() {
+  const workerUrl = getAuthWorkerUrl();
+  if (workerUrl) return `${workerUrl}/auth`;
+  if (isSameOriginAuthAvailable()) return '/api/auth';
+  return '';
+}
+
+export function buildTopLevelLoginUrl({ prompt = 'select_account', returnTo = '/' } = {}) {
+  const baseUrl = getAuthApiBaseUrl();
+  if (!baseUrl) return '';
+  const safeReturnTo = String(returnTo || '/').startsWith('/') && !String(returnTo || '/').startsWith('//') ? returnTo : '/';
+  const params = new URLSearchParams({ prompt: prompt === 'consent' ? 'consent' : 'select_account', returnTo: safeReturnTo });
+  return `${baseUrl}/login?${params.toString()}`;
+}
+
+export function startTopLevelLogin(options = {}) {
+  const target = buildTopLevelLoginUrl(options);
+  if (!target || typeof window === 'undefined') return false;
+  window.location.assign(target);
+  return true;
+}
+
+export async function checkServerSession({ fetchImpl = fetch } = {}) {
+  const baseUrl = getAuthApiBaseUrl();
+  if (!baseUrl || typeof fetchImpl !== 'function') return { authenticatedSession: false };
+  try {
+    const res = await fetchImpl(`${baseUrl}/session`, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { 'Cache-Control': 'no-store' },
+    });
+    if (!res?.ok) return { authenticatedSession: false };
+    return await res.json().catch(() => ({ authenticatedSession: false }));
+  } catch {
+    return { authenticatedSession: false };
+  }
 }
 
 export function getStoredRefreshToken() {
@@ -84,10 +134,10 @@ export function clearStoredRefreshToken() {
  * Keeps any returned refresh token only in volatile memory (never in localStorage).
  */
 export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') {
-  const workerUrl = getAuthWorkerUrl();
-  if (!workerUrl) throw new Error('Cloudflare Auth Worker URL is not configured.');
+  const baseUrl = getAuthApiBaseUrl();
+  if (!baseUrl) throw new Error('Cloudflare Auth Worker URL is not configured.');
 
-  const res = await fetch(`${workerUrl}/auth/exchange`, {
+  const res = await fetch(`${baseUrl}/exchange`, {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -112,30 +162,35 @@ export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') 
 }
 
 /**
- * Silently refresh the access token using the volatile refresh token or server session.
+ * Silently refresh the access token using the same-origin HttpOnly session cookie (Option H)
+ * or legacy volatile refresh token when pointing at a standalone auth worker.
  */
-export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefreshToken()) {
-  const workerUrl = getAuthWorkerUrl();
-  if (!workerUrl) throw new Error('Cloudflare Auth Worker URL is not configured.');
-  if (!refreshToken) throw new Error('No refresh token available.');
+export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefreshToken(), { fetchImpl = fetch } = {}) {
+  const baseUrl = getAuthApiBaseUrl();
+  if (!baseUrl) throw new Error('Cloudflare Auth Worker URL is not configured.');
+  const sameOrigin = isSameOriginAuthAvailable();
+  if (!refreshToken && !sameOrigin) throw new Error('No refresh token available.');
 
-  const res = await fetch(`${workerUrl}/auth/refresh`, {
+  const res = await fetchImpl(`${baseUrl}/refresh`, {
     method: 'POST',
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     },
-    body: JSON.stringify({ refresh_token: refreshToken }),
+    body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401 || data.error === 'invalid_grant') {
+    if (res.status === 401 || data.error === 'invalid_grant' || data.error === 'session_missing' || data.error === 'session_expired') {
       clearStoredRefreshToken();
     }
     const errorMsg = data.message || data.error || `Token refresh failed with status ${res.status}`;
-    throw new Error(errorMsg);
+    const err = new Error(errorMsg);
+    err.status = res.status;
+    err.code = data.error || '';
+    throw err;
   }
 
   clearPersistentRefreshToken();
@@ -147,22 +202,24 @@ export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefre
 }
 
 /**
- * Revoke the Google OAuth token/grant remotely (via the auth worker if configured
- * and via Google's OAuth2 revocation endpoint) while always clearing local token state.
+ * Revoke the Google OAuth token/grant remotely (via the Option H /api/auth/logout vault delete +
+ * upstream revoke, or legacy worker /auth/revoke + Google OAuth2 revoke) and clear local state.
  */
 export async function revokeGoogleToken(token = getStoredRefreshToken(), { fetchImpl = fetch } = {}) {
   const targetToken = String(token || getStoredRefreshToken() || '').trim();
   clearStoredRefreshToken();
 
-  const workerUrl = getAuthWorkerUrl();
+  const baseUrl = getAuthApiBaseUrl();
+  const sameOrigin = isSameOriginAuthAvailable();
   let workerRevoked = false;
   let googleRevoked = false;
   let attempted = false;
 
-  if (workerUrl && typeof fetchImpl === 'function') {
+  if (baseUrl && typeof fetchImpl === 'function') {
     attempted = true;
     try {
-      const workerRes = await fetchImpl(`${workerUrl}/auth/revoke`, {
+      const endpoint = sameOrigin ? `${baseUrl}/logout` : `${baseUrl}/revoke`;
+      const workerRes = await fetchImpl(endpoint, {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -172,14 +229,16 @@ export async function revokeGoogleToken(token = getStoredRefreshToken(), { fetch
         body: JSON.stringify(targetToken ? { token: targetToken } : {}),
       });
       if (workerRes?.ok) {
-        workerRevoked = true;
+        const body = await workerRes.json().catch(() => ({}));
+        workerRevoked = sameOrigin ? Boolean(body?.revoked ?? true) : true;
       }
     } catch {
-      // Fall through to direct Google revocation
+      // Fall through to direct Google revocation when client holds a token
     }
   }
 
-  if (targetToken && typeof fetchImpl === 'function') {
+  // Same-origin /api/auth/logout already unsealed and revoked the upstream grant server-side.
+  if (!(sameOrigin && workerRevoked) && targetToken && typeof fetchImpl === 'function') {
     attempted = true;
     try {
       const googleRes = await fetchImpl('https://oauth2.googleapis.com/revoke', {

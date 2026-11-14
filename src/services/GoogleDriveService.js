@@ -12,7 +12,9 @@ import { getKnownDurationSeconds } from './downloadPolicy.js';
 import { getDriveAudioStreamUrl } from './driveStream.js';
 import { sanitizeRhythm } from './djBeatMath.js';
 import {
+  isAuthBackendAvailable,
   isAuthWorkerConfigured,
+  isSameOriginAuthAvailable,
   getStoredRefreshToken,
   exchangeCodeWithWorker,
   refreshAccessTokenWithWorker,
@@ -456,9 +458,10 @@ export class GoogleDriveService {
   }
 
   async refreshTokenSilently() {
-    if (!isAuthWorkerConfigured()) return false;
+    if (!isAuthBackendAvailable()) return false;
     const refreshToken = getStoredRefreshToken();
-    if (!refreshToken) return false;
+    const cookieBacked = isSameOriginAuthAvailable();
+    if (!refreshToken && !cookieBacked) return false;
     if (this.tokenRefreshPromise) return this.tokenRefreshPromise;
 
     this.tokenRefreshPromise = (async () => {
@@ -470,6 +473,10 @@ export class GoogleDriveService {
         }
         return false;
       } catch (err) {
+        if (err?.status === 401 || err?.code === 'invalid_grant' || err?.code === 'session_expired') {
+          safeStorageRemove(AUTH_HISTORY_STORAGE_KEY);
+          this.hasAuthorizedSession = false;
+        }
         console.warn('Silent token refresh failed:', err);
         return false;
       } finally {
@@ -489,7 +496,7 @@ export class GoogleDriveService {
     this.hasAuthorizedSession = false;
     this.requireAuthentication(new Error('User signed out.'));
 
-    if (!tokenToRevoke && !isAuthWorkerConfigured()) {
+    if (!tokenToRevoke && !isAuthBackendAvailable()) {
       return { signedOut: true, revoked: false, warning: '' };
     }
 
@@ -582,7 +589,7 @@ export class GoogleDriveService {
 
   async getValidAccessToken() {
     if (this.isAuthenticated) return this.accessToken;
-    if (isAuthWorkerConfigured() && getStoredRefreshToken()) {
+    if (isAuthBackendAvailable() && (isSameOriginAuthAvailable() || getStoredRefreshToken())) {
       const refreshed = await this.refreshTokenSilently();
       if (refreshed && this.isAuthenticated) return this.accessToken;
     }
@@ -598,7 +605,7 @@ export class GoogleDriveService {
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `Bearer ${token}`);
     let resp = await fetch(url, { ...options, headers });
-    if (resp.status === 401 && isAuthWorkerConfigured() && getStoredRefreshToken()) {
+    if (resp.status === 401 && isAuthBackendAvailable() && (isSameOriginAuthAvailable() || getStoredRefreshToken())) {
       try {
         const refreshed = await this.refreshTokenSilently();
         if (refreshed) {

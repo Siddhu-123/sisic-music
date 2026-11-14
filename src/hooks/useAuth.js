@@ -2,7 +2,13 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { driveService } from '../services/GoogleDriveService';
 import { workerAuthMessageAction } from '../services/driveAuth';
 import { syncLibraryToDb, requestPersistentStorage } from '../db';
-import { isAuthWorkerConfigured, getStoredRefreshToken } from '../services/cloudflareAuth';
+import {
+  checkServerSession,
+  getStoredRefreshToken,
+  isAuthBackendAvailable,
+  isSameOriginAuthAvailable,
+  startTopLevelLogin,
+} from '../services/cloudflareAuth';
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
@@ -62,7 +68,8 @@ export function getAuthSetupStatus() {
     hasClientId: Boolean(CLIENT_ID),
     hasDriveFolder: Boolean(DRIVE_FOLDER_ID),
     hasLibraryFile: Boolean(SPOTIFY_JSON_FILE_ID),
-    hasAuthWorker: isAuthWorkerConfigured(),
+    hasAuthWorker: isAuthBackendAvailable(),
+    hasOptionHAuth: isSameOriginAuthAvailable(),
     hasStoredRefreshToken: Boolean(getStoredRefreshToken()),
   };
 }
@@ -71,41 +78,72 @@ function missingConfigMessage(missing = getMissingConfig()) {
   return missing.length > 0 ? `Missing required config: ${missing.join(', ')}.` : '';
 }
 
+function readInitialAuthError() {
+  try {
+    const authErr = new URL(window.location.href).searchParams.get('auth_error');
+    return authErr ? `Google sign-in returned: ${authErr.replace(/_/g, ' ')}` : '';
+  } catch {
+    return '';
+  }
+}
+
 export function useAuth() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => driveService.isAuthenticated);
   const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || DEV_UI_PREVIEW || Boolean(getStoredRefreshToken()));
   const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
-  const [error, setError] = useState(() => missingConfigMessage()
+  const [signedOutExplicitly, setSignedOutExplicitly] = useState(false);
+  const [error, setError] = useState(() => readInitialAuthError()
+    || missingConfigMessage()
     || ((driveService.hasAuthorizedSession || DEV_UI_PREVIEW || Boolean(getStoredRefreshToken())) && !driveService.isAuthenticated ? RECONNECT_MESSAGE : ''));
   const hasSyncedOnMount = useRef(false);
 
   useEffect(() => {
-    const missing = getMissingConfig();
-    if (missing.length > 0) return undefined;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('auth_error')) {
+        url.searchParams.delete('auth_error');
+        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+      }
+    } catch {
+      // Ignore malformed location URLs
+    }
 
-    const hasStoredRefresh = isAuthWorkerConfigured() && Boolean(getStoredRefreshToken());
-    if (!driveService.hasAuthorizedSession && !hasStoredRefresh) return undefined;
+    const missing = getMissingConfig();
+    if (missing.length > 0 && !isSameOriginAuthAvailable()) return undefined;
+
+    const backendAvailable = isAuthBackendAvailable();
+    const shouldAttemptSilentRestore = backendAvailable || driveService.hasAuthorizedSession || Boolean(getStoredRefreshToken());
+    if (!shouldAttemptSilentRestore) return undefined;
     let cancelled = false;
     const init = async () => {
       try {
-        if (hasStoredRefresh && !driveService.isAuthenticated) {
-          const refreshed = await driveService.refreshTokenSilently();
-          if (refreshed && !cancelled) {
-            setIsAuthenticated(true);
-            setHasAuthorizedSession(true);
-            setError('');
-            driveService.syncTokenToServiceWorker();
-            return;
+        if (backendAvailable && !driveService.isAuthenticated && navigator.onLine !== false) {
+          let canRefresh = Boolean(driveService.hasAuthorizedSession || getStoredRefreshToken());
+          if (isSameOriginAuthAvailable()) {
+            const session = await checkServerSession();
+            canRefresh = Boolean(session?.authenticatedSession);
+          }
+          if (canRefresh) {
+            const refreshed = await driveService.refreshTokenSilently();
+            if (refreshed && !cancelled) {
+              setIsAuthenticated(true);
+              setHasAuthorizedSession(true);
+              setSignedOutExplicitly(false);
+              setError('');
+              driveService.syncTokenToServiceWorker();
+              return;
+            }
           }
         }
 
+        if (!CLIENT_ID) return;
         await loadGoogleIdentityServices();
         if (cancelled) return;
         driveService.initTokenClient(CLIENT_ID);
         driveService.syncTokenToServiceWorker();
-        if (driveService.hasAuthorizedSession && !driveService.isAuthenticated) {
+        if (driveService.hasAuthorizedSession && !driveService.isAuthenticated && navigator.onLine !== false) {
           driveService.requestToken({ prompt: '' })
             .then(() => {
               if (cancelled) return;
@@ -119,7 +157,9 @@ export function useAuth() {
             });
         }
       } catch (error) {
-        if (!cancelled) setError(error instanceof Error ? error.message : 'Google sign-in could not load.');
+        if (!cancelled && navigator.onLine !== false) {
+          setError(error instanceof Error ? error.message : 'Google sign-in could not load.');
+        }
       }
     };
     const cancel = scheduleIdle(init);
@@ -165,26 +205,60 @@ export function useAuth() {
   }, []);
 
   useEffect(() => {
-    if (!isAuthenticated || !driveService.tokenExpiry) return undefined;
+    if (!isAuthBackendAvailable()) return undefined;
 
-    const refreshLeadTimeMs = isAuthWorkerConfigured() ? 60 * 1000 : 0;
-    const timeUntilExpiry = driveService.tokenExpiry - Date.now();
-    const delay = Math.max(0, timeUntilExpiry - refreshLeadTimeMs + 250);
+    const refreshIfStale = async () => {
+      if (navigator.onLine === false) return;
+      const expiringSoon = !driveService.isAuthenticated
+        || (driveService.tokenExpiry && (driveService.tokenExpiry - Date.now() < 120_000));
+      if (!expiringSoon) return;
+      if (isSameOriginAuthAvailable()) {
+        const session = await checkServerSession();
+        if (!session?.authenticatedSession) return;
+      } else if (!(driveService.hasAuthorizedSession || getStoredRefreshToken())) {
+        return;
+      }
+      const refreshed = await driveService.refreshTokenSilently();
+      if (refreshed) {
+        setIsAuthenticated(true);
+        setHasAuthorizedSession(true);
+        setSignedOutExplicitly(false);
+        setError('');
+      }
+    };
 
-    const timer = window.setTimeout(async () => {
-      if (isAuthWorkerConfigured() && getStoredRefreshToken()) {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') refreshIfStale().catch(() => {});
+    };
+    const handleOnline = () => { refreshIfStale().catch(() => {}); };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleOnline);
+    window.addEventListener('online', handleOnline);
+
+    let timer;
+    if (isAuthenticated && driveService.tokenExpiry) {
+      const timeUntilExpiry = driveService.tokenExpiry - Date.now();
+      const delay = Math.max(0, timeUntilExpiry - 60_000 + 250);
+      timer = window.setTimeout(async () => {
         const refreshed = await driveService.refreshTokenSilently();
         if (refreshed) {
           setIsAuthenticated(true);
           setError('');
           return;
         }
-      }
-      if (!driveService.isAuthenticated) {
-        driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
-      }
-    }, delay);
-    return () => window.clearTimeout(timer);
+        if (!driveService.isAuthenticated && navigator.onLine !== false) {
+          driveService.requireAuthentication(new Error('Google Drive authorization ended.'));
+        }
+      }, delay);
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleOnline);
+      window.removeEventListener('online', handleOnline);
+      if (timer) window.clearTimeout(timer);
+    };
   }, [isAuthenticated]);
 
   const syncLibrary = useCallback(async () => {
@@ -234,9 +308,19 @@ export function useAuth() {
   }, []);
 
   const login = useCallback(async () => {
+    setSignedOutExplicitly(false);
     setIsAuthorizing(true);
     try {
       setError('');
+      if (isSameOriginAuthAvailable()) {
+        const currentPath = `${window.location.pathname || '/'}${window.location.search || ''}`;
+        startTopLevelLogin({
+          prompt: driveService.hasAuthorizedSession ? 'select_account' : 'consent',
+          returnTo: currentPath,
+        });
+        return;
+      }
+
       const missing = getMissingConfig();
       if (missing.length > 0) {
         setError(missingConfigMessage(missing));
@@ -262,6 +346,20 @@ export function useAuth() {
     }
   }, [syncLibrary]);
 
+  const logout = useCallback(async () => {
+    setIsAuthorizing(true);
+    try {
+      const res = await driveService.logout();
+      setIsAuthenticated(false);
+      setHasAuthorizedSession(false);
+      setSignedOutExplicitly(true);
+      setSyncStatus('');
+      setError(res?.warning || '');
+    } finally {
+      setIsAuthorizing(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (isAuthenticated && !hasSyncedOnMount.current && !isSyncing) {
       const cancel = scheduleIdle(() => { hasSyncedOnMount.current = true; syncLibrary(); }, 1800);
@@ -270,5 +368,5 @@ export function useAuth() {
     return undefined;
   }, [isAuthenticated, isSyncing, syncLibrary]);
 
-  return { isAuthenticated, hasAuthorizedSession, isAuthorizing, isSyncing, syncStatus, error, login, syncLibrary, setupStatus: getAuthSetupStatus() };
+  return { isAuthenticated, hasAuthorizedSession, signedOutExplicitly, isAuthorizing, isSyncing, syncStatus, error, login, logout, syncLibrary, setupStatus: getAuthSetupStatus() };
 }
