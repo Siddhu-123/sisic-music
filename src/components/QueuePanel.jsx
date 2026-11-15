@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { queueItemKey } from '../queueManager.js';
+import { selectUpcomingQueueItems } from '../services/libraryViewModel.js';
 import { X, Shuffle, Repeat, Clock3, AlertTriangle, Cloud, Trash2, ChevronUp, ChevronDown, GripVertical, Search } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 
@@ -35,13 +36,14 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
   const drag = useRef(null);
   const listRef = useRef(null);
   const positions = useRef(new Map());
+  const upcomingStartIndex = player.currentSong ? queueIndex + 1 : Math.max(0, queueIndex);
   const searchableUpcoming = useMemo(
-    () => queue.slice(queueIndex + 1).map((song, idx) => ({
+    () => selectUpcomingQueueItems({ queue, queueIndex, currentSong: player.currentSong }).map(({ song, position }) => ({
       song,
-      position: queueIndex + 1 + idx,
+      position,
       searchText: `${song.track || ''} ${song.artist || ''} ${song.album || ''}`.toLocaleLowerCase(),
     })),
-    [queue, queueIndex],
+    [queue, queueIndex, player.currentSong],
   );
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = useMemo(
@@ -80,7 +82,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
     if (drag.current?.target) {
       const from = queue.findIndex(song => String(queueItemKey(song)) === drag.current.key);
       const to = queue.findIndex(song => String(queueItemKey(song)) === drag.current.target);
-      if (from > queueIndex && to > queueIndex) reorderQueue(from, to);
+      if (from >= upcomingStartIndex && to >= upcomingStartIndex) reorderQueue(from, to);
     }
     cancelDrag();
   };
@@ -116,6 +118,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
             className={`icon-btn queue-shuffle-btn ${shuffleMode !== 'off' ? 'queue-shuffle-btn--active' : ''}`}
             onClick={toggleShuffle}
             title={`Shuffle: ${SHUFFLE_LABELS[shuffleMode]}`}
+            aria-label={`Shuffle: ${SHUFFLE_LABELS[shuffleMode]}`}
           >
             <Shuffle size={16} />
             <span className="queue-shuffle-label">{SHUFFLE_LABELS[shuffleMode]}</span>
@@ -172,7 +175,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
 
       <div className="queue-section">
         <div className="queue-section__label">
-          Next Up {upcoming.length > 0 && `(${queue.length - queueIndex - 1})`}
+          Next Up {searchableUpcoming.length > 0 && `(${searchableUpcoming.length})`}
         </div>
         {upcoming.length === 0 ? (
           <div className="queue-empty">{query ? 'No matching tracks' : 'No upcoming tracks'}</div>
@@ -214,7 +217,7 @@ export function QueuePanel({ player, jobBySongKey, onClose, onRetry }) {
                 </div>
                 {renderStatus(song)}
                 <div className="queue-item__actions">
-                  <button className="icon-btn" disabled={queuePosition <= queueIndex + 1} onClick={() => reorderQueue(queuePosition, queuePosition - 1)} aria-label={`Move ${song.track} up`} title="Move up">
+                  <button className="icon-btn" disabled={queuePosition <= upcomingStartIndex} onClick={() => reorderQueue(queuePosition, queuePosition - 1)} aria-label={`Move ${song.track} up`} title="Move up">
                     <ChevronUp size={14} />
                   </button>
                   <button className="icon-btn" onClick={() => reorderQueue(queuePosition, queuePosition + 1)} disabled={queuePosition >= queue.length - 1} aria-label={`Move ${song.track} down`} title="Move down">

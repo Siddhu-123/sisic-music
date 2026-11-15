@@ -93,3 +93,20 @@ export function resolveLibrarySearchSongs({
   // Prefer Drive-ready songs above catalogue-only entries when relevance scores are similar.
   return [...matches].sort((a, b) => Number(Boolean(b?.driveFileId)) - Number(Boolean(a?.driveFileId)));
 }
+
+/**
+ * Returns the upcoming queue items with their backing queue positions.
+ * When `currentSong` is null (e.g. restored queue before selecting a track),
+ * `queue[queueIndex]` is not playing yet and stays first in `Next Up` so Home
+ * and the Queue drawer stay consistent.
+ */
+export function selectUpcomingQueueItems({ queue = [], queueIndex = 0, currentSong = null } = {}) {
+  const safeQueue = Array.isArray(queue) ? queue : [];
+  const safeIndex = Math.max(0, Number(queueIndex) || 0);
+  const startIndex = currentSong ? safeIndex + 1 : safeIndex;
+  if (startIndex >= safeQueue.length) return [];
+  return safeQueue.slice(startIndex).map((song, idx) => ({
+    song,
+    position: startIndex + idx,
+  }));
+}

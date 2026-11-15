@@ -2287,6 +2287,7 @@ function App() {
               gemmaVectors={gemmaVectors}
               likedSongKeys={canonicalLikedKeys}
               queue={player.queue}
+              queueIndex={player.queueIndex}
               currentSong={player.currentSong}
               onPlaySong={(song, list) => handlePlaySong(song, list)}
               onOpenTasteProfile={() => setIsTasteProfileOpen(true)}

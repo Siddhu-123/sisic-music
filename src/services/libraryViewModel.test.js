@@ -6,6 +6,7 @@ import {
   resolveEffectiveLibrarySongs,
   resolveLibrarySearchSongs,
   selectCanonicalDriveSongs,
+  selectUpcomingQueueItems,
 } from './libraryViewModel.js';
 
 describe('libraryViewModel', () => {
@@ -64,6 +65,18 @@ describe('libraryViewModel', () => {
     assert.equal(
       resolveLibrarySearchSongs({ searchQuery: 'Britney', selectedPlaylistKey: 'pl-1', playlistSongs: playlist, browseSongs: browse }).length,
       0,
+    );
+  });
+
+  it('keeps queueIndex track in upcoming items when no currentSong is selected, and excludes it when playing', () => {
+    const queue = [{ songKey: 'sky' }, { songKey: 'timeless' }, { songKey: 'blinding' }];
+    assert.deepEqual(
+      selectUpcomingQueueItems({ queue, queueIndex: 0, currentSong: null }).map(entry => [entry.song.songKey, entry.position]),
+      [['sky', 0], ['timeless', 1], ['blinding', 2]],
+    );
+    assert.deepEqual(
+      selectUpcomingQueueItems({ queue, queueIndex: 0, currentSong: queue[0] }).map(entry => [entry.song.songKey, entry.position]),
+      [['timeless', 1], ['blinding', 2]],
     );
   });
 });

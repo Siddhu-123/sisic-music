@@ -178,18 +178,18 @@ export function ExploreView({
       <section className="explore-filters" aria-label="Explore filters">
         <div className="explore-filter-row">
           <span>Genres</span>
-          <button type="button" className={!genre ? 'explore-chip is-active' : 'explore-chip'} onClick={() => setGenre('')}>All</button>
+          <button type="button" className={!genre ? 'explore-chip is-active' : 'explore-chip'} aria-pressed={!genre} onClick={() => setGenre('')}>All</button>
           {genres.map(facet => (
-            <button key={facet.label} type="button" className={genre === facet.label ? 'explore-chip is-active' : 'explore-chip'} onClick={() => { setGenre(current => current === facet.label ? '' : facet.label); setActiveMixId(''); }}>
+            <button key={facet.label} type="button" className={genre === facet.label ? 'explore-chip is-active' : 'explore-chip'} aria-pressed={genre === facet.label} onClick={() => { setGenre(current => current === facet.label ? '' : facet.label); setActiveMixId(''); }}>
               {facet.label}<small>{facet.count}</small>
             </button>
           ))}
         </div>
         <div className="explore-filter-row">
           <span>Moods</span>
-          <button type="button" className={!mood ? 'explore-chip is-active' : 'explore-chip'} onClick={() => setMood('')}>All</button>
+          <button type="button" className={!mood ? 'explore-chip is-active' : 'explore-chip'} aria-pressed={!mood} onClick={() => setMood('')}>All</button>
           {moods.map(facet => (
-            <button key={facet.label} type="button" className={mood === facet.label ? 'explore-chip is-active' : 'explore-chip'} onClick={() => { setMood(current => current === facet.label ? '' : facet.label); setActiveMixId(''); }}>
+            <button key={facet.label} type="button" className={mood === facet.label ? 'explore-chip is-active' : 'explore-chip'} aria-pressed={mood === facet.label} onClick={() => { setMood(current => current === facet.label ? '' : facet.label); setActiveMixId(''); }}>
               {facet.label}<small>{facet.count}</small>
             </button>
           ))}
@@ -200,7 +200,7 @@ export function ExploreView({
             ['all', 'All saved'],
             ['ready', 'Ready to play'],
           ].map(([value, label]) => (
-            <button key={value} type="button" className={availability === value ? 'explore-chip is-active' : 'explore-chip'} onClick={() => { setAvailability(value); setActiveMixId(''); }}>{label}</button>
+            <button key={value} type="button" className={availability === value ? 'explore-chip is-active' : 'explore-chip'} aria-pressed={availability === value} onClick={() => { setAvailability(value); setActiveMixId(''); }}>{label}</button>
           ))}
         </div>
       </section>

@@ -3,6 +3,7 @@ import { Activity, Cpu, Database, Play, Search, Sparkles } from 'lucide-react';
 import { buildContextualTasteProfile, rankContextualSongs } from '../services/contextualRecommendationService.js';
 import { outcomeWeight } from '../services/behaviourLearning.js';
 import { labelCluster } from '../services/galaxyService.js';
+import { selectUpcomingQueueItems } from '../services/libraryViewModel.js';
 import { dot } from '../services/tasteInterests.js';
 import { getSongKey } from '../songIdentity.js';
 
@@ -218,6 +219,7 @@ export function TasteDeckHud({
   gemmaVectors,
   likedSongKeys,
   queue = [],
+  queueIndex = 0,
   currentSong,
   onPlaySong,
   onOpenTasteProfile,
@@ -327,8 +329,8 @@ export function TasteDeckHud({
         })
       : [];
 
-    const upNext = queue
-      .filter(song => song && (!currentSong || song.songKey !== currentSong.songKey))
+    const upNext = selectUpcomingQueueItems({ queue, queueIndex, currentSong })
+      .map(entry => entry.song)
       .slice(0, 5);
 
     return {
@@ -342,7 +344,7 @@ export function TasteDeckHud({
       upNext,
       trajectory: buildRealTrajectory(playbackEvents, songByKey),
     };
-  }, [songs, playbackEvents, gemmaVectors, likedSongKeys, queue, currentSong]);
+  }, [songs, playbackEvents, gemmaVectors, likedSongKeys, queue, queueIndex, currentSong]);
 
   return (
     <div className="taste-deck-wrapper">
