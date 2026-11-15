@@ -49,10 +49,12 @@ import {
 } from './services/personalRanker.js';
 import { importExternalListeningFile, mergeExternalHistoryPack } from './services/externalHistoryImporter.js';
 import {
+  computePlaylistMembershipDiff,
   mergeExternalAndNativeEvents,
   mergeLikedSongKeys,
   resolveEffectiveLibrarySongs,
   resolveLibrarySearchSongs,
+  resolveSongPlaylistKeys,
   selectCanonicalDriveSongs,
 } from './services/libraryViewModel.js';
 import { EMBEDDING_DIMENSIONS } from './services/tasteEmbeddingService.js';
@@ -1690,18 +1692,38 @@ function App() {
 
   const openPlaylistPicker = useCallback((song) => {
     setPlaylistQuery('');
+    const songKey = song ? getSongKey(song) : '';
+    const hydratedSong = (songKey && allSongsByKey.get(songKey)) || song;
+    const initialKeys = hydratedSong ? resolveSongPlaylistKeys(hydratedSong, visiblePlaylists) : [];
     setPlaylistPicker({
       song,
-      selectedKeys: [],
+      initialKeys,
+      selectedKeys: initialKeys,
       newPlaylistName: '',
       busy: false,
     });
-  }, []);
+  }, [allSongsByKey, visiblePlaylists]);
 
   const pickerPlaylists = useMemo(() => {
     const query = normalizeText(playlistQuery);
     return query ? visiblePlaylists.filter(playlist => normalizeText(playlist.name).includes(query)) : visiblePlaylists;
   }, [playlistQuery, visiblePlaylists]);
+
+  const handleRemoveFromActivePlaylist = useCallback(async (song) => {
+    if (!selectedPlaylist || selectedPlaylist.playlistKey === LISTENING_HISTORY_KEY) return;
+    const songKey = song?.songKey || getSongKey(song);
+    if (!songKey) return;
+    try {
+      await removeSongFromPlaylist(songKey, selectedPlaylist.playlistKey);
+      await persistPlaylistIndex();
+      addToast(`Removed "${song.track}" from "${selectedPlaylist.name}"`);
+    } catch (error) {
+      console.error('Remove from playlist failed:', error);
+      const message = errorMessage(error);
+      setActionError(message);
+      addToast(message);
+    }
+  }, [addToast, persistPlaylistIndex, selectedPlaylist]);
 
   const handlePlaylistPickerConfirm = useCallback(async () => {
     if (!playlistPicker || playlistPicker.busy) return;
@@ -1718,25 +1740,42 @@ function App() {
       }
       return;
     }
-    const selectedNames = visiblePlaylists
-      .filter(playlist => playlistPicker.selectedKeys.includes(playlist.playlistKey))
+    const { toAddKeys, toRemoveKeys } = computePlaylistMembershipDiff({
+      initialKeys: playlistPicker.initialKeys,
+      selectedKeys: playlistPicker.selectedKeys,
+    });
+    const addNames = visiblePlaylists
+      .filter(playlist => toAddKeys.includes(playlist.playlistKey))
       .map(playlist => playlist.name);
+    const removePlaylists = visiblePlaylists
+      .filter(playlist => toRemoveKeys.includes(playlist.playlistKey));
     const newName = playlistPicker.newPlaylistName.trim();
-    const targetNames = [...selectedNames, ...(newName ? [newName] : [])];
+    const targetAddNames = [...addNames, ...(newName ? [newName] : [])];
 
-    if (targetNames.length === 0) {
-      addToast('Choose at least one playlist');
+    if (targetAddNames.length === 0 && removePlaylists.length === 0) {
+      if ((playlistPicker.initialKeys?.length || 0) > 0) {
+        setPlaylistPicker(null);
+      } else {
+        addToast('Choose at least one playlist');
+      }
       return;
     }
 
     setPlaylistPicker(prev => prev ? { ...prev, busy: true } : prev);
     try {
-      const localSong = await ensureLocalSong(playlistPicker.song, '');
-      for (const playlistName of targetNames) {
-        await addSongToPlaylist(localSong, playlistName, 'sisic');
+      const songKey = playlistPicker.song.songKey || getSongKey(playlistPicker.song);
+      let localSong = allSongsByKey.get(songKey) || playlistPicker.song;
+      if (targetAddNames.length > 0) {
+        localSong = await ensureLocalSong(playlistPicker.song, '');
+        for (const playlistName of targetAddNames) {
+          await addSongToPlaylist(localSong, playlistName, 'sisic');
+        }
+      }
+      for (const playlist of removePlaylists) {
+        await removeSongFromPlaylist(localSong.songKey || songKey, playlist.playlistKey);
       }
       await persistPlaylistIndex();
-      if (!localSong.driveFileId && !driveSongKeySet.has(localSong.songKey)) {
+      if (targetAddNames.length > 0 && !localSong.driveFileId && !driveSongKeySet.has(localSong.songKey)) {
         const result = await queueSongForDownload(localSong, { allowRedownload: deletedSongKeySet.has(localSong.songKey) });
         if (result.durationLimitExceeded) {
           addToast(result.message || durationLimitMessage(localSong, result.durationSeconds));
@@ -1745,7 +1784,15 @@ function App() {
         }
       }
       setPlaylistPicker(null);
-      addToast(`Added "${localSong.track}" to ${targetNames.length} playlist${targetNames.length === 1 ? '' : 's'}`);
+      if (targetAddNames.length > 0 && removePlaylists.length > 0) {
+        addToast(`Updated playlists for "${localSong.track}"`);
+      } else if (removePlaylists.length === 1 && targetAddNames.length === 0) {
+        addToast(`Removed "${localSong.track}" from "${removePlaylists[0].name}"`);
+      } else if (removePlaylists.length > 1 && targetAddNames.length === 0) {
+        addToast(`Removed "${localSong.track}" from ${removePlaylists.length} playlists`);
+      } else {
+        addToast(`Added "${localSong.track}" to ${targetAddNames.length} playlist${targetAddNames.length === 1 ? '' : 's'}`);
+      }
     } catch (error) {
       console.error('Playlist update failed:', error);
       const message = errorMessage(error);
@@ -1755,6 +1802,7 @@ function App() {
     }
   }, [
     addToast,
+    allSongsByKey,
     deletedSongKeySet,
     driveSongKeySet,
     ensureLocalSong,
@@ -2030,6 +2078,8 @@ function App() {
       onAddToQueue={(selected) => { player.addToQueue(selected); addToast(`Added "${selected.track}" to queue`); }}
       onPlayNext={(selected) => { player.enqueueNext(selected); addToast(`Playing "${selected.track}" next`); }}
       onAddToPlaylist={openPlaylistPicker}
+      onRemoveFromPlaylist={selectedPlaylist && view === VIEWS.LIBRARY && song.playlistKeys?.includes(selectedPlaylist.playlistKey) ? handleRemoveFromActivePlaylist : undefined}
+      activePlaylistName={selectedPlaylist && view === VIEWS.LIBRARY ? selectedPlaylist.name : ''}
       onToggleLike={handleToggleLike}
       isLiked={Boolean(likedPlaylist && song.playlistKeys?.includes(likedPlaylist.playlistKey))}
       onReview={setReviewSong}
@@ -2608,11 +2658,11 @@ function App() {
 
       {playlistPicker && (
         <div className="modal-backdrop" role="presentation" onClick={() => !playlistPicker.busy && setPlaylistPicker(null)}>
-          <section ref={playlistDialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-label={playlistPicker.song ? 'Choose playlist' : 'Create playlist'} tabIndex={-1} onClick={event => event.stopPropagation()}>
+          <section ref={playlistDialogRef} className="playlist-picker" role="dialog" aria-modal="true" aria-label={playlistPicker.song ? 'Manage playlists' : 'Create playlist'} tabIndex={-1} onClick={event => event.stopPropagation()}>
             <div className="panel-header">
               <div>
                 <span className="playlist-picker__eyebrow">Organize your library</span>
-                <h2>{playlistPicker.song ? 'Add to playlist' : 'Create playlist'}</h2>
+                <h2>{playlistPicker.song ? 'Manage playlists' : 'Create playlist'}</h2>
               </div>
               <button data-dialog-autofocus className="icon-btn" onClick={() => setPlaylistPicker(null)} aria-label="Close playlist picker" disabled={playlistPicker.busy}>
                 <X size={18} />
@@ -2642,24 +2692,41 @@ function App() {
               <button type="button" onClick={() => setPlaylistPicker(prev => prev ? { ...prev, selectedKeys: [] } : prev)} disabled={playlistPicker.busy || playlistPicker.selectedKeys.length === 0}>Clear</button>
             </div>
             <div className="playlist-picker__list">
-              {pickerPlaylists.map(playlist => (
-                <label key={playlist.playlistKey} className="playlist-picker__option">
-                  <input
-                    type="checkbox"
-                    checked={playlistPicker.selectedKeys.includes(playlist.playlistKey)}
-                    onChange={event => {
-                      setPlaylistPicker(prev => {
-                        if (!prev) return prev;
-                        const selected = new Set(prev.selectedKeys);
-                        if (event.target.checked) selected.add(playlist.playlistKey);
-                        else selected.delete(playlist.playlistKey);
-                        return { ...prev, selectedKeys: [...selected] };
-                      });
-                    }}
-                  />
-                  <span>{playlist.name}</span>
-                </label>
-              ))}
+              {pickerPlaylists.map(playlist => {
+                const wasMember = Boolean(playlistPicker.initialKeys?.includes(playlist.playlistKey));
+                const isSelected = playlistPicker.selectedKeys.includes(playlist.playlistKey);
+                const statusLabel = wasMember && isSelected
+                  ? 'In playlist'
+                  : wasMember && !isSelected
+                    ? 'Will remove'
+                    : !wasMember && isSelected
+                      ? 'Will add'
+                      : '';
+                const statusTone = wasMember && !isSelected
+                  ? 'remove'
+                  : !wasMember && isSelected
+                    ? 'add'
+                    : 'member';
+                return (
+                  <label key={playlist.playlistKey} className={`playlist-picker__option ${isSelected ? 'is-selected' : ''} ${wasMember ? 'is-member' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={event => {
+                        setPlaylistPicker(prev => {
+                          if (!prev) return prev;
+                          const selected = new Set(prev.selectedKeys);
+                          if (event.target.checked) selected.add(playlist.playlistKey);
+                          else selected.delete(playlist.playlistKey);
+                          return { ...prev, selectedKeys: [...selected] };
+                        });
+                      }}
+                    />
+                    <span className="playlist-picker__name">{playlist.name}</span>
+                    {statusLabel && <em className={`playlist-picker__badge playlist-picker__badge--${statusTone}`}>{statusLabel}</em>}
+                  </label>
+                );
+              })}
               {pickerPlaylists.length === 0 && <p className="playlist-picker__empty">No matching playlists. Create one below.</p>}
             </div>
             </>}

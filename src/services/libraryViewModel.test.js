@@ -1,10 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computePlaylistMembershipDiff,
   mergeExternalAndNativeEvents,
   mergeLikedSongKeys,
   resolveEffectiveLibrarySongs,
   resolveLibrarySearchSongs,
+  resolveSongPlaylistKeys,
   selectCanonicalDriveSongs,
   selectUpcomingQueueItems,
 } from './libraryViewModel.js';
@@ -77,6 +79,21 @@ describe('libraryViewModel', () => {
     assert.deepEqual(
       selectUpcomingQueueItems({ queue, queueIndex: 0, currentSong: queue[0] }).map(entry => [entry.song.songKey, entry.position]),
       [['timeless', 1], ['blinding', 2]],
+    );
+  });
+
+  it('resolves existing visible playlist membership and computes add/remove diffs', () => {
+    const visiblePlaylists = [{ playlistKey: 'bass' }, { playlistKey: 'chill' }];
+    const song = { songKey: 'dzyz::chaos', playlistKeys: ['bass', 'listening history', 'bass'] };
+    assert.deepEqual(resolveSongPlaylistKeys(song, visiblePlaylists), ['bass']);
+
+    assert.deepEqual(
+      computePlaylistMembershipDiff({ initialKeys: ['bass'], selectedKeys: ['chill'] }),
+      { toAddKeys: ['chill'], toRemoveKeys: ['bass'] },
+    );
+    assert.deepEqual(
+      computePlaylistMembershipDiff({ initialKeys: ['bass'], selectedKeys: [] }),
+      { toAddKeys: [], toRemoveKeys: ['bass'] },
     );
   });
 });

@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FolderOpen, LoaderCircle } from 'lucide-react';
+import { FolderOpen, ListMinus, LoaderCircle } from 'lucide-react';
 import { statusDetails } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { useSongArtworkUrl } from '../hooks/useSongArtworkUrl.js';
@@ -75,6 +75,8 @@ export const SongCard = memo(function SongCard({
   onAddToQueue,
   onPlayNext,
   onAddToPlaylist,
+  onRemoveFromPlaylist,
+  activePlaylistName = '',
   onDeleteReady,
   onMarkDuplicate,
   onRestoreDuplicate,
@@ -320,6 +322,13 @@ export const SongCard = memo(function SongCard({
     onPlayNext && { label: 'Next', glyph: nextGlyph, action: onPlayNext, slot: 'next' },
     onAddToQueue && { label: 'Queue', glyph: playlistIcon, action: onAddToQueue, slot: 'queue' },
     onAddToPlaylist && { label: 'Playlist', glyph: plusIcon, action: onAddToPlaylist, slot: 'playlist' },
+    onRemoveFromPlaylist && {
+      label: activePlaylistName ? `Remove from ${activePlaylistName}` : 'Remove from playlist',
+      Icon: ListMinus,
+      action: onRemoveFromPlaylist,
+      danger: true,
+      slot: 'playlist-remove',
+    },
     onToggleLike && { label: isLiked ? 'Unlike' : 'Like', glyph: likeGlyph, action: onToggleLike, slot: 'like' },
     onMoreLikeThis && { label: 'Similar', glyph: similarIcon, action: onMoreLikeThis, slot: 'similar' },
     onInfo && { label: 'Info', glyph: infoGlyph, action: onInfo, slot: 'info' },

@@ -2172,6 +2172,59 @@
   color: var(--obsidian-cyan);
 }
 
+.playlist-picker__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-picker__badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-style: normal;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.playlist-picker__badge--member {
+  color: #4de2ff;
+  background: rgba(77, 226, 255, 0.12);
+  border: 1px solid rgba(77, 226, 255, 0.28);
+}
+
+.playlist-picker__badge--add {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(52, 211, 153, 0.34);
+}
+
+.playlist-picker__badge--remove {
+  color: #fecdd3;
+  background: rgba(244, 63, 94, 0.16);
+  border: 1px solid rgba(251, 113, 133, 0.36);
+}
+
+:root[data-theme="light"] .playlist-picker__badge--member {
+  color: #0e7490;
+  background: rgba(14, 116, 144, 0.09);
+  border-color: rgba(14, 116, 144, 0.28);
+}
+
+:root[data-theme="light"] .playlist-picker__badge--add {
+  color: #047857;
+  background: rgba(4, 120, 87, 0.09);
+  border-color: rgba(4, 120, 87, 0.28);
+}
+
+:root[data-theme="light"] .playlist-picker__badge--remove {
+  color: #991b1b;
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.28);
+}
+
 /* Drive Tasks, Mac Worker, Import Status & Storage Metrics */
 .drive-summary > div,
 .storage-metrics > div,

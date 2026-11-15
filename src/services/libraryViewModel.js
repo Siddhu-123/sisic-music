@@ -110,3 +110,23 @@ export function selectUpcomingQueueItems({ queue = [], queueIndex = 0, currentSo
     position: startIndex + idx,
   }));
 }
+
+/**
+ * Resolves the unique, visible playlist keys a song currently belongs to.
+ */
+export function resolveSongPlaylistKeys(song, visiblePlaylists = []) {
+  const visibleKeySet = new Set((visiblePlaylists || []).map(item => item?.playlistKey).filter(Boolean));
+  const rawKeys = Array.isArray(song?.playlistKeys) ? song.playlistKeys : [];
+  return [...new Set(rawKeys.filter(key => key && visibleKeySet.has(key)))];
+}
+
+/**
+ * Computes which playlists to add and remove given initial vs. newly selected keys.
+ */
+export function computePlaylistMembershipDiff({ initialKeys = [], selectedKeys = [] } = {}) {
+  const initialSet = new Set((initialKeys || []).filter(Boolean));
+  const selectedSet = new Set((selectedKeys || []).filter(Boolean));
+  const toAddKeys = [...selectedSet].filter(key => !initialSet.has(key));
+  const toRemoveKeys = [...initialSet].filter(key => !selectedSet.has(key));
+  return { toAddKeys, toRemoveKeys };
+}
