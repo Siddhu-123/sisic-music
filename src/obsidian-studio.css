@@ -257,12 +257,12 @@
 
 /* ── Hardware Player Dock ────────────────────────────────────────────────── */
 :root[data-theme="dark"] .player-bar {
-  background: rgba(10, 14, 24, 0.94);
+  background: rgb(10, 14, 24);
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-bottom: 0;
   border-radius: 18px 18px 0 0;
   box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.72), inset 0 1px 0 rgba(77, 226, 255, 0.14);
-  backdrop-filter: blur(18px);
+  backdrop-filter: none;
 }
 
 :root[data-theme="dark"] .play-btn {
@@ -700,9 +700,9 @@
   width: min(268px, calc(100% - 28px));
   padding: 10px 12px;
   border-radius: 13px;
-  background: rgba(9, 13, 22, 0.84);
+  background: rgb(9, 13, 22);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(14px);
+  backdrop-filter: none;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
 }
 
@@ -788,10 +788,11 @@
 .player-spectrum i {
   display: block;
   width: 2.5px;
-  height: 4px;
+  height: 15px;
   border-radius: 2px;
   background: #4de2ff;
-  transition: height 0.2s ease;
+  transform: scaleY(0.267);
+  transform-origin: bottom;
 }
 
 .player-spectrum i:nth-child(4),
@@ -810,8 +811,12 @@
 .player-spectrum.is-playing i:nth-child(6) { animation-delay: 0.4s; }
 
 @keyframes obsidianSpectrum {
-  0% { height: 4px; opacity: 0.55; }
-  100% { height: 15px; opacity: 1; }
+  0% { transform: scaleY(0.267); opacity: 0.55; }
+  100% { transform: scaleY(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-spectrum.is-playing i { animation: none; }
 }
 
 /* Adapt Vinyl Turntable Easter egg to Obsidian Studio hardware accents */
@@ -1347,9 +1352,9 @@
   z-index: 12;
   padding: 4px;
   border-radius: 10px;
-  background: rgba(9, 13, 22, 0.84);
+  background: rgb(9, 13, 22);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(12px);
+  backdrop-filter: none;
 }
 
 :root[data-theme="light"] .constellation-zoom-overlay {
@@ -1671,9 +1676,9 @@
   min-height: 28px;
   padding: 3px 10px;
   font-size: 0.7rem;
-  background: rgba(9, 13, 22, 0.76);
+  background: rgb(9, 13, 22);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(12px);
+  backdrop-filter: none;
 }
 
 :root[data-theme="light"] .constellation-canvas-top .constellation-cluster-chip {
@@ -1863,5 +1868,247 @@
   color: #ffffff;
   border: 1px solid rgba(8, 145, 178, 0.45);
   box-shadow: 0 6px 18px rgba(8, 145, 178, 0.24);
+}
+
+/* ==========================================================================
+   Complete Signal Studio Coverage — Every Modal, Sub-Window, Drawer & Control
+   ========================================================================== */
+
+/* Shared Modal & Sub-Window Surfaces */
+.modal-overlay,
+.modal-backdrop {
+  background: rgba(3, 6, 13, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+:root[data-theme="light"] .modal-overlay,
+:root[data-theme="light"] .modal-backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.modal-content,
+.equalizer-modal,
+.recommendations-modal,
+.delete-playlist-modal,
+.storage-panel,
+.song-info-panel,
+.song-review-panel,
+.playlist-picker,
+.mobile-more-sheet {
+  background: var(--obsidian-panel);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 18px;
+  box-shadow: var(--shadow-raised);
+  color: var(--text);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+}
+
+.modal-header,
+.panel-header {
+  border-bottom: 1px solid var(--obsidian-hairline);
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+}
+
+.modal-title,
+.panel-header h2 {
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.modal-subtitle,
+.song-review-panel__subtitle,
+.song-info-panel__eyebrow {
+  color: var(--text-muted);
+}
+
+.modal-icon {
+  background: rgba(77, 226, 255, 0.1);
+  border: 1px solid var(--obsidian-hairline-cyan);
+  color: var(--obsidian-cyan);
+  box-shadow: none;
+}
+
+.delete-playlist-icon {
+  background: rgba(244, 63, 94, 0.12);
+  border-color: rgba(244, 63, 94, 0.34);
+  color: #fb7185;
+}
+
+/* Strip leftover neumorphic shadows across every button/chip/input */
+.neumorphic-button,
+.neumorphic-button--icon,
+.sync-refresh-btn,
+.download-status-row__action,
+.taste-export-btn,
+.explore-chip,
+.drive-summary__button,
+.playback-settings__toggle {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  box-shadow: none;
+  color: var(--text);
+  border-radius: 10px;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.neumorphic-button:hover:not(:disabled),
+.neumorphic-button--icon:hover:not(:disabled),
+.sync-refresh-btn:hover:not(:disabled),
+.download-status-row__action:hover:not(:disabled),
+.taste-export-btn:hover:not(:disabled),
+.explore-chip:hover:not(:disabled),
+.drive-summary__button:hover:not(:disabled),
+.playback-settings__toggle:hover:not(:disabled) {
+  border-color: var(--obsidian-hairline-cyan);
+  background: var(--bg-card-hover);
+  color: var(--obsidian-cyan);
+  box-shadow: none;
+}
+
+.explore-chip.is-active,
+.playback-settings__toggle.is-active {
+  background: rgba(77, 226, 255, 0.14);
+  border-color: var(--obsidian-hairline-cyan);
+  color: var(--obsidian-cyan);
+}
+
+/* Equalizer Hardware DSP Studio */
+.equalizer-modal .eq-curve__plot {
+  background: rgba(5, 8, 15, 0.72);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 14px;
+}
+
+:root[data-theme="light"] .equalizer-modal .eq-curve__plot {
+  background: rgba(241, 245, 249, 0.9);
+}
+
+.equalizer-modal .eq-preset-btn,
+.equalizer-modal .eq-band {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.equalizer-modal .eq-preset-btn--active {
+  background: rgba(77, 226, 255, 0.14);
+  border-color: var(--obsidian-hairline-cyan);
+  color: var(--obsidian-cyan);
+}
+
+/* Taste Profile & Passport Cards */
+.taste-metric-card,
+.artist-rank-card,
+.passport-panel,
+.taste-vector-card,
+.taste-insights-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 14px;
+  box-shadow: none;
+}
+
+.metric-icon-bubble,
+.insights-icon-wrap {
+  background: rgba(77, 226, 255, 0.1);
+  border: 1px solid var(--obsidian-hairline-cyan);
+  color: var(--obsidian-cyan);
+  box-shadow: none;
+}
+
+/* Recommendations, Song Info & Song Review Panels */
+.recommendation-card,
+.song-review-candidate,
+.song-info-panel__field input,
+.song-info-panel__field textarea,
+.song-review-panel__youtube input,
+.gemma-service-panel__field input {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 12px;
+  box-shadow: none;
+  color: var(--text);
+}
+
+.recommendation-card:hover {
+  border-color: var(--obsidian-hairline-cyan);
+  background: var(--bg-card-hover);
+}
+
+/* Drive Tasks, Mac Worker, Import Status & Storage Metrics */
+.drive-summary > div,
+.storage-metrics > div,
+.mac-worker-tasks,
+.mac-worker-task,
+.download-status-panel,
+.download-status-row,
+.import-status-panel,
+.import-status-row,
+.gemma-service-panel,
+.playback-settings__panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 14px;
+  box-shadow: none;
+}
+
+.import-progress__bar,
+.studio-progress-fill {
+  background: linear-gradient(90deg, var(--obsidian-cyan), var(--obsidian-amber));
+}
+
+/* Explore Hero & Search Box */
+.explore-hero {
+  background:
+    radial-gradient(600px 200px at 10% 0%, rgba(77, 226, 255, 0.12), transparent 65%),
+    var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 18px;
+  box-shadow: none;
+}
+
+.explore-search-box,
+.expanded-player__search-bar {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.explore-search-box:focus-within,
+.expanded-player__search-bar:focus-within {
+  border-color: var(--obsidian-hairline-cyan);
+  box-shadow: var(--focus-ring);
+}
+
+/* Expanded Player & Sync Banner & Toasts */
+.expanded-player--reference {
+  background: var(--obsidian-bg);
+  color: var(--text);
+}
+
+.expanded-now-playing-badge {
+  background: rgba(77, 226, 255, 0.1);
+  border: 1px solid var(--obsidian-hairline-cyan);
+  color: var(--obsidian-cyan);
+}
+
+.sync-banner {
+  background: var(--bg-raised);
+  border: 1px solid var(--obsidian-hairline);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.toast {
+  background: var(--obsidian-panel);
+  border: 1px solid var(--obsidian-hairline-cyan);
+  color: var(--text);
+  box-shadow: var(--shadow-raised);
+  backdrop-filter: blur(16px);
 }
 
