@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { PlaybackController } from '../services/PlaybackController.js';
 import { resolvePlaybackUrl } from '../services/playbackSource.js';
+import { shouldIgnoreGlobalPlaybackShortcut } from '../services/playbackShortcuts.js';
 
 export const ACTIONS = ['loadAndPlay', 'configurePlayback', 'togglePlay', 'play', 'pause', 'seek', 'changeVolume', 'toggleMute', 'setRpm',
   'setPitchModifier', 'setPitchRange', 'beginScratch', 'setScratchAngularVelocity', 'endScratch', 'setNeedleLifted', 'clearError',
@@ -32,15 +33,15 @@ export function useAudioPlayer() {
 
   useEffect(() => {
     const onKeyDown = event => {
-      if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (event.target?.closest?.('input, textarea, select, button, [contenteditable="true"], [role="slider"], [role="dialog"]')) return;
+      if (shouldIgnoreGlobalPlaybackShortcut(event)) return;
+      const key = event.key === ' ' || event.code === 'Space' ? ' ' : event.key;
       const action = {
         ' ': controller.togglePlay, MediaPlayPause: controller.togglePlay, MediaStop: controller.stop,
         MediaTrackNext: () => controller.playNext({ reason: 'user-next' }), MediaTrackPrevious: controller.playPrev,
         ArrowRight: () => controller.seek(state.progress + 5 / (state.duration || 1) * 100),
         ArrowLeft: () => controller.seek(state.progress - 5 / (state.duration || 1) * 100),
         m: controller.toggleMute,
-      }[event.key];
+      }[key];
       if (action) { event.preventDefault(); action(); }
     };
     window.addEventListener('keydown', onKeyDown);

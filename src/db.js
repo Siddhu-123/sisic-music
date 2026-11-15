@@ -2,6 +2,7 @@ import Dexie from 'dexie';
 import { asSongRecord, getPlaylistKey, getSongKey } from './songIdentity.js';
 import { parseDurationSeconds } from './services/downloadPolicy.js';
 import { sanitizeRhythm } from './services/djBeatMath.js';
+import { activeDeletedPlaylistKeys, buildDrivePlaylistSnapshot } from './services/playlistSyncPolicy.js';
 
 export const db = new Dexie('SisicMusicDB');
 
@@ -361,6 +362,18 @@ async function putPlaylistMembership(tables, playlistName, songKey, source = 'sp
   return true;
 }
 
+async function clearPlaylistDeleteTombstones(tables, playlistKey) {
+  if (!playlistKey || !tables?.syncOutbox) return;
+  const tombstones = await tables.syncOutbox
+    .where('entityType')
+    .equals('playlist-delete')
+    .filter(op => op.entityKey === playlistKey)
+    .toArray();
+  for (const op of tombstones) {
+    await tables.syncOutbox.delete(op.opId);
+  }
+}
+
 export async function requestPersistentStorage() {
   if (navigator.storage?.persist) {
     const granted = await navigator.storage.persist();
@@ -385,7 +398,7 @@ export async function getStorageEstimate() {
 
 export async function upsertSongToDb(input, playlistName = '') {
   const incoming = normalizeSongInput(input);
-  const result = await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, async () => {
+  const result = await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, db.syncOutbox, async () => {
     const previous = await db.songs.where('songKey').equals(incoming.songKey).first();
     const merged = bestSongMerge(previous, incoming);
     if (previous) {
@@ -394,6 +407,7 @@ export async function upsertSongToDb(input, playlistName = '') {
       await db.songs.add(merged);
     }
     if (playlistName) {
+      await clearPlaylistDeleteTombstones(db, getPlaylistKey(playlistName));
       await putPlaylistMembership(db, playlistName, incoming.songKey, input.source || 'spotify');
     }
     return await db.songs.where('songKey').equals(incoming.songKey).first();
@@ -547,7 +561,9 @@ export async function addSongToPlaylist(songInput, playlistName, source = 'sisic
   const song = normalizeSongInput(songInput);
   const cleanName = String(playlistName || '').trim();
   if (!cleanName) throw new Error('Choose a playlist first.');
-  return await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, async () => {
+  const playlistKey = getPlaylistKey(cleanName);
+  return await db.transaction('rw', db.songs, db.playlists, db.playlistSongs, db.syncOutbox, async () => {
+    await clearPlaylistDeleteTombstones(db, playlistKey);
     const previous = await db.songs.where('songKey').equals(song.songKey).first();
     const merged = bestSongMerge(previous, song);
     if (previous) {
@@ -596,14 +612,7 @@ export async function createPlaylist(name) {
   if (!cleanName) throw new Error('Enter a playlist name.');
   const playlistKey = getPlaylistKey(cleanName);
   return db.transaction('rw', db.playlists, db.syncOutbox, async () => {
-    const tombstones = await db.syncOutbox
-      .where('entityType')
-      .equals('playlist-delete')
-      .filter(op => op.entityKey === playlistKey)
-      .toArray();
-    for (const op of tombstones) {
-      await db.syncOutbox.delete(op.opId);
-    }
+    await clearPlaylistDeleteTombstones(db, playlistKey);
     const existing = await db.playlists.get(playlistKey);
     if (existing) return existing;
     const playlist = { playlistKey, name: cleanName, source: 'sisic', updatedAt: new Date().toISOString() };
@@ -631,14 +640,7 @@ export async function deletePlaylist(playlistKey) {
 export async function restorePlaylist(playlist, songKeys = []) {
   if (!playlist?.playlistKey) return false;
   return await db.transaction('rw', db.playlists, db.playlistSongs, db.syncOutbox, async () => {
-    const tombstones = await db.syncOutbox
-      .where('entityType')
-      .equals('playlist-delete')
-      .filter(op => op.entityKey === playlist.playlistKey)
-      .toArray();
-    for (const op of tombstones) {
-      await db.syncOutbox.delete(op.opId);
-    }
+    await clearPlaylistDeleteTombstones(db, playlist.playlistKey);
     await db.playlists.put({
       ...playlist,
       updatedAt: new Date().toISOString(),
@@ -726,7 +728,7 @@ export async function syncPlaylistIndexToDb(playlists = []) {
     .equals('playlist-delete')
     .toArray()
     .catch(() => []);
-  const deletedKeys = new Set(pendingDeletes.map(op => op.entityKey));
+  const deletedKeys = activeDeletedPlaylistKeys(pendingDeletes);
 
   await db.transaction('rw', db.playlists, db.playlistSongs, async () => {
     for (const playlist of playlists) {
@@ -753,37 +755,21 @@ export async function syncPlaylistIndexToDb(playlists = []) {
 }
 
 export async function getPlaylistSnapshotForDrive({ excludePlaylistKeys = [] } = {}) {
-  const excluded = new Set(excludePlaylistKeys);
   const pendingDeletes = await db.syncOutbox
     .where('entityType')
     .equals('playlist-delete')
     .toArray()
     .catch(() => []);
-  for (const op of pendingDeletes) {
-    if (op.entityKey) excluded.add(op.entityKey);
-  }
+  const activeDeletedKeys = activeDeletedPlaylistKeys(pendingDeletes);
 
   const [playlistsRaw, links] = await Promise.all([
     db.playlists.toArray(),
     db.playlistSongs.toArray(),
   ]);
-  const linksByPlaylist = new Map();
-  for (const link of links) {
-    if (!link.playlistKey || !link.songKey || excluded.has(link.playlistKey)) continue;
-    if (!linksByPlaylist.has(link.playlistKey)) linksByPlaylist.set(link.playlistKey, []);
-    linksByPlaylist.get(link.playlistKey).push(link.songKey);
-  }
-  return playlistsRaw
-    .filter(playlist => playlist.playlistKey && !excluded.has(playlist.playlistKey))
-    .map(playlist => ({
-      playlistKey: playlist.playlistKey,
-      name: playlist.name,
-      source: playlist.source || 'sisic',
-      songKeys: [...new Set(linksByPlaylist.get(playlist.playlistKey) || [])],
-      updatedAt: playlist.updatedAt || new Date().toISOString(),
-    }))
-    .filter(playlist => playlist.songKeys.length > 0)
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return buildDrivePlaylistSnapshot(playlistsRaw, links, {
+    excludePlaylistKeys,
+    activeDeletedKeys,
+  });
 }
 
 export async function syncDownloadJobsToDb(jobs = [], { replaceSnapshot = false } = {}) {

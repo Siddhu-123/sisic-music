@@ -169,3 +169,24 @@ test('recordSourceFeedback writes one shared feedback index', async () => {
   assert.equal(written.decisions[0].songKey, 'artist::track');
   assert.equal(entry.decision, 'rejected');
 });
+
+test('writePlaylistIndex preserves empty playlists alongside populated ones', async () => {
+  const service = new GoogleDriveService();
+  let captured = null;
+  service.mutateJsonIndex = async (_folderId, filename, key, defaults, mutator) => {
+    assert.equal(filename, 'sisic-playlists.json');
+    assert.equal(key, 'playlists');
+    captured = await mutator(defaults, {});
+    return captured;
+  };
+
+  await service.writePlaylistIndex('folder-id', [
+    { playlistKey: 'empty', name: 'Empty Mix', songKeys: [] },
+    { playlistKey: 'bass', name: 'Bass', songKeys: ['dzyz::chaos'] },
+  ]);
+
+  assert.deepEqual(captured.map(p => ({ key: p.playlistKey, count: p.songKeys.length })), [
+    { key: 'empty', count: 0 },
+    { key: 'bass', count: 1 },
+  ]);
+});

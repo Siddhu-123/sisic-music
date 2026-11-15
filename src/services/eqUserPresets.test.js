@@ -5,11 +5,13 @@ import {
   MAX_PRESET_NAME,
   MAX_USER_PRESETS,
   cleanPresetName,
+  deleteUserPresetFromStorage,
   loadUserPresets,
   persistUserPresets,
   removeUserPreset,
   sameGains,
   sanitizeUserPresets,
+  saveUserPresetToStorage,
   upsertUserPreset,
 } from './eqUserPresets.js';
 
@@ -69,4 +71,26 @@ test('gain comparison ignores float noise but not real differences', () => {
   assert.equal(sameGains(gains(1), gains(1.0004)), true);
   assert.equal(sameGains(gains(1), gains(1.5)), false);
   assert.equal(sameGains(gains(1), [1]), false);
+});
+
+test('multi-tab saves and deletes read-modify-write against shared storage without losing another tab preset', () => {
+  const sharedStorage = memoryStorage();
+  // Simulated Tab 1 & Tab 2 both opened when storage was empty.
+  const tab1Initial = loadUserPresets(sharedStorage);
+  const tab2Initial = loadUserPresets(sharedStorage);
+  assert.deepEqual(tab1Initial, []);
+  assert.deepEqual(tab2Initial, []);
+
+  // Tab 1 saves A, then Tab 2 saves B using atomic storage helper.
+  const resA = saveUserPresetToStorage(sharedStorage, 'A', gains(2));
+  assert.equal(resA.error, undefined);
+  const resB = saveUserPresetToStorage(sharedStorage, 'B', gains(-3));
+  assert.equal(resB.error, undefined);
+
+  assert.deepEqual(loadUserPresets(sharedStorage).map(p => p.name), ['A', 'B']);
+
+  // Deleting A preserves B.
+  const afterDelete = deleteUserPresetFromStorage(sharedStorage, 'A');
+  assert.deepEqual(afterDelete.map(p => p.name), ['B']);
+  assert.deepEqual(loadUserPresets(sharedStorage).map(p => p.name), ['B']);
 });

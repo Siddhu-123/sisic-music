@@ -1332,7 +1332,9 @@ export class GoogleDriveService {
   }
 
   async writePlaylistIndex(folderId, playlists = []) {
-    const normalized = playlists.map(normalizePlaylistIndexEntry).filter(playlist => playlist.playlistKey && playlist.songKeys.length > 0);
+    const normalized = playlists
+      .map(normalizePlaylistIndexEntry)
+      .filter(playlist => playlist.playlistKey && String(playlist.name || '').trim());
     return await this.mutateJsonIndex(folderId, PLAYLIST_INDEX_FILENAME, 'playlists', [], () => normalized);
   }
 

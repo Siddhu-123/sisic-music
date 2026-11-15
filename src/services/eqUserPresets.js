@@ -64,4 +64,27 @@ export function removeUserPreset(presets, name) {
   return presets.filter(preset => preset.name.toLowerCase() !== String(name).toLowerCase());
 }
 
+/**
+ * Reads the latest stored presets immediately before saving so multiple open
+ * tabs never overwrite presets saved in another tab.
+ */
+export function saveUserPresetToStorage(storage, name, gains) {
+  const latest = loadUserPresets(storage);
+  const result = upsertUserPreset(latest, name, gains);
+  if (result.error) return result;
+  persistUserPresets(storage, result.presets);
+  return result;
+}
+
+/**
+ * Reads the latest stored presets immediately before deleting so concurrent
+ * tab additions are preserved.
+ */
+export function deleteUserPresetFromStorage(storage, name) {
+  const latest = loadUserPresets(storage);
+  const next = removeUserPreset(latest, name);
+  persistUserPresets(storage, next);
+  return next;
+}
+
 export const sameGains = (a, b) => a.length === b.length && a.every((value, index) => Math.abs(value - b[index]) < 0.001);

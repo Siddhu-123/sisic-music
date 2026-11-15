@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computePlaylistMembershipDiff,
+  getPlaylistPickerState,
   mergeExternalAndNativeEvents,
   mergeLikedSongKeys,
   resolveEffectiveLibrarySongs,
@@ -95,5 +96,26 @@ describe('libraryViewModel', () => {
       computePlaylistMembershipDiff({ initialKeys: ['bass'], selectedKeys: [] }),
       { toAddKeys: [], toRemoveKeys: ['bass'] },
     );
+  });
+
+  it('disables playlist picker save and returns validation hints when no actionable change exists', () => {
+    const emptySongState = getPlaylistPickerState({ hasSong: true, initialKeys: [], selectedKeys: [], newPlaylistName: '   ' });
+    assert.equal(emptySongState.canSave, false);
+    assert.match(emptySongState.hint, /select at least one playlist/i);
+
+    const existingUnchanged = getPlaylistPickerState({ hasSong: true, initialKeys: ['bass'], selectedKeys: ['bass'], newPlaylistName: '' });
+    assert.equal(existingUnchanged.canSave, false);
+    assert.match(existingUnchanged.hint, /uncheck an existing one/i);
+
+    const existingRemoval = getPlaylistPickerState({ hasSong: true, initialKeys: ['bass'], selectedKeys: [], newPlaylistName: '' });
+    assert.equal(existingRemoval.canSave, true);
+    assert.deepEqual(existingRemoval.toRemoveKeys, ['bass']);
+
+    const newPlaylistOnly = getPlaylistPickerState({ hasSong: false, newPlaylistName: '' });
+    assert.equal(newPlaylistOnly.canSave, false);
+    assert.match(newPlaylistOnly.hint, /enter a playlist name/i);
+
+    const validCreate = getPlaylistPickerState({ hasSong: false, newPlaylistName: 'Late Night' });
+    assert.equal(validCreate.canSave, true);
   });
 });

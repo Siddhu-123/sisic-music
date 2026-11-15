@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, LogOut, MoreHorizontal, Plus, Trash2, ListMusic } from 'lucide-react';
 import {
@@ -33,6 +33,8 @@ import { ThemeToggle } from './components/ThemeToggle.jsx';
 import { StudioTopBar, TasteDeckHud } from './components/TasteDeckHud.jsx';
 import { hydrateFromDevCache } from './services/devCacheHydration.js';
 import { ToastContainer } from './components/Toast.jsx';
+import { AsyncBoundary } from './components/AsyncBoundary.jsx';
+import { lazyWithRetry } from './utils/lazyWithRetry.js';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
 import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
@@ -49,7 +51,7 @@ import {
 } from './services/personalRanker.js';
 import { importExternalListeningFile, mergeExternalHistoryPack } from './services/externalHistoryImporter.js';
 import {
-  computePlaylistMembershipDiff,
+  getPlaylistPickerState,
   mergeExternalAndNativeEvents,
   mergeLikedSongKeys,
   resolveEffectiveLibrarySongs,
@@ -72,14 +74,14 @@ import './responsive-ui.css';
 import './player-reference.css';
 import './obsidian-studio.css';
 
-const ExploreView = lazy(() => import('./components/ExploreView.jsx').then(module => ({ default: module.ExploreView })));
-const DeletePlaylistModal = lazy(() => import('./components/DeletePlaylistModal.jsx').then(module => ({ default: module.DeletePlaylistModal })));
-const GemmaServicePanel = lazy(() => import('./components/GemmaServicePanel.jsx').then(module => ({ default: module.GemmaServicePanel })));
-const QueuePanel = lazy(() => import('./components/QueuePanel.jsx').then(module => ({ default: module.QueuePanel })));
-const ConstellationView = lazy(() => import('./components/views/ConstellationView.jsx').then(module => ({ default: module.ConstellationView })));
-const EqualizerModal = lazy(() => import('./components/EqualizerModal.jsx').then(module => ({ default: module.EqualizerModal })));
-const RecommendationsModal = lazy(() => import('./components/RecommendationsModal.jsx').then(module => ({ default: module.RecommendationsModal })));
-const TasteProfileModal = lazy(() => import('./components/TasteProfileModal.jsx').then(module => ({ default: module.TasteProfileModal })));
+const ExploreView = lazyWithRetry(() => import('./components/ExploreView.jsx'), 'ExploreView');
+const DeletePlaylistModal = lazyWithRetry(() => import('./components/DeletePlaylistModal.jsx'), 'DeletePlaylistModal');
+const GemmaServicePanel = lazyWithRetry(() => import('./components/GemmaServicePanel.jsx'), 'GemmaServicePanel');
+const QueuePanel = lazyWithRetry(() => import('./components/QueuePanel.jsx'), 'QueuePanel');
+const ConstellationView = lazyWithRetry(() => import('./components/views/ConstellationView.jsx'), 'ConstellationView');
+const EqualizerModal = lazyWithRetry(() => import('./components/EqualizerModal.jsx'), 'EqualizerModal');
+const RecommendationsModal = lazyWithRetry(() => import('./components/RecommendationsModal.jsx'), 'RecommendationsModal');
+const TasteProfileModal = lazyWithRetry(() => import('./components/TasteProfileModal.jsx'), 'TasteProfileModal');
 
 const VIEWS = { HOME: 'home', EXPLORE: 'explore', LIBRARY: 'library', DUPLICATES: 'duplicates', DOWNLOADS: 'downloads', CONSTELLATION: 'constellation' };
 const EMPTY_LIBRARY = { songs: [], playlists: [], downloadJobs: [], importJobs: [], embeddingJobs: [], syncOutbox: [], playbackEvents: [], error: '' };
@@ -356,6 +358,8 @@ function App() {
 
   const [view, setView] = useState(VIEWS.HOME);
   const [searchQuery, setSearchQuery] = useState('');
+  const [playlistFilterQuery, setPlaylistFilterQuery] = useState('');
+  const [duplicatesFilterQuery, setDuplicatesFilterQuery] = useState('');
   const [selectedPlaylistKey, setSelectedPlaylistKey] = useState(null);
   const [downloadingKeys, setDownloadingKeys] = useState(new Set());
   const [actionError, setActionError] = useState('');
@@ -1700,6 +1704,7 @@ function App() {
       initialKeys,
       selectedKeys: initialKeys,
       newPlaylistName: '',
+      validationError: '',
       busy: false,
     });
   }, [allSongsByKey, visiblePlaylists]);
@@ -1708,6 +1713,18 @@ function App() {
     const query = normalizeText(playlistQuery);
     return query ? visiblePlaylists.filter(playlist => normalizeText(playlist.name).includes(query)) : visiblePlaylists;
   }, [playlistQuery, visiblePlaylists]);
+
+  const playlistPickerState = useMemo(() => {
+    if (!playlistPicker) {
+      return getPlaylistPickerState();
+    }
+    return getPlaylistPickerState({
+      hasSong: Boolean(playlistPicker.song),
+      initialKeys: playlistPicker.initialKeys,
+      selectedKeys: playlistPicker.selectedKeys,
+      newPlaylistName: playlistPicker.newPlaylistName,
+    });
+  }, [playlistPicker]);
 
   const handleRemoveFromActivePlaylist = useCallback(async (song) => {
     if (!selectedPlaylist || selectedPlaylist.playlistKey === LISTENING_HISTORY_KEY) return;
@@ -1727,41 +1744,32 @@ function App() {
 
   const handlePlaylistPickerConfirm = useCallback(async () => {
     if (!playlistPicker || playlistPicker.busy) return;
+    if (!playlistPickerState.canSave) {
+      setPlaylistPicker(prev => prev ? { ...prev, validationError: playlistPickerState.validationMessage } : prev);
+      return;
+    }
     if (!playlistPicker.song) {
-      setPlaylistPicker(prev => ({ ...prev, busy: true }));
+      setPlaylistPicker(prev => ({ ...prev, validationError: '', busy: true }));
       try {
-        const playlist = await createPlaylist(playlistPicker.newPlaylistName);
+        const playlist = await createPlaylist(playlistPickerState.trimmedName);
         await persistPlaylistIndex();
-        setPlaylistPicker(null); setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY);
+        setPlaylistPicker(null); setSelectedPlaylistKey(playlist.playlistKey); setPlaylistFilterQuery(''); setView(VIEWS.LIBRARY);
         addToast(`Created "${playlist.name}"`);
       } catch (error) {
         addToast(errorMessage(error));
-        setPlaylistPicker(prev => prev ? { ...prev, busy: false } : prev);
+        setPlaylistPicker(prev => prev ? { ...prev, busy: false, validationError: errorMessage(error) } : prev);
       }
       return;
     }
-    const { toAddKeys, toRemoveKeys } = computePlaylistMembershipDiff({
-      initialKeys: playlistPicker.initialKeys,
-      selectedKeys: playlistPicker.selectedKeys,
-    });
+    const { toAddKeys, toRemoveKeys, trimmedName } = playlistPickerState;
     const addNames = visiblePlaylists
       .filter(playlist => toAddKeys.includes(playlist.playlistKey))
       .map(playlist => playlist.name);
     const removePlaylists = visiblePlaylists
       .filter(playlist => toRemoveKeys.includes(playlist.playlistKey));
-    const newName = playlistPicker.newPlaylistName.trim();
-    const targetAddNames = [...addNames, ...(newName ? [newName] : [])];
+    const targetAddNames = [...addNames, ...(trimmedName ? [trimmedName] : [])];
 
-    if (targetAddNames.length === 0 && removePlaylists.length === 0) {
-      if ((playlistPicker.initialKeys?.length || 0) > 0) {
-        setPlaylistPicker(null);
-      } else {
-        addToast('Choose at least one playlist');
-      }
-      return;
-    }
-
-    setPlaylistPicker(prev => prev ? { ...prev, busy: true } : prev);
+    setPlaylistPicker(prev => prev ? { ...prev, validationError: '', busy: true } : prev);
     try {
       const songKey = playlistPicker.song.songKey || getSongKey(playlistPicker.song);
       let localSong = allSongsByKey.get(songKey) || playlistPicker.song;
@@ -1808,6 +1816,7 @@ function App() {
     ensureLocalSong,
     persistPlaylistIndex,
     playlistPicker,
+    playlistPickerState,
     queueSongForDownload,
     visiblePlaylists,
   ]);
@@ -2237,7 +2246,7 @@ function App() {
                 <button
                   type="button"
                   className={`playlist-item ${selectedPlaylistKey === playlist.playlistKey ? 'playlist-item--active' : ''}`}
-                  onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); setShowPlaylistsDrawer(false); }}
+                  onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setPlaylistFilterQuery(''); setView(VIEWS.LIBRARY); setShowPlaylistsDrawer(false); }}
                 >
                   <span className="sidebar__playlist-name">{playlist.name}</span>
                 </button>
@@ -2272,13 +2281,16 @@ function App() {
           searchQuery={searchQuery}
           onSearchChange={value => {
             setSearchQuery(value);
-            if (value.trim() && view !== VIEWS.LIBRARY && view !== VIEWS.DUPLICATES) {
-              setSelectedPlaylistKey(null);
-              setView(VIEWS.LIBRARY);
+            if (value.trim()) {
+              if (selectedPlaylistKey) setSelectedPlaylistKey(null);
+              if (view !== VIEWS.LIBRARY) {
+                setView(VIEWS.LIBRARY);
+              }
             }
           }}
-          onSearchSubmit={() => {
-            if (view !== VIEWS.LIBRARY && view !== VIEWS.DUPLICATES) {
+          onSearchSubmit={submitted => {
+            const activeQuery = String(submitted ?? searchQuery).trim();
+            if (activeQuery) {
               setSelectedPlaylistKey(null);
               setView(VIEWS.LIBRARY);
             }
@@ -2364,7 +2376,7 @@ function App() {
                       key={playlist.playlistKey}
                       playlist={playlist}
                       songs={playlistPreviewSongs.get(playlist.playlistKey) || []}
-                      onOpen={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); }}
+                      onOpen={() => { setSelectedPlaylistKey(playlist.playlistKey); setPlaylistFilterQuery(''); setView(VIEWS.LIBRARY); }}
                     />
                   ))}
                 </div>
@@ -2445,64 +2457,69 @@ function App() {
         )}
 
         {view === VIEWS.EXPLORE && (
-          <Suspense fallback={<div className="view-loading" role="status">Loading Explore…</div>}>
-            <ExploreView
-              browseSongs={exploreBrowseSongs}
-              librarySongs={exploreLibrarySongs}
-              playbackEvents={canonicalPlaybackEvents}
-              {...(gemmaVectors.size ? { gemmaVectors } : {})}
-              likedSongKeys={canonicalLikedKeys}
-              catalogueLoading={catalogueLoading}
-              renderSong={renderSongCard}
-              onRecommendationShown={handleRecommendationShown}
-              onPlayMix={(songs, options) => songs.length && handlePlaySong(songs[0], songs, options)}
-            />
-          </Suspense>
+          <AsyncBoundary label="Explore" variant="inline">
+            <Suspense fallback={<div className="view-loading" role="status">Loading Explore…</div>}>
+              <ExploreView
+                browseSongs={exploreBrowseSongs}
+                librarySongs={exploreLibrarySongs}
+                playbackEvents={canonicalPlaybackEvents}
+                {...(gemmaVectors.size ? { gemmaVectors } : {})}
+                likedSongKeys={canonicalLikedKeys}
+                catalogueLoading={catalogueLoading}
+                renderSong={renderSongCard}
+                onRecommendationShown={handleRecommendationShown}
+                onPlayMix={(songs, options) => songs.length && handlePlaySong(songs[0], songs, options)}
+              />
+            </Suspense>
+          </AsyncBoundary>
         )}
 
-        {view === VIEWS.LIBRARY && (
-          <>
-            <header className="main-view__header">
-              <div className="main-view__title-row">
-                <h1 className="main-view__title">{selectedPlaylist?.name || (searchQuery.trim() ? 'Library & Catalogue Search' : 'Ready')}</h1>
-                {selectedPlaylist && isDeletablePlaylist(selectedPlaylist) && (
-                  <button
-                    type="button"
-                    className="playlist-header-delete-btn"
-                    onClick={() => setPlaylistToDelete(selectedPlaylist)}
-                    title={`Delete playlist "${selectedPlaylist.name}"`}
-                    aria-label={`Delete playlist "${selectedPlaylist.name}"`}
-                  >
-                    <Trash2 size={16} />
-                    <span>Delete playlist</span>
-                  </button>
-                )}
-              </div>
-              <div className="search-box">
-                <Search size={18} className="search-box__icon" />
-                <input
-                  type="search"
-                  placeholder="Filter"
-                  value={searchQuery}
-                  onChange={event => setSearchQuery(event.target.value)}
-                  autoComplete="off"
-                />
-              </div>
-            </header>
+        {view === VIEWS.LIBRARY && (() => {
+          const activeLibraryQuery = selectedPlaylist ? playlistFilterQuery : searchQuery;
+          const setActiveLibraryQuery = selectedPlaylist ? setPlaylistFilterQuery : setSearchQuery;
+          const trimmedQuery = activeLibraryQuery.trim();
+          const filtered = resolveLibrarySearchSongs({
+            searchQuery: activeLibraryQuery,
+            selectedPlaylistKey,
+            playlistSongs: librarySongs,
+            driveReadySongs,
+            browseSongs: exploreBrowseSongs,
+          });
+          const readyMatches = !selectedPlaylist && trimmedQuery ? filtered.filter(song => Boolean(song.driveFileId)).length : 0;
+          const catalogueMatches = !selectedPlaylist && trimmedQuery ? filtered.length - readyMatches : 0;
 
-            {(() => {
-              const trimmedQuery = searchQuery.trim();
-              const filtered = resolveLibrarySearchSongs({
-                searchQuery,
-                selectedPlaylistKey,
-                playlistSongs: librarySongs,
-                driveReadySongs,
-                browseSongs: exploreBrowseSongs,
-              });
-              const readyMatches = !selectedPlaylist && trimmedQuery ? filtered.filter(song => Boolean(song.driveFileId)).length : 0;
-              const catalogueMatches = !selectedPlaylist && trimmedQuery ? filtered.length - readyMatches : 0;
+          return (
+            <>
+              <header className="main-view__header">
+                <div className="main-view__title-row">
+                  <h1 className="main-view__title">{selectedPlaylist?.name || (trimmedQuery ? 'Library & Catalogue Search' : 'Ready')}</h1>
+                  {selectedPlaylist && isDeletablePlaylist(selectedPlaylist) && (
+                    <button
+                      type="button"
+                      className="playlist-header-delete-btn"
+                      onClick={() => setPlaylistToDelete(selectedPlaylist)}
+                      title={`Delete playlist "${selectedPlaylist.name}"`}
+                      aria-label={`Delete playlist "${selectedPlaylist.name}"`}
+                    >
+                      <Trash2 size={16} />
+                      <span>Delete playlist</span>
+                    </button>
+                  )}
+                </div>
+                <div className="search-box">
+                  <Search size={18} className="search-box__icon" />
+                  <input
+                    type="search"
+                    placeholder="Filter"
+                    aria-label={selectedPlaylist ? `Filter songs in ${selectedPlaylist.name}` : 'Filter songs'}
+                    value={activeLibraryQuery}
+                    onChange={event => setActiveLibraryQuery(event.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
+              </header>
 
-              return filtered.length === 0 ? (
+              {filtered.length === 0 ? (
                 <div className="empty-state">
                   <Music2 size={48} color="var(--text-muted)" />
                   <h3>{trimmedQuery ? 'No matching songs' : 'No songs'}</h3>
@@ -2534,10 +2551,10 @@ function App() {
                     renderSong={song => renderSongCard(song, trimmedQuery ? null : filtered, { isSearch: Boolean(trimmedQuery) })}
                   />
                 </>
-              );
-            })()}
-          </>
-        )}
+              )}
+            </>
+          );
+        })()}
 
         {view === VIEWS.DUPLICATES && (
           <>
@@ -2551,31 +2568,33 @@ function App() {
                 <input
                   type="search"
                   placeholder="Filter"
-                  value={searchQuery}
-                  onChange={event => setSearchQuery(event.target.value)}
+                  aria-label="Filter duplicate songs"
+                  value={duplicatesFilterQuery}
+                  onChange={event => setDuplicatesFilterQuery(event.target.value)}
                   autoComplete="off"
                 />
               </div>
             </header>
             {(() => {
-              const filtered = searchQuery.trim().length >= 1
+              const trimmedDuplicates = duplicatesFilterQuery.trim();
+              const filtered = trimmedDuplicates.length >= 1
                 ? duplicateSongs.filter(song => {
-                    const q = searchQuery.toLowerCase();
+                    const q = duplicatesFilterQuery.toLowerCase();
                     return String(song.track || '').toLowerCase().includes(q) || String(song.artist || '').toLowerCase().includes(q);
                   })
                 : duplicateSongs;
               return filtered.length === 0 ? (
                 <div className="empty-state">
                   <Copy size={48} color="var(--text-muted)" />
-                  <h3>{searchQuery.trim() ? 'No matching duplicates' : 'No duplicates'}</h3>
-                  <p>{searchQuery.trim() ? `No duplicate songs matching "${searchQuery.trim()}".` : 'Use Song actions → Mark as duplicate to move a song here.'}</p>
+                  <h3>{trimmedDuplicates ? 'No matching duplicates' : 'No duplicates'}</h3>
+                  <p>{trimmedDuplicates ? `No duplicate songs matching "${trimmedDuplicates}".` : 'Use Song actions → Mark as duplicate to move a song here.'}</p>
                 </div>
               ) : (
                 <>
                   <div className="library-count">{filtered.length} songs</div>
                   <VirtualSongGrid
                     songs={filtered}
-                    renderSong={song => renderSongCard(song, searchQuery.trim() ? null : filtered, { isSearch: Boolean(searchQuery.trim()) })}
+                    renderSong={song => renderSongCard(song, trimmedDuplicates ? null : filtered, { isSearch: Boolean(trimmedDuplicates) })}
                   />
                 </>
               );
@@ -2584,19 +2603,21 @@ function App() {
         )}
 
         {view === VIEWS.CONSTELLATION && (
-          <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
-            <ConstellationView
-              songs={galaxySongs}
-              gemmaVectors={gemmaVectors}
-              playbackEvents={canonicalPlaybackEvents}
-              likedSongKeys={canonicalLikedKeys}
-              currentSong={player.currentSong}
-              isQueueOpen={showQueue}
-              onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
-              onPlayCluster={(clusterSongs) => clusterSongs.length && handlePlaySong(clusterSongs[0], clusterSongs)}
-              onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
-            />
-          </Suspense>
+          <AsyncBoundary label="Galaxy" variant="inline">
+            <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
+              <ConstellationView
+                songs={galaxySongs}
+                gemmaVectors={gemmaVectors}
+                playbackEvents={canonicalPlaybackEvents}
+                likedSongKeys={canonicalLikedKeys}
+                currentSong={player.currentSong}
+                isQueueOpen={showQueue}
+                onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
+                onPlayCluster={(clusterSongs) => clusterSongs.length && handlePlaySong(clusterSongs[0], clusterSongs)}
+                onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+              />
+            </Suspense>
+          </AsyncBoundary>
         )}
       </main>
 
@@ -2632,15 +2653,17 @@ function App() {
                 <span>Import EmbeddingGemma vectors</span>
               </button>
             </div>
-            <Suspense fallback={<div className="view-loading" role="status">Loading embedding controls…</div>}>
-              <GemmaServicePanel
-                librarySongs={allSongs}
-                onSynced={reloadGemmaVectors}
-                status={gemmaServiceStatus}
-                onStatusChange={setGemmaServiceStatus}
-                onConfigChange={() => setGemmaConfigRevision(revision => revision + 1)}
-              />
-            </Suspense>
+            <AsyncBoundary label="Embedding controls" variant="inline">
+              <Suspense fallback={<div className="view-loading" role="status">Loading embedding controls…</div>}>
+                <GemmaServicePanel
+                  librarySongs={allSongs}
+                  onSynced={reloadGemmaVectors}
+                  status={gemmaServiceStatus}
+                  onStatusChange={setGemmaServiceStatus}
+                  onConfigChange={() => setGemmaConfigRevision(revision => revision + 1)}
+                />
+              </Suspense>
+            </AsyncBoundary>
             {largestReadySongs.length > 0 && (
               <div className="storage-list">
                 <h3>Largest Ready Songs</h3>
@@ -2668,89 +2691,129 @@ function App() {
                 <X size={18} />
               </button>
             </div>
-            {playlistPicker.song && <><div className="playlist-picker__song">
-              <AsyncArtworkImage song={playlistPicker.song} className="playlist-picker__song-art" fallbackSize={18} size={100} sizes="52px" />
-              <div>
-                <strong>{playlistPicker.song.track}</strong>
-                <span>{playlistPicker.song.artist}</span>
+            <form
+              className="playlist-picker__form"
+              onSubmit={event => {
+                event.preventDefault();
+                handlePlaylistPickerConfirm();
+              }}
+            >
+              {playlistPicker.song && <><div className="playlist-picker__song">
+                <AsyncArtworkImage song={playlistPicker.song} className="playlist-picker__song-art" fallbackSize={18} size={100} sizes="52px" />
+                <div>
+                  <strong>{playlistPicker.song.track}</strong>
+                  <span>{playlistPicker.song.artist}</span>
+                </div>
               </div>
-            </div>
-            <div className="playlist-picker__toolbar">
-              <input
-                className="playlist-picker__search"
-                type="search"
-                placeholder="Find a playlist"
-                value={playlistQuery}
-                onChange={event => setPlaylistQuery(event.target.value)}
-                disabled={playlistPicker.busy}
-                aria-label="Find a playlist"
-              />
-              <span>{playlistPicker.selectedKeys.length} selected</span>
-            </div>
-            <div className="playlist-picker__bulk-actions">
-              <button type="button" onClick={() => setPlaylistPicker(prev => prev ? { ...prev, selectedKeys: [...new Set([...prev.selectedKeys, ...pickerPlaylists.map(item => item.playlistKey)])] } : prev)} disabled={playlistPicker.busy || pickerPlaylists.length === 0}>Select visible</button>
-              <button type="button" onClick={() => setPlaylistPicker(prev => prev ? { ...prev, selectedKeys: [] } : prev)} disabled={playlistPicker.busy || playlistPicker.selectedKeys.length === 0}>Clear</button>
-            </div>
-            <div className="playlist-picker__list">
-              {pickerPlaylists.map(playlist => {
-                const wasMember = Boolean(playlistPicker.initialKeys?.includes(playlist.playlistKey));
-                const isSelected = playlistPicker.selectedKeys.includes(playlist.playlistKey);
-                const statusLabel = wasMember && isSelected
-                  ? 'In playlist'
-                  : wasMember && !isSelected
-                    ? 'Will remove'
+              <div className="playlist-picker__toolbar">
+                <input
+                  className="playlist-picker__search"
+                  type="search"
+                  placeholder="Find a playlist"
+                  value={playlistQuery}
+                  onChange={event => setPlaylistQuery(event.target.value)}
+                  disabled={playlistPicker.busy}
+                  aria-label="Find a playlist"
+                />
+                <span>{playlistPicker.selectedKeys.length} selected</span>
+              </div>
+              <div className="playlist-picker__bulk-actions">
+                <button
+                  type="button"
+                  onClick={() => setPlaylistPicker(prev => prev ? {
+                    ...prev,
+                    validationError: '',
+                    selectedKeys: [...new Set([...prev.selectedKeys, ...pickerPlaylists.map(item => item.playlistKey)])],
+                  } : prev)}
+                  disabled={playlistPicker.busy || pickerPlaylists.length === 0}
+                >
+                  Select visible
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlaylistPicker(prev => prev ? { ...prev, validationError: '', selectedKeys: [] } : prev)}
+                  disabled={playlistPicker.busy || playlistPicker.selectedKeys.length === 0}
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="playlist-picker__list">
+                {pickerPlaylists.map(playlist => {
+                  const wasMember = Boolean(playlistPicker.initialKeys?.includes(playlist.playlistKey));
+                  const isSelected = playlistPicker.selectedKeys.includes(playlist.playlistKey);
+                  const statusLabel = wasMember && isSelected
+                    ? 'In playlist'
+                    : wasMember && !isSelected
+                      ? 'Will remove'
+                      : !wasMember && isSelected
+                        ? 'Will add'
+                        : '';
+                  const statusTone = wasMember && !isSelected
+                    ? 'remove'
                     : !wasMember && isSelected
-                      ? 'Will add'
-                      : '';
-                const statusTone = wasMember && !isSelected
-                  ? 'remove'
-                  : !wasMember && isSelected
-                    ? 'add'
-                    : 'member';
-                return (
-                  <label key={playlist.playlistKey} className={`playlist-picker__option ${isSelected ? 'is-selected' : ''} ${wasMember ? 'is-member' : ''}`}>
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={event => {
-                        setPlaylistPicker(prev => {
-                          if (!prev) return prev;
-                          const selected = new Set(prev.selectedKeys);
-                          if (event.target.checked) selected.add(playlist.playlistKey);
-                          else selected.delete(playlist.playlistKey);
-                          return { ...prev, selectedKeys: [...selected] };
-                        });
-                      }}
-                    />
-                    <span className="playlist-picker__name">{playlist.name}</span>
-                    {statusLabel && <em className={`playlist-picker__badge playlist-picker__badge--${statusTone}`}>{statusLabel}</em>}
-                  </label>
-                );
-              })}
-              {pickerPlaylists.length === 0 && <p className="playlist-picker__empty">No matching playlists. Create one below.</p>}
-            </div>
-            </>}
-            <input
-              maxLength={120}
-              aria-label="New playlist name"
-              className="playlist-picker__new"
-              type="text"
-              placeholder="Create a new playlist"
-              value={playlistPicker.newPlaylistName}
-              onChange={event => setPlaylistPicker(prev => prev ? { ...prev, newPlaylistName: event.target.value } : prev)}
-              disabled={playlistPicker.busy}
-            />
-            <button className="btn-primary playlist-picker__save" onClick={handlePlaylistPickerConfirm} disabled={playlistPicker.busy}>
-              {playlistPicker.busy ? 'Saving...' : `Save${playlistPicker.selectedKeys.length ? ` · ${playlistPicker.selectedKeys.length}` : ''}`}
-            </button>
+                      ? 'add'
+                      : 'member';
+                  return (
+                    <label key={playlist.playlistKey} className={`playlist-picker__option ${isSelected ? 'is-selected' : ''} ${wasMember ? 'is-member' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={event => {
+                          setPlaylistPicker(prev => {
+                            if (!prev) return prev;
+                            const selected = new Set(prev.selectedKeys);
+                            if (event.target.checked) selected.add(playlist.playlistKey);
+                            else selected.delete(playlist.playlistKey);
+                            return { ...prev, validationError: '', selectedKeys: [...selected] };
+                          });
+                        }}
+                      />
+                      <span className="playlist-picker__name">{playlist.name}</span>
+                      {statusLabel && <em className={`playlist-picker__badge playlist-picker__badge--${statusTone}`}>{statusLabel}</em>}
+                    </label>
+                  );
+                })}
+                {pickerPlaylists.length === 0 && <p className="playlist-picker__empty">No matching playlists. Create one below.</p>}
+              </div>
+              </>}
+              <input
+                maxLength={120}
+                aria-label="New playlist name"
+                aria-describedby={!playlistPickerState.canSave || playlistPicker.validationError ? 'playlist-picker-hint' : undefined}
+                className="playlist-picker__new"
+                type="text"
+                placeholder="Create a new playlist"
+                value={playlistPicker.newPlaylistName}
+                onChange={event => setPlaylistPicker(prev => prev ? { ...prev, validationError: '', newPlaylistName: event.target.value } : prev)}
+                disabled={playlistPicker.busy}
+              />
+              {(playlistPicker.validationError || !playlistPickerState.canSave) && (
+                <p
+                  id="playlist-picker-hint"
+                  className={playlistPicker.validationError ? 'playlist-picker__error' : 'playlist-picker__hint'}
+                  role={playlistPicker.validationError ? 'alert' : 'note'}
+                >
+                  {playlistPicker.validationError || playlistPickerState.hint}
+                </p>
+              )}
+              <button
+                type="submit"
+                className="btn-primary playlist-picker__save"
+                disabled={playlistPicker.busy || !playlistPickerState.canSave}
+              >
+                {playlistPicker.busy ? 'Saving...' : `Save${playlistPicker.selectedKeys.length ? ` · ${playlistPicker.selectedKeys.length}` : ''}`}
+              </button>
+            </form>
           </section>
         </div>
       )}
 
       {showQueue && (
-        <Suspense fallback={<div className="queue-loading" role="status">Loading queue…</div>}>
-          <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handlePrepare} />
-        </Suspense>
+        <AsyncBoundary label="the Queue panel" variant="modal" onDismiss={() => setShowQueue(false)}>
+          <Suspense fallback={<div className="queue-loading" role="status">Loading queue…</div>}>
+            <QueuePanel player={player} jobBySongKey={jobBySongKey} onClose={() => setShowQueue(false)} onRetry={handlePrepare} />
+          </Suspense>
+        </AsyncBoundary>
       )}
       {songInfo && (
         <SongInfoPanel
@@ -2804,66 +2867,74 @@ function App() {
       <ToastContainer toasts={toasts} />
 
       {isEqOpen && (
-        <Suspense fallback={null}>
-          <EqualizerModal
-            isOpen
-            onClose={() => setIsEqOpen(false)}
-            eqPreset={player.eqPreset}
-            eqGains={player.eqGains}
-            eqEnabled={player.eqEnabled}
-            onSetEnabled={player.setEqEnabled}
-            onSetGains={player.setEqGains}
-            onSetPreset={player.setEqPreset}
-            onSetGain={player.setBandGain}
-          />
-        </Suspense>
+        <AsyncBoundary label="Equalizer" variant="modal" onDismiss={() => setIsEqOpen(false)}>
+          <Suspense fallback={null}>
+            <EqualizerModal
+              isOpen
+              onClose={() => setIsEqOpen(false)}
+              eqPreset={player.eqPreset}
+              eqGains={player.eqGains}
+              eqEnabled={player.eqEnabled}
+              onSetEnabled={player.setEqEnabled}
+              onSetGains={player.setEqGains}
+              onSetPreset={player.setEqPreset}
+              onSetGain={player.setBandGain}
+            />
+          </Suspense>
+        </AsyncBoundary>
       )}
 
       {recommendationTarget && (
-        <Suspense fallback={null}>
-          <RecommendationsModal
-            isOpen
-            onClose={() => setRecommendationTarget(null)}
-            targetSong={recommendationTarget}
-            librarySongs={effectiveAllSongs}
-            onRecommendationShown={handleRecommendationShown}
-            onPlaySong={song => handlePlaySong(song, [song], { sourceType: 'mix', sourceId: getSongKey(recommendationTarget) })}
-            onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
-          />
-        </Suspense>
+        <AsyncBoundary label="Recommendations" variant="modal" onDismiss={() => setRecommendationTarget(null)}>
+          <Suspense fallback={null}>
+            <RecommendationsModal
+              isOpen
+              onClose={() => setRecommendationTarget(null)}
+              targetSong={recommendationTarget}
+              librarySongs={effectiveAllSongs}
+              onRecommendationShown={handleRecommendationShown}
+              onPlaySong={song => handlePlaySong(song, [song], { sourceType: 'mix', sourceId: getSongKey(recommendationTarget) })}
+              onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
+            />
+          </Suspense>
+        </AsyncBoundary>
       )}
 
       {isTasteProfileOpen && (
-        <Suspense fallback={null}>
-          <TasteProfileModal
-            isOpen
-            onClose={() => setIsTasteProfileOpen(false)}
-            librarySummary={canonicalLibrarySummary}
-            songs={effectiveAllSongs}
-            likedSongKeys={canonicalLikedKeys}
-            gemmaVectors={gemmaVectors}
-            externalHistoryPack={externalHistoryPack}
-            personalRankerState={personalRankerState}
-            onImportListeningHistory={handleImportListeningHistory}
-            onPlayMix={mixSongs => {
-              if (!mixSongs.length) return;
-              setIsTasteProfileOpen(false);
-              handlePlaySong(mixSongs[0], mixSongs, { sourceType: 'mix', sourceId: 'taste-profile' });
-            }}
-          />
-        </Suspense>
+        <AsyncBoundary label="Taste Profile" variant="modal" onDismiss={() => setIsTasteProfileOpen(false)}>
+          <Suspense fallback={null}>
+            <TasteProfileModal
+              isOpen
+              onClose={() => setIsTasteProfileOpen(false)}
+              librarySummary={canonicalLibrarySummary}
+              songs={effectiveAllSongs}
+              likedSongKeys={canonicalLikedKeys}
+              gemmaVectors={gemmaVectors}
+              externalHistoryPack={externalHistoryPack}
+              personalRankerState={personalRankerState}
+              onImportListeningHistory={handleImportListeningHistory}
+              onPlayMix={mixSongs => {
+                if (!mixSongs.length) return;
+                setIsTasteProfileOpen(false);
+                handlePlaySong(mixSongs[0], mixSongs, { sourceType: 'mix', sourceId: 'taste-profile' });
+              }}
+            />
+          </Suspense>
+        </AsyncBoundary>
       )}
 
       {playlistToDelete && (
-        <Suspense fallback={null}>
-          <DeletePlaylistModal
-            isOpen={Boolean(playlistToDelete)}
-            playlist={playlistToDelete}
-            onClose={() => { if (!isDeletingPlaylist) setPlaylistToDelete(null); }}
-            onConfirm={handleDeletePlaylist}
-            isDeleting={isDeletingPlaylist}
-          />
-        </Suspense>
+        <AsyncBoundary label="Delete Playlist" variant="modal" onDismiss={() => { if (!isDeletingPlaylist) setPlaylistToDelete(null); }}>
+          <Suspense fallback={null}>
+            <DeletePlaylistModal
+              isOpen={Boolean(playlistToDelete)}
+              playlist={playlistToDelete}
+              onClose={() => { if (!isDeletingPlaylist) setPlaylistToDelete(null); }}
+              onConfirm={handleDeletePlaylist}
+              isDeleting={isDeletingPlaylist}
+            />
+          </Suspense>
+        </AsyncBoundary>
       )}
 
       <nav className="mobile-nav" aria-label="Mobile navigation">

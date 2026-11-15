@@ -130,3 +130,45 @@ export function computePlaylistMembershipDiff({ initialKeys = [], selectedKeys =
   const toRemoveKeys = [...initialSet].filter(key => !selectedSet.has(key));
   return { toAddKeys, toRemoveKeys };
 }
+
+/**
+ * Derives form readiness and validation messaging for the Manage / Create Playlist picker.
+ */
+export function getPlaylistPickerState({
+  hasSong = false,
+  initialKeys = [],
+  selectedKeys = [],
+  newPlaylistName = '',
+} = {}) {
+  const trimmedName = String(newPlaylistName || '').trim();
+  if (!hasSong) {
+    const canSave = trimmedName.length > 0;
+    return {
+      toAddKeys: [],
+      toRemoveKeys: [],
+      trimmedName,
+      canSave,
+      hint: canSave ? '' : 'Enter a playlist name to create.',
+      validationMessage: 'Enter a playlist name to create.',
+    };
+  }
+
+  const { toAddKeys, toRemoveKeys } = computePlaylistMembershipDiff({ initialKeys, selectedKeys });
+  const hasAdditions = toAddKeys.length > 0 || trimmedName.length > 0;
+  const hasRemovals = toRemoveKeys.length > 0;
+  const canSave = hasAdditions || hasRemovals;
+  const hint = canSave
+    ? ''
+    : (initialKeys?.length || 0) > 0
+      ? 'Select a playlist, uncheck an existing one, or enter a new playlist name.'
+      : 'Select at least one playlist or enter a new playlist name.';
+
+  return {
+    toAddKeys,
+    toRemoveKeys,
+    trimmedName,
+    canSave,
+    hint,
+    validationMessage: hint || 'Select at least one playlist or enter a new playlist name.',
+  };
+}

@@ -1,11 +1,13 @@
-import { lazy, Suspense, useState } from 'react';
+import { Suspense, useState } from 'react';
 import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Shuffle, Repeat, Repeat1, ListMusic, Info, LoaderCircle } from 'lucide-react';
 import { formatTime } from './componentUtils.jsx';
 import { AsyncArtworkImage } from './AsyncArtworkImage.jsx';
 import { ProgressSlider } from './ProgressSlider.jsx';
 import { PlaybackSettings } from './PlaybackSettings.jsx';
+import { AsyncBoundary } from './AsyncBoundary.jsx';
+import { lazyWithRetry } from '../utils/lazyWithRetry.js';
 
-const ExpandedPlayer = lazy(() => import('./ExpandedPlayer.jsx').then(module => ({ default: module.ExpandedPlayer })));
+const ExpandedPlayer = lazyWithRetry(() => import('./ExpandedPlayer.jsx'), 'ExpandedPlayer');
 
 export function PlayerBar({
   player,
@@ -138,24 +140,26 @@ export function PlayerBar({
       </div>
 
       {isExpanded && (
-        <Suspense fallback={<div className="view-loading" role="status">Loading player…</div>}>
-          <ExpandedPlayer
-            player={player}
-            onClose={() => setIsExpanded(false)}
-            hue={hue}
-            onToggleQueue={onToggleQueue}
-            onOpenSongInfo={onOpenSongInfo}
-            onAddToPlaylist={onAddToPlaylist}
-            onDelete={onDelete}
-            onReview={onReview}
-            onPrepare={onPrepare}
-            onPlayNext={onPlayNext}
-            onAddToQueue={onAddToQueue}
-            onOpenEqualizer={onOpenEqualizer}
-            onMoreLikeThis={onMoreLikeThis}
-            onSearchLibrary={onSearchLibrary}
-          />
-        </Suspense>
+        <AsyncBoundary label="the expanded player" variant="modal" onDismiss={() => setIsExpanded(false)}>
+          <Suspense fallback={<div className="view-loading" role="status">Loading player…</div>}>
+            <ExpandedPlayer
+              player={player}
+              onClose={() => setIsExpanded(false)}
+              hue={hue}
+              onToggleQueue={onToggleQueue}
+              onOpenSongInfo={onOpenSongInfo}
+              onAddToPlaylist={onAddToPlaylist}
+              onDelete={onDelete}
+              onReview={onReview}
+              onPrepare={onPrepare}
+              onPlayNext={onPlayNext}
+              onAddToQueue={onAddToQueue}
+              onOpenEqualizer={onOpenEqualizer}
+              onMoreLikeThis={onMoreLikeThis}
+              onSearchLibrary={onSearchLibrary}
+            />
+          </Suspense>
+        </AsyncBoundary>
       )}
     </div>
   );

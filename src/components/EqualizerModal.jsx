@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Sliders, X, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { EQ_FREQUENCIES, EQ_PRESETS } from '../services/audioGraph.js';
 import {
@@ -10,12 +10,12 @@ import {
   headroomDb,
 } from '../services/eqMath.js';
 import {
+  EQ_USER_PRESETS_KEY,
   MAX_PRESET_NAME,
+  deleteUserPresetFromStorage,
   loadUserPresets,
-  persistUserPresets,
-  removeUserPreset,
   sameGains,
-  upsertUserPreset,
+  saveUserPresetToStorage,
 } from '../services/eqUserPresets.js';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 
@@ -74,20 +74,33 @@ export function EqualizerModal({ isOpen, onClose, eqPreset, eqGains, eqEnabled =
   const bandDb = useMemo(() => eqResponseDb(gains, EQ_FREQUENCIES), [gains]);
   const cutDb = useMemo(() => headroomDb(gains), [gains]);
 
+  useEffect(() => {
+    const syncFromStorage = event => {
+      if (event?.type === 'storage' && event.key !== null && event.key !== EQ_USER_PRESETS_KEY) return;
+      setUserPresets(loadUserPresets(safeStorage()));
+    };
+    window.addEventListener('storage', syncFromStorage);
+    window.addEventListener('focus', syncFromStorage);
+    return () => {
+      window.removeEventListener('storage', syncFromStorage);
+      window.removeEventListener('focus', syncFromStorage);
+    };
+  }, []);
+
   if (!isOpen) return null;
 
-  const updatePresets = next => {
-    setUserPresets(next);
-    persistUserPresets(safeStorage(), next);
-  };
   const savePreset = event => {
     event.preventDefault();
-    const result = upsertUserPreset(userPresets, presetName, gains);
+    const result = saveUserPresetToStorage(safeStorage(), presetName, gains);
     if (result.error) { setMessage(result.error); return; }
-    updatePresets(result.presets);
+    setUserPresets(result.presets);
     setSaving(false);
     setPresetName('');
     setMessage(`Saved "${result.saved.name}".`);
+  };
+  const deletePreset = name => {
+    setUserPresets(deleteUserPresetFromStorage(safeStorage(), name));
+    setMessage(`Deleted "${name}".`);
   };
 
   return (
@@ -156,7 +169,7 @@ export function EqualizerModal({ isOpen, onClose, eqPreset, eqGains, eqEnabled =
                     type="button"
                     className="preset-button__delete"
                     aria-label={`Delete preset ${preset.name}`}
-                    onClick={() => { updatePresets(removeUserPreset(userPresets, preset.name)); setMessage(`Deleted "${preset.name}".`); }}
+                    onClick={() => deletePreset(preset.name)}
                   >
                     <Trash2 size={12} />
                   </button>

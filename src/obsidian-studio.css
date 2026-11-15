@@ -2298,3 +2298,104 @@
   backdrop-filter: blur(16px);
 }
 
+/* Playlist Picker Form & Validation Hints */
+.playlist-picker__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.playlist-picker__hint,
+.playlist-picker__error {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.playlist-picker__hint {
+  color: var(--text-muted);
+}
+
+.playlist-picker__error {
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: #fecdd3;
+  background: rgba(244, 63, 94, 0.14);
+  border: 1px solid rgba(251, 113, 133, 0.35);
+}
+
+:root[data-theme="light"] .playlist-picker__error {
+  color: #991b1b;
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.28);
+}
+
+.playlist-picker__save:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  filter: saturate(0.4);
+}
+
+/* Scoped Async Chunk / Module Recovery Boundary */
+.async-boundary {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  border-radius: 18px;
+  background: var(--obsidian-panel);
+  border: 1px solid var(--obsidian-hairline-cyan);
+  box-shadow: var(--shadow-raised);
+  color: var(--text);
+}
+
+.async-boundary--inline {
+  margin: 20px auto;
+  max-width: 520px;
+}
+
+.async-boundary--modal {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.async-boundary__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.async-boundary__eyebrow {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--obsidian-cyan);
+  margin-bottom: 4px;
+}
+
+.async-boundary__title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.async-boundary__message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.async-boundary__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.async-boundary__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
