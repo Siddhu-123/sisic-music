@@ -20,7 +20,7 @@ const clampPan = value => Math.max(-MAX_PAN, Math.min(MAX_PAN, value));
 const PERF_STORAGE_KEY = 'sisic_galaxy_perf';
 
 const PERF_PRESETS = Object.freeze({
-  eco: { label: 'Eco (0% idle)', fps: 0, dprCap: 1, simple: 1 },
+  eco: { label: 'Eco (idle)', fps: 0, dprCap: 1, simple: 1 },
   balanced: { label: '30 fps', fps: 30, dprCap: 1.25, simple: 0 },
   full: { label: '60 fps', fps: 60, dprCap: 2, simple: 0 },
 });
@@ -41,7 +41,7 @@ function readInitialPerfMode() {
     const saved = window.localStorage?.getItem(PERF_STORAGE_KEY);
     if (saved && PERF_PRESETS[saved]) return saved;
   } catch { /* ignore storage restrictions */ }
-  return 'balanced';
+  return 'eco';
 }
 
 function buildCurvedArcVertices(fromPoint, toPoint, segments = 20) {
@@ -947,7 +947,7 @@ export function ConstellationView({
           gl.drawArrays(gl.POINTS, 0, points.length);
         }
 
-        // Eco mode only keeps looping during active 3D flight; rests at 0% GPU otherwise.
+        // Eco mode only keeps looping during active 3D flight.
         if (!motion.matches && (preset.fps > 0 || flightActive)) {
           frame = window.requestAnimationFrame(render);
         }

@@ -16,6 +16,7 @@
   box-shadow: none;
   transition: none;
   isolation: isolate;
+  contain: layout paint;
 }
 
 .song-card.song-card--group25:hover,
@@ -49,14 +50,18 @@
 .tile-face__layer--single{filter:blur(1.25cqw);-webkit-mask-image:linear-gradient(26deg,#000 58%,rgba(0,0,0,.68) 78%,rgba(0,0,0,.22) 95%);mask-image:linear-gradient(26deg,#000 58%,rgba(0,0,0,.68) 78%,rgba(0,0,0,.22) 95%)}
 .tile-face__cover{position:absolute;left:7.6667cqw;top:8.3333cqw;width:84.6667cqw;height:80.3333cqw;overflow:hidden;border-radius:3cqw;opacity:.9;background:rgba(255,255,255,.1)}
 .tile-face__cover-img{position:absolute;left:-13.6667cqw;top:-8.3333cqw;width:112cqw!important;height:112cqw!important;max-width:none;object-fit:cover;aspect-ratio:auto!important}
-/* Glass name box: Figma 177x55 at (13,268), radius 10; hairline rim brightest on the left and upper-right edges. */
-.tile-face__meta{position:absolute;z-index:2;left:4.3333cqw;top:89.3333cqw;width:59cqw;height:18.3333cqw;overflow:hidden;border-radius:3.3333cqw;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.02));-webkit-backdrop-filter:blur(3px) saturate(1.4);backdrop-filter:blur(3px) saturate(1.4)}
+/* Glass name box: Figma 177x55 at (13,268), radius 10; hairline rim brightest on the left and upper-right edges.
+   Sits over .tile-face__layer--single which is already blurred (1.25cqw), so avoid a redundant per-tile backdrop-filter readback pass. */
+.tile-face__meta{position:absolute;z-index:2;left:4.3333cqw;top:89.3333cqw;width:59cqw;height:18.3333cqw;overflow:hidden;border-radius:3.3333cqw;background:linear-gradient(180deg,rgba(20,24,34,.46),rgba(10,14,22,.64));-webkit-backdrop-filter:none;backdrop-filter:none}
 .tile-face__meta-bg{position:absolute;inset:0;padding:1px;border-radius:inherit;pointer-events:none;background:conic-gradient(rgba(255,255,255,.1),rgba(255,255,255,.14) 50deg,rgba(255,255,255,.52) 76deg,rgba(255,255,255,.42) 92deg,rgba(255,255,255,.1) 108deg,rgba(255,255,255,.08) 245deg,rgba(255,255,255,.42) 262deg,rgba(255,255,255,.52) 280deg,rgba(255,255,255,.1) 300deg,rgba(255,255,255,.1));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
 .tile-face__title,.tile-face__artist{position:relative;margin:0;padding:0;color:#fff;font-weight:400;line-height:normal;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:49.6667cqw;text-shadow:none}
 .tile-face__title{margin:1.6667cqw 0 0 6.3333cqw;font-size:6.6667cqw}
 .tile-face__artist{margin-left:6.3333cqw;font-size:4cqw}
 .tile-face__status{position:absolute;z-index:2;right:8.3333cqw;bottom:5.3333cqw;max-width:28cqw;margin:0;color:rgba(255,255,255,.92);font-size:4cqw;line-height:1;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile-face .song-card__playing-bars{position:absolute;z-index:3;left:10.3333cqw;top:11cqw}
+.tile-face .song-card__playing-bars span{height:24px;transform-origin:bottom center;animation:tile-bar-bounce 1s ease-in-out infinite}
+.tile-face .song-card__playing-bars--paused span{animation:none;transform:scaleY(.45)}
+@keyframes tile-bar-bounce{0%,100%{transform:scaleY(.333)}50%{transform:scaleY(1)}}
 
 .song-prototype-portal { position: fixed; inset: 0; z-index: 10020; pointer-events: none; }
 .song-prototype-stage {
@@ -109,11 +114,11 @@
   border: 0;
   border-radius: 11px;
   color: #fff;
-  background-color: rgba(255,255,255,.12);
-  background-image: linear-gradient(160deg, rgba(255,255,255,.14), rgba(255,255,255,0) 60%);
-  -webkit-backdrop-filter: blur(16px) saturate(1.6);
-  backdrop-filter: blur(16px) saturate(1.6);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 6px 16px rgba(0,0,0,.18);
+  background-color: rgba(24,30,44,.84);
+  background-image: linear-gradient(160deg, rgba(255,255,255,.22), rgba(255,255,255,.03) 60%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 6px 16px rgba(0,0,0,.28);
   cursor: pointer;
   pointer-events: auto;
   transform: var(--rest-transform);
@@ -160,7 +165,7 @@
 }
 .song-prototype-action.is-danger .song-prototype-action__label { color: #ffb4ab; }
 @media (hover: hover) {
-  .song-prototype-action:hover { z-index: 4; background-color: rgba(255,255,255,.22); box-shadow: inset 0 1px 0 rgba(255,255,255,.24), 0 10px 24px rgba(0,0,0,.26); }
+  .song-prototype-action:hover { z-index: 4; background-color: rgba(36,44,64,.92); box-shadow: inset 0 1px 0 rgba(255,255,255,.26), 0 10px 24px rgba(0,0,0,.32); }
   .song-prototype-action:hover .song-prototype-action__label { max-width: 240px; padding-right: 12px; opacity: 1; }
 }
 .song-prototype-action:focus-visible .song-prototype-action__label { max-width: 240px; padding-right: 12px; opacity: 1; }
@@ -178,9 +183,9 @@
   height: 100vh;
   padding: 0;
   border: 0;
-  background: rgba(6,6,10,.38);
-  -webkit-backdrop-filter: blur(14px) saturate(1.15);
-  backdrop-filter: blur(14px) saturate(1.15);
+  background: radial-gradient(circle at 50% 45%, rgba(10, 14, 24, .64), rgba(5, 7, 12, .82));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   opacity: 0;
   pointer-events: auto;
   transition: opacity .35s ease-out;
@@ -203,6 +208,7 @@
 @keyframes song-prototype-spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
+  .tile-face .song-card__playing-bars span { animation: none; transform: scaleY(.45); }
   .song-prototype-action,
   .song-prototype-action__label,
   .song-prototype-stage,

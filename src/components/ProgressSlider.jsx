@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
+const PROGRESS_UPDATE_MS = 250;
+
 export function ProgressSlider({ player, progress = player.progress }) {
   const [preview, setPreview] = useState(null);
   const inputRef = useRef(null);
@@ -9,8 +11,8 @@ export function ProgressSlider({ player, progress = player.progress }) {
   const displayed = preview ?? progress;
 
   useEffect(() => {
-    let frame;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let timer;
     const draw = () => {
       const input = inputRef.current;
       const audio = audioRef.current;
@@ -19,13 +21,24 @@ export function ProgressSlider({ player, progress = player.progress }) {
         input.value = value;
         input.style.setProperty('--progress', `${value}%`);
       }
-      if (isPlaying && !document.hidden && !reduced.matches) frame = requestAnimationFrame(draw);
     };
-    const restart = () => { cancelAnimationFrame(frame); if (isPlaying && !document.hidden && !reduced.matches) draw(); };
+    const stop = () => { window.clearInterval(timer); timer = undefined; };
+    const restart = () => {
+      stop();
+      if (isPlaying && !document.hidden && !reduced.matches) {
+        draw();
+        timer = window.setInterval(draw, PROGRESS_UPDATE_MS);
+      }
+    };
+
     restart();
     document.addEventListener('visibilitychange', restart);
     reduced.addEventListener('change', restart);
-    return () => { cancelAnimationFrame(frame); document.removeEventListener('visibilitychange', restart); reduced.removeEventListener('change', restart); };
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', restart);
+      reduced.removeEventListener('change', restart);
+    };
   }, [audioRef, currentSongKey, isPlaying, duration]);
 
   const cancel = () => { dragRef.current = null; setPreview(null); };
