@@ -4,6 +4,7 @@ import {
   mergeExternalAndNativeEvents,
   mergeLikedSongKeys,
   resolveEffectiveLibrarySongs,
+  resolveLibrarySearchSongs,
   selectCanonicalDriveSongs,
 } from './libraryViewModel.js';
 
@@ -35,5 +36,34 @@ describe('libraryViewModel', () => {
       [{ songKey: 's2', createdAt: '2026-09-01T10:00:00Z' }],
     );
     assert.deepEqual(merged.map(e => e.songKey), ['s2', 's1']);
+  });
+
+  it('includes catalogue matches when universal search runs outside a playlist', () => {
+    const ready = [{ songKey: 'r1', track: 'Ready Song', artist: 'Other', driveFileId: 'drv-1' }];
+    const browse = [
+      ...ready,
+      { songKey: 'c1', track: 'Toxic', artist: 'Britney Spears', isCatalogueOnly: true },
+      { songKey: 'c2', track: '...Baby One More Time', artist: 'Britney Spears', isCatalogueOnly: true },
+    ];
+    const results = resolveLibrarySearchSongs({
+      searchQuery: 'Britney Spears',
+      selectedPlaylistKey: null,
+      driveReadySongs: ready,
+      browseSongs: browse,
+    });
+    assert.deepEqual(results.map(s => s.songKey), ['c1', 'c2']);
+    assert.deepEqual(
+      resolveLibrarySearchSongs({ searchQuery: '', selectedPlaylistKey: null, driveReadySongs: ready, browseSongs: browse }).map(s => s.songKey),
+      ['r1'],
+    );
+  });
+
+  it('scopes search to the selected playlist when inside a playlist view', () => {
+    const playlist = [{ songKey: 'p1', track: 'Theme Song', artist: 'Composer' }];
+    const browse = [...playlist, { songKey: 'c1', track: 'Toxic', artist: 'Britney Spears', isCatalogueOnly: true }];
+    assert.equal(
+      resolveLibrarySearchSongs({ searchQuery: 'Britney', selectedPlaylistKey: 'pl-1', playlistSongs: playlist, browseSongs: browse }).length,
+      0,
+    );
   });
 });

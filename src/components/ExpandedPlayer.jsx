@@ -219,7 +219,7 @@ export function ExpandedPlayer({
                 <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
                   <SkipBack size={26} />
                 </button>
-                <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={player.isPlayRequested ? 'Pause' : 'Play'}>
+                <button className="play-btn play-btn--large" onClick={togglePlay} aria-label={isPlaying || (player.isBuffering && player.isPlayRequested) ? 'Pause' : 'Play'}>
                   {player.isBuffering && player.isPlayRequested ? (
                     <LoaderCircle className="spin" size={26} />
                   ) : isPlaying ? (

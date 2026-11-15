@@ -560,8 +560,8 @@ select:focus-visible,
     gap: 8px;
   }
 
-  .player-buttons > button:nth-child(1),
-  .player-buttons > button:nth-child(5) {
+  .player-btn--shuffle,
+  .player-btn--repeat {
     display: none;
   }
 
@@ -836,12 +836,15 @@ button:disabled, input:disabled { opacity: .4; cursor: default; }
   .player-song-info { grid-column: 1; grid-row: 1; padding-right: 0; min-height: 46px; }
   .player-bar .playback-settings { position: relative; grid-column: 2; grid-row: 1; right: auto; top: auto; margin: 0; transform: none; justify-self: center; }
   .player-controls { display: contents; }
-  .player-buttons { grid-column: 3; grid-row: 1; width: auto; max-width: none; gap: 4px; justify-content: flex-end; }
+  .player-buttons { grid-column: 3; grid-row: 1; width: auto; max-width: none; gap: 2px; justify-content: flex-end; }
+  .player-buttons .icon-btn { width: 38px; height: 38px; min-width: 38px; min-height: 38px; }
+  .player-buttons .play-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
   .progress-row { grid-column: 1 / -1; grid-row: 2; width: 100%; height: 18px; }
   .progress-row .progress-bar { min-height: 18px; height: 18px; padding: 4px 0; }
   .playback-settings summary { min-width: 44px; width: 44px; min-height: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; }
   .playback-settings__panel { position: fixed; right: 12px; bottom: calc(var(--player-h) + var(--mobile-nav-h, 70px)); }
-  .player-buttons > button:nth-child(6) { display: none; }
+  .player-btn--shuffle,
+  .player-btn--repeat { display: none; }
 }
 /* Intrinsic grid rows prevent the platter from overflowing onto track details. */
 .expanded-player__layout { flex: 0 0 auto; min-height: 0; grid-auto-rows: max-content; }

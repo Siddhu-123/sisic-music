@@ -98,7 +98,16 @@ export function SongInfoPanel({ song, onClose, onPlay, onPlayNext, onAddToQueue,
         <dl className="song-info-panel__metadata">
           <div><dt>Artist</dt><dd>{song.artist || 'Unknown artist'}</dd></div>
           <div><dt>Created / added</dt><dd>{song.dateCreated || (song.dateAdded ? new Date(song.dateAdded).toLocaleString() : 'Unknown')}</dd></div>
-          <div><dt>Last played</dt><dd>{song.lastPlayedAt ? new Date(song.lastPlayedAt).toLocaleString() : 'Not played yet'}</dd></div>
+          <div>
+            <dt>Last played</dt>
+            <dd>
+              {(() => {
+                const parsed = song.lastPlayedAt ? new Date(song.lastPlayedAt) : null;
+                if (parsed && !Number.isNaN(parsed.getTime())) return parsed.toLocaleString();
+                return (Number(song.playCount) || 0) > 0 ? 'Date unavailable' : 'Not played yet';
+              })()}
+            </dd>
+          </div>
           <div><dt>Play count</dt><dd>{song.playCount || 0}</dd></div>
         </dl>
       </section>

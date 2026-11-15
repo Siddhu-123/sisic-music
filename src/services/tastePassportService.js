@@ -105,12 +105,13 @@ export function buildTastePassport({
   songs = [],
   playbackEvents = [],
   likedSongKeys = [],
+  gemmaVectors = null,
   now = Date.now(),
   userAgent = '',
   halfLifeDays = 30,
   maxAnchors = 40,
 } = {}) {
-  const local = chooseGalaxySpace(songs);
+  const local = chooseGalaxySpace(songs, { gemmaVectors });
   const targets = [];
   if (local.audio) targets.push({ vectorType: 'learned-audio', model: local.audio.model, dimensions: local.audio.dimensions });
   targets.push({ vectorType: 'metadata', model: METADATA_EMBEDDING_MODEL, dimensions: EMBEDDING_DIMENSIONS });
@@ -123,6 +124,7 @@ export function buildTastePassport({
       targetModel: target.model,
       targetDimensions: target.dimensions,
       likedSongKeys,
+      gemmaVectors,
       now,
       userAgent,
       recencyHalfLifeDays: halfLifeDays,

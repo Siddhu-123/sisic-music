@@ -13,6 +13,7 @@ export function StudioTopBar({
   isSyncing,
   hasLocalData = false,
   vectorCount = 0,
+  vectorDimensions = 64,
   readyCount = 0,
   searchQuery = '',
   onSearchChange,
@@ -34,6 +35,11 @@ export function StudioTopBar({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  const activeDimLabel = vectorCount > 0 ? `${vectorDimensions}D V3` : `${vectorDimensions}D META`;
+  const vectorTitle = vectorCount > 0
+    ? `Open Taste Profile & ${vectorDimensions}D Vector Analytics`
+    : `Open Taste Profile & ${vectorDimensions}D Metadata Vector Analytics`;
 
   const vaultLabel = isSyncing
     ? 'SYNCING'
@@ -80,10 +86,10 @@ export function StudioTopBar({
           type="button"
           className="studio-pill studio-pill--amber"
           onClick={onOpenTasteProfile}
-          title="Open Taste Profile & 128D Vector Analytics"
+          title={vectorTitle}
         >
           <Cpu size={12} aria-hidden="true" />
-          128D V3{vectorCount > 0 ? ` · ${vectorCount.toLocaleString()}` : ''}
+          {activeDimLabel}{vectorCount > 0 ? ` · ${vectorCount.toLocaleString()}` : ''}
         </button>
         <button
           type="button"

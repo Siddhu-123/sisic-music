@@ -233,3 +233,24 @@ test('the two-songs-per-artist cap holds when a mix is interleaved across intere
   ranked.songs.forEach(song => counts.set(song.artist, (counts.get(song.artist) || 0) + 1));
   assert.ok([...counts.values()].every(count => count <= 2), `artist counts: ${JSON.stringify([...counts])}`);
 });
+
+test('buildTastePassport derives a 128D learned-audio primary space when gemmaVectors are provided', () => {
+  const v3Songs = Array.from({ length: 14 }, (_, i) => ({
+    songKey: `v3-${i}`,
+    artist: `Artist ${i % 3}`,
+    track: `Track ${i}`,
+  }));
+  const gemmaVectors = new Map(v3Songs.map((s, i) => {
+    const vec = Array.from({ length: 128 }, (__, d) => (d === i % 128 ? 1 : 0.05));
+    return [s.songKey, { songKey: s.songKey, embeddingModel: 'sisic-recs-v3/softwhiten-128d-int8', dimensions: 128, vector: vec }];
+  }));
+  const passport = buildTastePassport({
+    songs: v3Songs,
+    likedSongKeys: ['v3-0', 'v3-1', 'v3-2'],
+    gemmaVectors,
+    now: Date.parse('2026-04-01T12:00:00Z'),
+  });
+  assert.equal(passport.spaces[0].vectorType, 'learned-audio');
+  assert.equal(passport.spaces[0].dimensions, 128);
+  assert.equal(passport.spaces[0].interoperable, true);
+});

@@ -52,8 +52,10 @@ import {
   mergeExternalAndNativeEvents,
   mergeLikedSongKeys,
   resolveEffectiveLibrarySongs,
+  resolveLibrarySearchSongs,
   selectCanonicalDriveSongs,
 } from './services/libraryViewModel.js';
+import { EMBEDDING_DIMENSIONS } from './services/tasteEmbeddingService.js';
 import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, RECS_V3_DIMENSIONS, RECS_V3_MODEL, importGemmaVectors, loadPreferredSongVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
 import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
@@ -295,7 +297,7 @@ function playableStatus(song) {
 }
 
 function App() {
-  const { isAuthenticated, hasAuthorizedSession, signedOutExplicitly, isAuthorizing, isSyncing, syncStatus, error: authError, login, logout, syncLibrary, setupStatus } = useAuth();
+  const { isAuthenticated, hasAuthorizedSession, isTestSession, signedOutExplicitly, isAuthorizing, isSyncing, syncStatus, error: authError, login, logout, syncLibrary, setupStatus } = useAuth();
   const player = useAudioPlayer();
   const { toasts, addToast } = useToast();
 
@@ -436,7 +438,8 @@ function App() {
   const { currentSongKey, isPlaying, playbackEventQueue, configurePlayback } = player;
 
   useEffect(() => {
-    if (![VIEWS.EXPLORE, VIEWS.DOWNLOADS].includes(view) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
+    const needsCatalogueForSearch = view === VIEWS.LIBRARY && !selectedPlaylistKey && Boolean(searchQuery.trim());
+    if ((![VIEWS.EXPLORE, VIEWS.DOWNLOADS].includes(view) && !needsCatalogueForSearch) || catalogue.length || catalogueLoadStartedRef.current) return undefined;
     let cancelled = false;
     catalogueLoadStartedRef.current = true;
     const loadCatalogue = async () => {
@@ -464,13 +467,13 @@ function App() {
         if (!cancelled) setCatalogueLoading(false);
       }
     };
-    const cancel = scheduleIdleWork(loadCatalogue, view === VIEWS.EXPLORE ? 150 : 1200);
+    const cancel = scheduleIdleWork(loadCatalogue, (view === VIEWS.EXPLORE || needsCatalogueForSearch) ? 80 : 1200);
     return () => {
       cancelled = true;
       cancel();
       if (!catalogue.length) catalogueLoadStartedRef.current = false;
     };
-  }, [catalogue.length, view]);
+  }, [catalogue.length, searchQuery, selectedPlaylistKey, view]);
 
 
   const libraryData = useLiveQuery(getLibrarySnapshot, [], EMPTY_LIBRARY);
@@ -2014,7 +2017,9 @@ function App() {
     { id: VIEWS.CONSTELLATION, icon: Sparkles, label: 'Galaxy', mobileLabel: 'Galaxy' },
   ];
   const mobilePrimaryNavItems = navItems.filter(item => item.id !== VIEWS.DUPLICATES);
-  const mobileMoreActive = view === VIEWS.DUPLICATES || isTasteProfileOpen || isEqOpen;
+  const mobileMoreActive = view === VIEWS.DUPLICATES || isTasteProfileOpen || isEqOpen || showPlaylistsDrawer || Boolean(selectedPlaylistKey);
+  const firstGemmaVectorRow = gemmaVectors.size > 0 ? gemmaVectors.values().next().value : null;
+  const activeVectorDimensions = Number(firstGemmaVectorRow?.dimensions || firstGemmaVectorRow?.vector?.length) || EMBEDDING_DIMENSIONS;
 
   const renderSongCard = (song, list, options = {}) => (
     <SongCard
@@ -2212,6 +2217,7 @@ function App() {
           isSyncing={isSyncing}
           hasLocalData={allSongs.length > 0}
           vectorCount={gemmaVectors.size}
+          vectorDimensions={activeVectorDimensions}
           readyCount={driveReadySongs.length}
           searchQuery={searchQuery}
           onSearchChange={value => {
@@ -2231,11 +2237,11 @@ function App() {
           onOpenStorage={() => setShowStoragePanel(true)}
           onReconnect={login}
         />
-        {(isSyncing || (bannerError && (localDbError || actionError || player.error || (!isUiPreview && !String(authError || '').startsWith('Drive connection paused'))))) && (
+        {(isSyncing || (bannerError && (localDbError || actionError || player.error || isTestSession || (!isUiPreview && !String(authError || '').startsWith('Drive connection paused'))))) && (
           <SyncBanner
             isSyncing={isSyncing}
             syncStatus={bannerStatus}
-            error={Boolean(bannerError)}
+            error={Boolean(bannerError) && !(isTestSession && bannerError === authError)}
             onSync={syncLibrary}
             actionLabel={!isAuthenticated ? 'Reconnect Drive' : localDbError ? 'Reset local library' : ''}
             onAction={!isAuthenticated ? login : localDbError ? handleResetLocalLibrary : undefined}
@@ -2288,7 +2294,19 @@ function App() {
 
             {visiblePlaylists.length > 0 && (
               <section className="home-section">
-                <h2 className="home-section__title">Your Playlists</h2>
+                <div className="home-section__header-row">
+                  <h2 className="home-section__title">Your Playlists</h2>
+                  {visiblePlaylists.length > 12 && (
+                    <button
+                      type="button"
+                      className="home-section__see-all"
+                      data-playlists-drawer-trigger="true"
+                      onClick={() => setShowPlaylistsDrawer(true)}
+                    >
+                      See all ({visiblePlaylists.length})
+                    </button>
+                  )}
+                </div>
                 <div className="content-rail">
                   {visiblePlaylists.slice(0, 12).map(playlist => (
                     <PlaylistTile
@@ -2395,7 +2413,7 @@ function App() {
           <>
             <header className="main-view__header">
               <div className="main-view__title-row">
-                <h1 className="main-view__title">{selectedPlaylist?.name || 'Ready'}</h1>
+                <h1 className="main-view__title">{selectedPlaylist?.name || (searchQuery.trim() ? 'Library & Catalogue Search' : 'Ready')}</h1>
                 {selectedPlaylist && isDeletablePlaylist(selectedPlaylist) && (
                   <button
                     type="button"
@@ -2422,23 +2440,38 @@ function App() {
             </header>
 
             {(() => {
-              const filtered = searchQuery.trim().length >= 1
-                ? librarySongs.filter(song => {
-                    const q = searchQuery.toLowerCase();
-                    return String(song.track || '').toLowerCase().includes(q) || String(song.artist || '').toLowerCase().includes(q);
-                  })
-                : librarySongs;
+              const trimmedQuery = searchQuery.trim();
+              const filtered = resolveLibrarySearchSongs({
+                searchQuery,
+                selectedPlaylistKey,
+                playlistSongs: librarySongs,
+                driveReadySongs,
+                browseSongs: exploreBrowseSongs,
+              });
+              const readyMatches = !selectedPlaylist && trimmedQuery ? filtered.filter(song => Boolean(song.driveFileId)).length : 0;
+              const catalogueMatches = !selectedPlaylist && trimmedQuery ? filtered.length - readyMatches : 0;
 
               return filtered.length === 0 ? (
                 <div className="empty-state">
                   <Music2 size={48} color="var(--text-muted)" />
-                  <h3>No songs</h3>
-                  <p>{selectedPlaylist ? 'This playlist is empty' : 'No Drive-ready songs yet'}</p>
+                  <h3>{trimmedQuery ? 'No matching songs' : 'No songs'}</h3>
+                  <p>
+                    {trimmedQuery
+                      ? (selectedPlaylist
+                        ? `No songs matching "${trimmedQuery}" in ${selectedPlaylist.name}.`
+                        : catalogueLoading
+                          ? 'Searching library and catalogue…'
+                          : `No library or catalogue songs matching "${trimmedQuery}".`)
+                      : (selectedPlaylist ? 'This playlist is empty' : 'No Drive-ready songs yet')}
+                  </p>
                 </div>
               ) : (
                 <>
                   <div className="library-count">
-                    {filtered.length} songs
+                    {filtered.length} {filtered.length === 1 ? 'song' : 'songs'}
+                    {!selectedPlaylist && trimmedQuery && (
+                      <span> · {readyMatches} ready · {catalogueMatches} in catalogue</span>
+                    )}
                     {duplicateSongs.length > 0 && (
                       <button type="button" className="btn-primary" style={{ marginLeft: 12, padding: "4px 12px" }} onClick={handleRemoveAllDuplicates}>
                         Remove duplicates ({duplicateSongs.length})
@@ -2447,7 +2480,7 @@ function App() {
                   </div>
                   <VirtualSongGrid
                     songs={filtered}
-                    renderSong={song => renderSongCard(song, searchQuery.trim() ? null : filtered, { isSearch: Boolean(searchQuery.trim()) })}
+                    renderSong={song => renderSongCard(song, trimmedQuery ? null : filtered, { isSearch: Boolean(trimmedQuery) })}
                   />
                 </>
               );
@@ -2483,8 +2516,8 @@ function App() {
               return filtered.length === 0 ? (
                 <div className="empty-state">
                   <Copy size={48} color="var(--text-muted)" />
-                  <h3>No duplicates</h3>
-                  <p>Use Song actions → Mark as duplicate to move a song here.</p>
+                  <h3>{searchQuery.trim() ? 'No matching duplicates' : 'No duplicates'}</h3>
+                  <p>{searchQuery.trim() ? `No duplicate songs matching "${searchQuery.trim()}".` : 'Use Song actions → Mark as duplicate to move a song here.'}</p>
                 </div>
               ) : (
                 <>
@@ -2740,6 +2773,7 @@ function App() {
             librarySummary={canonicalLibrarySummary}
             songs={effectiveAllSongs}
             likedSongKeys={canonicalLikedKeys}
+            gemmaVectors={gemmaVectors}
             externalHistoryPack={externalHistoryPack}
             personalRankerState={personalRankerState}
             onImportListeningHistory={handleImportListeningHistory}
@@ -2790,7 +2824,15 @@ function App() {
           </button>
           {isMobileMoreOpen && (
             <div id="mobile-more-menu" className="mobile-nav__more-menu" role="menu" aria-label="More navigation options">
+              <button type="button" role="menuitem" data-playlists-drawer-trigger="true" onClick={() => { setShowPlaylistsDrawer(true); setIsMobileMoreOpen(false); }}>
+                <ListMusic size={18} />
+                Playlists ({visiblePlaylists.length})
+              </button>
               <button type="button" role="menuitem" onClick={() => { openPlaylistPicker(null); setIsMobileMoreOpen(false); }}><Plus size={18} />Create playlist</button>
+              <button type="button" role="menuitem" onClick={() => { setShowQueue(open => !open); setIsMobileMoreOpen(false); }}>
+                <Music2 size={18} />
+                Queue{player.queue.length ? ` (${player.queue.length})` : ''}
+              </button>
               <button type="button" role="menuitem" onClick={() => { setView(VIEWS.DUPLICATES); setSelectedPlaylistKey(null); setSearchQuery(''); setIsMobileMoreOpen(false); }}>
                 <Copy size={18} />
                 Duplicates{duplicateSongs.length ? ` (${duplicateSongs.length})` : ''}

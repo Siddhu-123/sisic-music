@@ -9,12 +9,17 @@ import {
   isSameOriginAuthAvailable,
   startTopLevelLogin,
 } from '../services/cloudflareAuth';
+import { clearAgentTestSession, isAgentTestSessionActive } from '../services/agentTestAuth';
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID?.trim() || '';
 export const SPOTIFY_JSON_FILE_ID = import.meta.env.VITE_SPOTIFY_JSON_FILE_ID?.trim() || '';
 export const DRIVE_FOLDER_ID = import.meta.env.VITE_DRIVE_FOLDER_ID?.trim() || '';
+const AGENT_TEST_TOKEN = import.meta.env.VITE_AGENT_TEST_TOKEN?.trim() || '';
 const RECONNECT_MESSAGE = 'Drive connection paused. Reconnect to continue syncing and streaming.';
+const TEST_SESSION_MESSAGE = 'Agent test session active (Drive not connected).';
 const DEV_UI_PREVIEW = import.meta.env.DEV && new URLSearchParams(window.location.search).has('ui-preview');
+const AGENT_TEST_SESSION = isAgentTestSessionActive(AGENT_TEST_TOKEN);
+const BYPASS_LOGIN_GATE = DEV_UI_PREVIEW || AGENT_TEST_SESSION;
 
 const REQUIRED_CONFIG = {
   VITE_GOOGLE_CLIENT_ID: CLIENT_ID,
@@ -89,13 +94,14 @@ function readInitialAuthError() {
 
 export function useAuth() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => driveService.isAuthenticated);
-  const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || DEV_UI_PREVIEW || Boolean(getStoredRefreshToken()));
+  const [hasAuthorizedSession, setHasAuthorizedSession] = useState(() => driveService.hasAuthorizedSession || BYPASS_LOGIN_GATE || Boolean(getStoredRefreshToken()));
   const [isAuthorizing, setIsAuthorizing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState('');
   const [signedOutExplicitly, setSignedOutExplicitly] = useState(false);
   const [error, setError] = useState(() => readInitialAuthError()
     || missingConfigMessage()
+    || (AGENT_TEST_SESSION && !driveService.isAuthenticated ? TEST_SESSION_MESSAGE : '')
     || ((driveService.hasAuthorizedSession || DEV_UI_PREVIEW || Boolean(getStoredRefreshToken())) && !driveService.isAuthenticated ? RECONNECT_MESSAGE : ''));
   const hasSyncedOnMount = useRef(false);
 
@@ -112,6 +118,10 @@ export function useAuth() {
 
     const missing = getMissingConfig();
     if (missing.length > 0 && !isSameOriginAuthAvailable()) return undefined;
+    // Automated test sessions intentionally run without Drive auth unless the user explicitly reconnects.
+    if (AGENT_TEST_SESSION && !driveService.isAuthenticated) {
+      return undefined;
+    }
 
     const backendAvailable = isAuthBackendAvailable();
     const shouldAttemptSilentRestore = backendAvailable || driveService.hasAuthorizedSession || Boolean(getStoredRefreshToken());
@@ -363,6 +373,7 @@ export function useAuth() {
   const logout = useCallback(async () => {
     setIsAuthorizing(true);
     try {
+      clearAgentTestSession();
       const res = await driveService.logout();
       setIsAuthenticated(false);
       setHasAuthorizedSession(false);
@@ -382,5 +393,5 @@ export function useAuth() {
     return undefined;
   }, [isAuthenticated, isSyncing, syncLibrary]);
 
-  return { isAuthenticated, hasAuthorizedSession, signedOutExplicitly, isAuthorizing, isSyncing, syncStatus, error, login, logout, syncLibrary, setupStatus: getAuthSetupStatus() };
+  return { isAuthenticated, hasAuthorizedSession, isTestSession: AGENT_TEST_SESSION, signedOutExplicitly, isAuthorizing, isSyncing, syncStatus, error, login, logout, syncLibrary, setupStatus: getAuthSetupStatus() };
 }

@@ -46,6 +46,7 @@ export function TasteProfileModal({
   librarySummary,
   songs = [],
   likedSongKeys = [],
+  gemmaVectors = null,
   externalHistoryPack = null,
   personalRankerState = null,
   onImportListeningHistory = null,
@@ -65,8 +66,8 @@ export function TasteProfileModal({
 
   // The same signals Explore ranks with: recency-weighted plays, skips and likes.
   const passport = useMemo(
-    () => (isOpen ? buildTastePassport({ songs, playbackEvents: playbackEvents || [], likedSongKeys }) : null),
-    [isOpen, songs, playbackEvents, likedSongKeys],
+    () => (isOpen ? buildTastePassport({ songs, playbackEvents: playbackEvents || [], likedSongKeys, gemmaVectors }) : null),
+    [isOpen, songs, playbackEvents, likedSongKeys, gemmaVectors],
   );
   const primary = passport?.spaces[0] || null;
   const tasteVector = primary?.longTerm || null;

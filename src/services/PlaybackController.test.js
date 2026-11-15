@@ -1256,4 +1256,13 @@ test('the controller path speaks once per transition when mix starts, and not wh
   assert.equal(spokenTexts.length, 0);
 });
 
+test('addToQueue appends after existing upcoming songs while enqueueNext inserts first', async t => {
+  const { c } = fixture(t);
+  c.setQueueAndPlay(songs.slice(0, 4), 0, { isSearch: false });
+  await settle();
+  c.addToQueue({ songKey: 'tail', track: 'Tail', driveFileId: 'tail' });
+  c.enqueueNext({ songKey: 'head', track: 'Head', driveFileId: 'head' });
+  assert.deepEqual(c.state.queue.map(s => s.songKey), ['a', 'head', 'b', 'c', 'd', 'tail']);
+});
+
 

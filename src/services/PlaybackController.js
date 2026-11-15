@@ -908,23 +908,9 @@ export class PlaybackController {
     const manualQueue = [...(this.state.manualQueue || []).filter(item => keyOf(item) !== key), cleaned];
     const currentQueue = this.state.queue;
     const currentIndex = this.state.queueIndex;
-    const manualKeys = new Set(manualQueue.map(keyOf));
-
-    // Filter out previous occurrences of key after currentIndex
+    // Filter out previous occurrences of key after currentIndex, then append at the end of upcoming tracks.
     const filteredQueue = currentQueue.filter((item, idx) => idx <= currentIndex || keyOf(item) !== key);
-
-    // Find insertion position: after the last existing manual queue song after currentIndex
-    let insertPos = currentIndex;
-    for (let i = currentIndex + 1; i < filteredQueue.length; i++) {
-      if (manualKeys.has(keyOf(filteredQueue[i]))) {
-        insertPos = i;
-      } else {
-        break;
-      }
-    }
-
-    const nextQueue = [...filteredQueue];
-    nextQueue.splice(insertPos + 1, 0, cleaned);
+    const nextQueue = [...filteredQueue, cleaned];
 
     this.update({ manualQueue });
     this.editQueue(nextQueue, insertAtEnd(this.originalQueue, cleaned));

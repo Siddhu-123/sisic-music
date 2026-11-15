@@ -325,6 +325,16 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     if (meta && areVectorSpacesCompatible(spaceMeta, meta)) {
       return meta.vector;
     }
+    if (targetSpace === 'learned-audio' && gemma?.vector) {
+      const gemmaMeta = {
+        vectorType: 'learned-audio',
+        model: gemma.embeddingModel || 'embeddinggemma-2',
+        dimensions: gemma.dimensions || gemma.vector.length,
+      };
+      if (areVectorSpacesCompatible(spaceMeta, gemmaMeta)) {
+        return validateAndNormalizeVector(gemma.vector, targetDimensions);
+      }
+    }
     if (targetSpace === 'metadata' && targetDimensions === EMBEDDING_DIMENSIONS) {
       return getSongVector(song);
     }

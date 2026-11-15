@@ -43,6 +43,8 @@ export function PlayerBar({
       ? `DJ · ${(player.djPlan.style || 'SEAM').toUpperCase()}`
       : 'ADAPTIVE DJ')
     : 'DJ OFF';
+  const isLoadingPlayback = Boolean(player.isBuffering && player.isPlayRequested);
+  const playActionLabel = isPlaying || isLoadingPlayback ? 'Pause' : 'Play';
 
   return (
     <div className="player-bar player-bar--floating">
@@ -78,26 +80,26 @@ export function PlayerBar({
             </span>
           )}
           <button
-            className={`icon-btn ${shuffleMode !== 'off' ? 'icon-btn--active' : ''}`}
+            className={`icon-btn player-btn--shuffle ${shuffleMode !== 'off' ? 'icon-btn--active' : ''}`}
             onClick={toggleShuffle}
             aria-label={`Shuffle: ${shuffleMode}`}
             title={`Shuffle: ${shuffleMode}`}
           >
             <Shuffle size={16} />
           </button>
-          <button className="icon-btn" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
+          <button className="icon-btn player-btn--prev" onClick={() => playPrev({ reason: 'user-prev' })} aria-label="Previous">
             <SkipBack size={20} />
           </button>
-          <button className="play-btn" disabled={!player.queue.length} onClick={togglePlay} aria-label={player.isPlayRequested ? 'Pause' : 'Play'}>
-            {player.isBuffering && player.isPlayRequested ? <LoaderCircle className="spin" size={22} /> : isPlaying ? <Pause size={22} fill="black" /> : <Play size={22} fill="black" />}
+          <button className="play-btn" disabled={!player.queue.length} onClick={togglePlay} aria-label={playActionLabel}>
+            {isLoadingPlayback ? <LoaderCircle className="spin" size={22} /> : isPlaying ? <Pause size={22} fill="black" /> : <Play size={22} fill="black" />}
           </button>
-          <button className="icon-btn" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">
+          <button className="icon-btn player-btn--next" onClick={() => playNext({ reason: 'user-next' })} aria-label="Next">
             <SkipForward size={20} />
           </button>
-          <button className={`icon-btn ${player.repeatMode !== 'off' ? 'icon-btn--active' : ''}`} onClick={player.toggleRepeat} aria-label={`Repeat: ${player.repeatMode}`} title={`Repeat: ${player.repeatMode}`}>
+          <button className={`icon-btn player-btn--repeat ${player.repeatMode !== 'off' ? 'icon-btn--active' : ''}`} onClick={player.toggleRepeat} aria-label={`Repeat: ${player.repeatMode}`} title={`Repeat: ${player.repeatMode}`}>
             {player.repeatMode === 'one' ? <Repeat1 size={16} /> : <Repeat size={16} />}
           </button>
-          <button className="icon-btn" onClick={onToggleQueue} aria-label="Queue" title="Queue">
+          <button className="icon-btn player-btn--queue" onClick={onToggleQueue} aria-label="Queue" title="Queue">
             <ListMusic size={16} />
           </button>
         </div>
