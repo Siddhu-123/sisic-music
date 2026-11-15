@@ -242,7 +242,7 @@ function pairDifference(pair) {
   throw new TypeError('Each pair must contain preferred and rejected feature vectors, or a difference vector');
 }
 
-/** Fits six pairwise logistic weights with a Gaussian prior and sign-preserving bounds. */
+/** Fits pairwise logistic weights with a Gaussian prior and sign-preserving bounds. */
 export function trainMapPairwiseWeights(pairs, {
   prior = MAP_PRIOR_WEIGHTS,
   lambda = 12.0,
@@ -251,20 +251,22 @@ export function trainMapPairwiseWeights(pairs, {
   epochs = 35,
 } = {}) {
   const center = Array.from(prior, Number);
-  if (center.length !== 6 || center.some(value => !Number.isFinite(value))) {
-    throw new TypeError('prior must contain six finite weights');
+  if (!center.length || center.some(value => !Number.isFinite(value))) {
+    throw new TypeError('prior must contain finite weights');
   }
   const rows = Array.from(pairs || [], pair => ({
     diff: pairDifference(pair),
     weight: Math.max(0.01, Number(pair?.weight ?? 1) || 1),
   }));
   if (rows.some(r => r.diff.length !== center.length || r.diff.some(value => !Number.isFinite(value)))) {
-    throw new TypeError('Pair feature vectors must contain six finite values');
+    throw new TypeError(`Pair feature vectors must contain ${center.length} finite values`);
   }
   if (!rows.length) return [...center];
-  const bounds = center.map(value => {
-    let low = value - Math.abs(delta);
-    let high = value + Math.abs(delta);
+  const bounds = center.map((value, index) => {
+    const rawDelta = Array.isArray(delta) ? Number(delta[index] ?? 0.4) : Number(delta);
+    const span = Math.abs(Number.isFinite(rawDelta) ? rawDelta : 0.4);
+    let low = value - span;
+    let high = value + span;
     if (value > 0) low = Math.max(low, value >= 0.05 ? 0.05 : Number.EPSILON);
     if (value < 0) high = Math.min(high, value <= -0.05 ? -0.05 : -Number.EPSILON);
     return [low, high];
@@ -315,6 +317,33 @@ export function registerSkipPredictor(fn) {
   skipPredictor = fn;
 }
 export function clearSkipPredictor() { skipPredictor = null; }
+export function hasCustomSkipPredictor() { return typeof skipPredictor === 'function'; }
+
+export const SKIP_PRIOR_WEIGHTS = Object.freeze([
+  -0.4,   // bias
+  -0.35,  // affinity
+  -0.7,   // steerScore
+  1.4,    // transitionPenalty
+  0.0,    // hourCos
+  0.0,    // hourSin
+  -0.8,   // searchSource
+  -0.025, // positionInQueue
+]);
+
+export function skipFeatureVector(features = {}) {
+  const hour = Number(features.hourOfDay || 0);
+  const angle = (2 * Math.PI * ((hour % 24) + 24) % 24) / 24;
+  return [
+    1,
+    Math.max(-2, Math.min(2, Number(features.affinity || 0))),
+    Math.max(-1, Math.min(1, Number(features.steerScore || 0))),
+    Math.max(0, Math.min(1, Number(features.transitionPenalty || 0))),
+    Math.cos(angle),
+    Math.sin(angle),
+    features.sourceType === 'search' ? 1 : 0,
+    Math.max(0, Math.min(20, Number(features.positionInQueue || 0))),
+  ];
+}
 
 // Default logistic heuristic: bias -0.4, affinity -0.35, steerScore -0.7,
 // transition penalty +1.4, hourOfDay 0, search source -0.8, queue position -0.025.
@@ -329,6 +358,89 @@ export function predictSkip(features = {}) {
     + source
     - 0.025 * Number(features.positionInQueue || 0);
   return 1 / (1 + Math.exp(-x));
+}
+
+export function createSkipPredictorFromWeights(weights = SKIP_PRIOR_WEIGHTS) {
+  const w = Array.from(weights, Number);
+  return (features = {}) => {
+    const xVec = skipFeatureVector(features);
+    let logit = 0;
+    for (let i = 0; i < w.length; i++) logit += w[i] * (xVec[i] || 0);
+    return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, logit))));
+  };
+}
+
+/** Trains a Gaussian-prior logistic regression skip model on buildSkipTrainingRows output. */
+export function trainSkipModel(rows = [], {
+  prior = SKIP_PRIOR_WEIGHTS,
+  lambda = 8.0,
+  delta = 1.2,
+  lr = 0.08,
+  epochs = 60,
+  minRows = 12,
+} = {}) {
+  const center = Array.from(prior, Number);
+  const validRows = (Array.isArray(rows) ? rows : []).filter(r => r && (r.label === 0 || r.label === 1));
+  const positives = validRows.filter(r => r.label === 1).length;
+  const negatives = validRows.length - positives;
+  if (validRows.length < minRows || positives < 2 || negatives < 2) {
+    return {
+      trained: false,
+      reason: 'insufficient-data',
+      weights: [...center],
+      predict: createSkipPredictorFromWeights(center),
+    };
+  }
+  const weights = [...center];
+  const bounds = center.map((v, i) => {
+    const span = Array.isArray(delta) ? Math.abs(delta[i] ?? 1.2) : Math.abs(delta);
+    return [v - span, v + span];
+  });
+  const totalWeight = validRows.reduce((s, r) => s + Math.max(0.01, Number(r.weight ?? 1) || 1), 0) || 1;
+  for (let epoch = 0; epoch < epochs; epoch++) {
+    const grad = new Array(weights.length).fill(0);
+    for (const row of validRows) {
+      const wSample = Math.max(0.01, Number(row.weight ?? 1) || 1);
+      const xVec = skipFeatureVector(row);
+      let logit = 0;
+      for (let i = 0; i < weights.length; i++) logit += weights[i] * xVec[i];
+      const pred = 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, logit))));
+      const err = (pred - row.label) * wSample;
+      for (let i = 0; i < weights.length; i++) grad[i] += err * xVec[i];
+    }
+    for (let i = 0; i < weights.length; i++) {
+      const g = (grad[i] / totalWeight) + (lambda / totalWeight) * (weights[i] - center[i]);
+      weights[i] = Math.max(bounds[i][0], Math.min(bounds[i][1], weights[i] - lr * g));
+    }
+  }
+  return {
+    trained: true,
+    reason: 'trained',
+    weights,
+    predict: createSkipPredictorFromWeights(weights),
+  };
+}
+
+export function computeRocAuc(scores = [], labels = []) {
+  const n = Math.min(scores.length, labels.length);
+  if (n < 2) return null;
+  const pairs = [];
+  for (let i = 0; i < n; i++) {
+    const s = Number(scores[i]);
+    const y = Number(labels[i]);
+    if (Number.isFinite(s) && (y === 0 || y === 1)) pairs.push({ s, y });
+  }
+  const pos = pairs.filter(p => p.y === 1);
+  const neg = pairs.filter(p => p.y === 0);
+  if (!pos.length || !neg.length) return null;
+  let wins = 0;
+  for (const p of pos) {
+    for (const q of neg) {
+      if (p.s > q.s) wins += 1;
+      else if (p.s === q.s) wins += 0.5;
+    }
+  }
+  return wins / (pos.length * neg.length);
 }
 
 function affinityFor(affinities, songKey) {

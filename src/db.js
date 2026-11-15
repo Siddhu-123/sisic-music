@@ -955,3 +955,61 @@ export async function getSongVector(songKey, embeddingModel) {
   if (!songKey || !embeddingModel || !db?.songVectors) return null;
   return db.songVectors.get([songKey, embeddingModel]);
 }
+
+/**
+ * Fast one-shot seed used by local dev cache hydration when the DB is empty.
+ */
+export async function bulkSeedSnapshotToDb({ songs = [], playlists = [], playbackEvents = [] } = {}) {
+  const deduped = new Map();
+  for (const raw of songs) {
+    const normalized = normalizeSongInput(raw);
+    if (normalized.songKey && !deduped.has(normalized.songKey)) {
+      deduped.set(normalized.songKey, normalized);
+    }
+  }
+  const songRows = [...deduped.values()];
+  const chunkSize = 500;
+  for (let start = 0; start < songRows.length; start += chunkSize) {
+    await db.songs.bulkAdd(songRows.slice(start, start + chunkSize));
+  }
+
+  if (Array.isArray(playlists) && playlists.length > 0) {
+    const playlistRows = [];
+    const linkRows = [];
+    for (const playlist of playlists) {
+      const name = String(playlist?.name || '').trim();
+      const playlistKey = playlist?.playlistKey || getPlaylistKey(name);
+      if (!playlistKey || !name || !Array.isArray(playlist?.songKeys)) continue;
+      playlistRows.push({
+        playlistKey,
+        name,
+        source: playlist.source || 'sisic',
+        updatedAt: playlist.updatedAt || new Date().toISOString(),
+      });
+      for (const songKey of playlist.songKeys) {
+        if (songKey) {
+          linkRows.push({
+            playlistKey,
+            songKey,
+            playlistName: name,
+            addedAt: Date.now(),
+          });
+        }
+      }
+    }
+    if (playlistRows.length > 0) await db.playlists.bulkPut(playlistRows);
+    for (let start = 0; start < linkRows.length; start += chunkSize) {
+      await db.playlistSongs.bulkPut(linkRows.slice(start, start + chunkSize));
+    }
+  }
+
+  if (Array.isArray(playbackEvents) && playbackEvents.length > 0) {
+    const validEvents = playbackEvents
+      .filter(evt => evt && (evt.id || evt.eventId))
+      .map(evt => ({ ...evt, eventId: evt.eventId || evt.id }));
+    if (validEvents.length > 0) await db.playbackEvents.bulkPut(validEvents);
+  }
+
+  await db.metadata.put({ key: 'lastSync', value: new Date().toISOString() });
+  return { totalSongs: songRows.length, playlistCount: playlists.length, eventCount: playbackEvents.length };
+}

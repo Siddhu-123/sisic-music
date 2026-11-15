@@ -8,11 +8,10 @@ import { getDriveAppBaseUrl, getDriveStreamWorkerUrl } from './services/driveStr
 (() => {
   try {
     const saved = localStorage.getItem('sisic_theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const theme = saved || (prefersDark ? 'dark' : 'light');
+    const theme = saved === 'light' || saved === 'dark' ? saved : 'dark';
     document.documentElement.setAttribute('data-theme', theme);
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', theme === 'dark' ? '#12141a' : '#e7e8ec');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#07090f' : '#e7e8ec');
   } catch (e) {
     console.warn('Initial theme application failed:', e);
   }

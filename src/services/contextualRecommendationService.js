@@ -4,15 +4,33 @@ import {
   EMBEDDING_DIMENSIONS,
   getSongEmbedding,
 } from './tasteEmbeddingService.js';
-import { buildInterests, interestAffinity, scoreInterestsLogSumExp } from './tasteInterests.js';
+import {
+  buildInterests,
+  interestAffinity,
+  prepareInterestsLogSumExp,
+  scoreInterestsLogSumExp,
+  scorePreparedInterestsLogSumExp,
+} from './tasteInterests.js';
 import {
   MAP_PRIOR_WEIGHTS,
   createSessionSteer,
+  hasCustomSkipPredictor,
   outcomeWeight,
   pairTransitionStats,
+  predictSkip,
   transitionPenalty,
 } from './behaviourLearning.js';
 import { GEMMA2_MODEL } from './gemmaVectors.js';
+import {
+  DEFAULT_FULL_SCAN_THRESHOLD,
+  DEFAULT_STAGE1_LIMIT,
+  selectStage1Candidates,
+} from './candidateIndex.js';
+import {
+  extractRecentAnchorKeys,
+  scoreCooccurrenceCandidate,
+  topCooccurrenceCandidates,
+} from './sessionCooccurrence.js';
 
 export const PLAYBACK_SESSION_GAP_MS = 20 * 60 * 1000;
 export function currentSessionEvents(events = [], gapMs = PLAYBACK_SESSION_GAP_MS) {
@@ -132,9 +150,9 @@ function addEventToTrack(track, event) {
     track.starts += 1;
     track.positiveWeight += eventType === 'playback-resume' ? 0.32 : 0.38;
   }
-  if (eventType === 'playback-complete') {
+  if (eventType === 'playback-complete' || eventType === 'playback-replay') {
     track.completeCount += 1;
-    track.positiveWeight += 1;
+    track.positiveWeight += eventType === 'playback-replay' ? 1.2 : 1;
   } else if (eventType === 'playback-pause') {
     track.pauseCount += 1;
     track.positiveWeight += completionRatio(event) >= 0.65 ? 0.7 : 0.15;
@@ -144,7 +162,8 @@ function addEventToTrack(track, event) {
   }
   if (eventType === 'user-skip') {
     track.skipCount += 1;
-    track.negativeWeight += 1;
+    // Honour skip position/duration so instant <10s skips outweigh late 2m+ listens.
+    track.negativeWeight += Math.max(0.05, Math.abs(outcomeWeight(event)) || 1);
   } else if (eventType === 'playback-short-ended') {
     track.shortEndCount += 1;
     if (completionRatio(event) >= 0.8) track.positiveWeight += 0.8;
@@ -355,19 +374,26 @@ export function buildContextualTasteProfile(songs = [], playbackEvents = [], opt
     if (sessionHadVector) bucketAccumulators.get(bucketKey).sessions += 1;
   });
 
-  // Explicit likes and imported play counts are durable taste signals even
-  // with little or no event history (e.g. a freshly synced device).
+  // Explicit likes, user-curated playlists, and imported play counts are durable taste signals
+  // even with little or no event history (e.g. a freshly synced device).
   const likedSongKeys = new Set(options.likedSongKeys || []);
   let explicitSignalCount = 0;
   songs.forEach(song => {
     const key = song.songKey || getSongKey(song);
     const likeWeight = likedSongKeys.has(key) ? 0.9 : 0;
+    const curatedCount = Array.isArray(song.playlistKeys)
+      ? song.playlistKeys.filter(pk => pk && pk !== '__listening_history__').length
+      : 0;
+    const playlistWeight = !likeWeight && curatedCount > 0
+      ? Math.min(0.45, 0.25 + 0.1 * (curatedCount - 1))
+      : 0;
     const playWeight = Math.min(0.6, Math.log1p(finiteNumber(song.playCount)) * 0.2);
-    if (!likeWeight && !playWeight) return;
-    bumpSignal(key, song, 'positive', likeWeight + playWeight);
+    const totalExplicit = likeWeight + playlistWeight + playWeight;
+    if (!totalExplicit) return;
+    bumpSignal(key, song, 'positive', totalExplicit);
     const vector = getCompatibleVector(song);
     if (!vector) return;
-    addWeightedVector(positiveAccumulator, vector, likeWeight + playWeight);
+    addWeightedVector(positiveAccumulator, vector, totalExplicit);
     explicitSignalCount += 1;
   });
 
@@ -481,12 +507,168 @@ export function scoreWithMapFeatures(rows = [], weights = MAP_PRIOR_WEIGHTS) {
   });
 }
 
+export const CONTEXTUAL_RANKER_FEATURES = Object.freeze([
+  'tasteAffinity',
+  'staleTasteBoost',
+  'sequenceBoost',
+  'skipAffinity',
+  'liked',
+  'popularity',
+  'discovery',
+  'recentPenalty',
+  'steer',
+  'skipRisk',
+]);
+
+// Prior reproduces the exact baseline heuristic weights at day 1 (zero behavioral change until earned).
+export const CONTEXTUAL_PRIOR_WEIGHTS = Object.freeze([
+  0.52,
+  0.30,
+  0.30,
+  -0.28,
+  0.22,
+  0.14,
+  0.05,
+  -1.0,
+  0.20,
+  0.0,
+]);
+
+function resolveCandidateVector(song, key, profile, gemmaVectors) {
+  if (profile?.spaceMeta) {
+    if (profile.spaceMeta.vectorType === 'gemma') {
+      const gemma = gemmaVectors?.get?.(key);
+      if (!gemma?.vector) return null;
+      // Fast path when gemmaVectors holds pre-validated unit Float32Array vectors.
+      if (gemma.vector instanceof Float32Array && gemma.vector.length > 0) return gemma.vector;
+      return validateAndNormalizeVector(gemma.vector, gemma.vector.length);
+    }
+    const meta = profile.spaceMeta.vectorType === 'metadata' ? null : resolveEmbeddingMetadata(song);
+    if (meta && areVectorSpacesCompatible(profile.spaceMeta, meta)) {
+      return meta.vector;
+    }
+    if (profile.spaceMeta.vectorType === 'metadata') {
+      return getSongVector(song);
+    }
+    return null;
+  }
+  return getSongVector(song);
+}
+
+/** Extracts the aligned feature vector shared between training and serving. */
+export function extractContextualCandidateFeatures(song, ctx = {}) {
+  const key = song?.songKey || getSongKey(song);
+  const vector = ctx.vector !== undefined ? ctx.vector : resolveCandidateVector(song, key, ctx.profile, ctx.gemmaVectors);
+  const plays = ctx.plays != null ? ctx.plays : Math.max(finiteNumber(song?.playCount), playCountFor(ctx.playCountByKey, key));
+  const sequenceWeight = ctx.sequenceWeight ?? 1;
+  const multiInterest = vector && ctx.profile?.interests?.length > 1
+    ? (ctx.preparedInterests
+      ? scorePreparedInterestsLogSumExp(vector, ctx.preparedInterests)
+      : (scoreInterestsLogSumExp(vector, ctx.profile.interests, {
+        sessionVector: sequenceWeight > 0.05 ? ctx.profile.recentVector : null,
+        beta: 6.0 * sequenceWeight,
+        tau: 10.0,
+      }) ?? interestAffinity(vector, ctx.profile.interests)))
+    : null;
+  const baseTaste = multiInterest ?? ((ctx.profile?.vector && vector) ? cosineSimilarity(ctx.profile.vector, vector) : 0);
+  const contextBlendWeight = ctx.contextBlendWeight ?? 0;
+  const contextFit = (ctx.contextEntry?.vector && vector) ? cosineSimilarity(ctx.contextEntry.vector, vector) : 0;
+  const tasteAffinity = (baseTaste * (1 - 0.25 * contextBlendWeight)) + (contextFit * (0.25 * contextBlendWeight));
+  const sequenceAffinity = (ctx.profile?.recentVector && vector) ? cosineSimilarity(ctx.profile.recentVector, vector) : 0;
+  const skipAffinity = (ctx.profile?.negativeVector && vector) ? cosineSimilarity(ctx.profile.negativeVector, vector) : 0;
+  const liked = ctx.likedSongKeys?.has?.(key) ? 1 : 0;
+  const popularity = Math.min(0.14, Math.log1p(plays) * 0.045) / 0.14;
+  const discovery = plays === 0 ? (ctx.profile?.hasSignal ? 0.7 : 1.0) : 0;
+  const now = ctx.now ?? Date.now();
+  const recentPenalty = recencyPenalty(lookup(ctx.profile?.lastPlayedAtByKey, key), now)
+    + skipPenalty(lookup(ctx.profile?.lastSkippedAtByKey, key), now);
+  const steerScore = ctx.sessionSteer?.score?.(vector) || 0;
+  const skipRisk = ctx.computeSkipRisk
+    ? predictSkip({
+      affinity: Math.max(0, tasteAffinity) + (liked ? 0.35 : 0),
+      steerScore,
+      transitionPenalty: 0,
+      hourOfDay: ctx.hourOfDay ?? new Date(now).getHours(),
+      sourceType: ctx.sourceType || 'radio',
+      positionInQueue: ctx.positionInQueue ?? 0,
+    })
+    : 0;
+  return {
+    key,
+    vector,
+    plays,
+    steerScore,
+    features: [
+      tasteAffinity,
+      tasteAffinity * (1 - sequenceWeight),
+      sequenceAffinity * sequenceWeight,
+      skipAffinity,
+      liked,
+      popularity,
+      discovery,
+      recentPenalty,
+      steerScore,
+      skipRisk,
+    ],
+  };
+}
+
+export function resolveRankerWeights(candidateWeights, options = {}) {
+  const base = Array.isArray(candidateWeights)
+    && candidateWeights.length === CONTEXTUAL_PRIOR_WEIGHTS.length
+    && candidateWeights.every(v => Number.isFinite(Number(v)))
+    ? candidateWeights.map(Number)
+    : [...CONTEXTUAL_PRIOR_WEIGHTS];
+  if (options.steerWeight != null && Number.isFinite(Number(options.steerWeight))) {
+    base[8] = Number(options.steerWeight);
+  }
+  if (options.skipRiskWeight != null && Number.isFinite(Number(options.skipRiskWeight))) {
+    base[9] = Number(options.skipRiskWeight);
+  }
+  return base;
+}
+
+function buildStage1QueryVectors(profile, { contextEntry, sessionSteer, extraQueries = [], sequenceWeight = 1, preparedInterests = null } = {}) {
+  const queries = [];
+  if (profile?.recentVector) queries.push({ vector: profile.recentVector, weight: 1.0 });
+  if (preparedInterests?.candidates?.length) {
+    for (let j = 0; j < preparedInterests.candidates.length; j++) {
+      const interestVec = preparedInterests.candidates[j].vector;
+      const prob = preparedInterests.probs[j];
+      if (profile?.recentVector && interestVec.length === profile.recentVector.length) {
+        const blended = new Float32Array(interestVec.length);
+        const seqScale = 0.30 * sequenceWeight;
+        let ss = 0;
+        for (let d = 0; d < blended.length; d++) {
+          const val = 0.52 * interestVec[d] + seqScale * profile.recentVector[d];
+          blended[d] = val;
+          ss += val * val;
+        }
+        const inv = 1 / (Math.sqrt(ss) || 1);
+        for (let d = 0; d < blended.length; d++) blended[d] *= inv;
+        queries.push({ vector: blended, weight: Math.max(0.25, prob) });
+      } else {
+        queries.push({ vector: interestVec, weight: Math.max(0.25, prob) });
+      }
+    }
+  } else if (profile?.vector) {
+    queries.push({ vector: profile.vector, weight: 1.0 });
+  }
+  if (contextEntry?.vector) queries.push({ vector: contextEntry.vector, weight: 0.55 });
+  if (sessionSteer?.state) queries.push({ vector: sessionSteer.state, weight: 0.9 });
+  for (const q of extraQueries || []) {
+    if (q?.vector || Array.isArray(q) || ArrayBuffer.isView(q)) queries.push(q?.vector ? q : { vector: q, weight: 1.0 });
+  }
+  return queries;
+}
+
 export function rankContextualSongs(songs = [], options = {}) {
   const profile = options.profile;
   const likedSongKeys = new Set(options.likedSongKeys || []);
   const excluded = new Set(options.excludeSongKeys || []);
   const playCountByKey = options.playCountByKey || new Map();
   const now = timestampValue(options.now, Date.now());
+  const hourOfDay = Number.isFinite(options.currentContext?.hour) ? options.currentContext.hour : new Date(now).getHours();
   const activeTimeBucket = options.currentContext?.timeBucket || profile?.currentContext?.timeBucket;
   const contextEntry = activeTimeBucket ? profile?.contextVectors?.[activeTimeBucket] : null;
   const contextBlendWeight = contextEntry?.vector
@@ -495,91 +677,135 @@ export function rankContextualSongs(songs = [], options = {}) {
   // Stale sessions hand their weight back to long-term taste instead of
   // steering today's picks with what was played weeks ago.
   const sequenceWeight = Number.isFinite(profile?.sequenceWeight) ? Math.min(1, Math.max(0, profile.sequenceWeight)) : 1;
-  const tasteWeight = 0.52 + (0.3 * (1 - sequenceWeight));
-  const scored = songs
-    .map(song => {
-      const key = song.songKey || getSongKey(song);
-      let vector = null;
-      if (profile?.spaceMeta) {
-        const gemma = options.gemmaVectors?.get?.(key);
-        if (profile.spaceMeta.vectorType === 'gemma') vector = gemma?.vector ? validateAndNormalizeVector(gemma.vector, gemma.vector.length) : null;
-        const meta = profile.spaceMeta.vectorType === 'metadata' || profile.spaceMeta.vectorType === 'gemma' ? null : resolveEmbeddingMetadata(song);
-        if (meta && areVectorSpacesCompatible(profile.spaceMeta, meta)) {
-          vector = meta.vector;
-        } else if (profile.spaceMeta.vectorType === 'metadata') {
-          vector = getSongVector(song);
-        }
-      } else {
-        vector = getSongVector(song);
-      }
+  const preparedInterests = profile?.interests?.length > 1
+    ? prepareInterestsLogSumExp(profile.interests, {
+      sessionVector: sequenceWeight > 0.05 ? profile.recentVector : null,
+      beta: 6.0 * sequenceWeight,
+      tau: 10.0,
+    })
+    : null;
+  const weights = resolveRankerWeights(options.rankerWeights, options);
+  const computeSkipRisk = weights[9] !== 0 && (hasCustomSkipPredictor() || Boolean(options.useSkipRisk));
+  const collabGraph = options.collabGraph || null;
+  const collabWeight = Number(options.collabWeight || 0) || 0;
+  const collabAnchorKeys = Array.isArray(options.collabAnchorKeys) ? options.collabAnchorKeys : [];
+  const useCollab = Boolean(collabGraph?.neighbors?.size && collabWeight > 0 && collabAnchorKeys.length);
 
-      const plays = Math.max(finiteNumber(song.playCount), playCountFor(playCountByKey, key));
-      // Session-activated LogSumExp multi-interest scoring prevents single-centroid averaging
-      // across distant styles while lifting tracks aligned with the active session mode.
-      const multiInterest = vector && profile?.interests?.length > 1
-        ? (scoreInterestsLogSumExp(vector, profile.interests, {
-          sessionVector: sequenceWeight > 0.05 ? profile.recentVector : null,
-          beta: 6.0 * sequenceWeight,
-          tau: 10.0,
-        }) ?? interestAffinity(vector, profile.interests))
-        : null;
-      const baseTaste = multiInterest ?? ((profile?.vector && vector) ? cosineSimilarity(profile.vector, vector) : 0);
-      const contextFit = (contextEntry?.vector && vector) ? cosineSimilarity(contextEntry.vector, vector) : 0;
-      const tasteAffinity = (baseTaste * (1 - 0.25 * contextBlendWeight)) + (contextFit * (0.25 * contextBlendWeight));
-      const sequenceAffinity = (profile?.recentVector && vector) ? cosineSimilarity(profile.recentVector, vector) : 0;
-      const skipAffinity = (profile?.negativeVector && vector) ? cosineSimilarity(profile.negativeVector, vector) : 0;
-      const likedBoost = likedSongKeys.has(key) ? 0.22 : 0;
-      const popularityBoost = Math.min(0.14, Math.log1p(plays) * 0.045);
-      const discoveryBoost = plays === 0 ? (profile?.hasSignal ? 0.035 : 0.05) : 0;
-      const recentPenalty = recencyPenalty(lookup(profile?.lastPlayedAtByKey, key), now)
-        + skipPenalty(lookup(profile?.lastSkippedAtByKey, key), now);
-      const score = (tasteAffinity * tasteWeight)
-        + (sequenceAffinity * 0.3 * sequenceWeight)
-        - (skipAffinity * 0.28)
-        + likedBoost
-        + popularityBoost
-        + discoveryBoost
-        - recentPenalty;
-      const steerScore = options.sessionSteer?.score?.(vector) || 0;
+  const fullScanBelow = options.fullScanBelow ?? DEFAULT_FULL_SCAN_THRESHOLD;
+  let candidatePool = songs;
+  if (songs.length >= fullScanBelow) {
+    const queryVectors = buildStage1QueryVectors(profile, {
+      contextEntry,
+      sessionSteer: options.sessionSteer,
+      extraQueries: options.queryVectors,
+      sequenceWeight,
+      preparedInterests,
+    });
+    if (queryVectors.length > 0) {
+      const recentPlayedKeys = profile?.lastPlayedAtByKey instanceof Map
+        ? Array.from(profile.lastPlayedAtByKey.keys())
+        : Object.keys(profile?.lastPlayedAtByKey || {});
+      const collabBoostKeys = useCollab ? topCooccurrenceCandidates(collabGraph, collabAnchorKeys, 120) : [];
+      const alwaysIncludeKeys = [
+        ...likedSongKeys,
+        ...recentPlayedKeys.slice(0, 200),
+        ...collabBoostKeys,
+        ...(options.alwaysIncludeKeys || []),
+      ];
+      const stage1 = selectStage1Candidates(songs, {
+        queryVectors,
+        targetSize: options.stage1Limit ?? DEFAULT_STAGE1_LIMIT,
+        fullScanBelow,
+        alwaysIncludeKeys,
+        excludeKeys: options.excludeSongKeys,
+        indexOptions: {
+          getVector: (song, key) => resolveCandidateVector(song, key, profile, options.gemmaVectors),
+          vectorSource: options.gemmaVectors || songs,
+          vectorMapSize: options.gemmaVectors?.size || 0,
+        },
+      });
+      candidatePool = stage1.candidates;
+    }
+  }
+
+  const featCtx = {
+    profile,
+    gemmaVectors: options.gemmaVectors,
+    playCountByKey,
+    sequenceWeight,
+    contextBlendWeight,
+    contextEntry,
+    likedSongKeys,
+    now,
+    hourOfDay,
+    sessionSteer: options.sessionSteer,
+    computeSkipRisk,
+    preparedInterests,
+  };
+
+  const scored = candidatePool
+    .map(song => {
+      const extracted = extractContextualCandidateFeatures(song, featCtx);
+      const features = extracted.features;
+      let score = 0;
+      for (let i = 0; i < weights.length; i++) score += weights[i] * (features[i] || 0);
+      if (useCollab) {
+        score += collabWeight * scoreCooccurrenceCandidate(collabGraph, collabAnchorKeys, extracted.key);
+      }
       return {
         song,
-        key,
+        key: extracted.key,
         artist: String(song.artist || '').trim().toLowerCase(),
-        score: score + (steerScore * (options.steerWeight ?? 0.2)),
-        steerScore,
-        plays,
+        score,
+        steerScore: extracted.steerScore,
+        plays: extracted.plays,
       };
     })
     .filter(item => item.key && !excluded.has(item.key));
 
   const limit = Math.floor(Math.max(0, finiteNumber(options.limit, scored.length)));
   const selected = [];
-  const artistCounts = new Map();
-  const remaining = [...scored];
+  if (limit === 0 || scored.length === 0) return selected;
 
-  while (remaining.length && selected.length < limit) {
-    let bestIndex = 0;
+  // Sorting descending by base score lets the greedy artist-diversity pass break early
+  // once item.score falls below bestAdjustedScore (since artistPenalty >= 0).
+  const remaining = scored.slice().sort((a, b) => (
+    (b.score - a.score)
+    || String(a.song.track || '').localeCompare(String(b.song.track || ''))
+  ));
+  const artistCounts = new Map();
+  const taken = new Uint8Array(remaining.length);
+  const targetCount = Math.min(limit, remaining.length);
+  let scanStart = 0;
+
+  while (selected.length < targetCount) {
+    while (scanStart < remaining.length && taken[scanStart]) scanStart++;
+    if (scanStart >= remaining.length) break;
+
+    let bestIndex = -1;
     let bestAdjustedScore = -Infinity;
-    for (let index = 0; index < remaining.length; index++) {
+    for (let index = scanStart; index < remaining.length; index++) {
+      if (taken[index]) continue;
       const item = remaining[index];
+      if (bestIndex >= 0 && item.score < bestAdjustedScore - 1e-9) break;
       const artistPenalty = item.artist ? Math.min(0.2, (artistCounts.get(item.artist) || 0) * 0.11) : 0;
       const adjustedScore = item.score - artistPenalty;
-      const currentBest = remaining[bestIndex];
-      const currentBestPenalty = currentBest?.artist
-        ? Math.min(0.2, (artistCounts.get(currentBest.artist) || 0) * 0.11)
-        : 0;
       if (
-        adjustedScore > bestAdjustedScore
-        || (Math.abs(adjustedScore - bestAdjustedScore) < 1e-9 && (
-          item.score - artistPenalty > currentBest?.score - currentBestPenalty
-          || (item.score === currentBest?.score && String(item.song.track || '').localeCompare(String(currentBest.song.track || '')) < 0)
+        bestIndex < 0
+        || adjustedScore > bestAdjustedScore + 1e-9
+        || (Math.abs(adjustedScore - bestAdjustedScore) <= 1e-9 && (
+          item.score > remaining[bestIndex].score + 1e-9
+          || (Math.abs(item.score - remaining[bestIndex].score) <= 1e-9
+            && String(item.song.track || '').localeCompare(String(remaining[bestIndex].song.track || '')) < 0)
         ))
       ) {
         bestIndex = index;
         bestAdjustedScore = adjustedScore;
       }
     }
-    const [best] = remaining.splice(bestIndex, 1);
+    if (bestIndex < 0) break;
+    taken[bestIndex] = 1;
+    const best = remaining[bestIndex];
     artistCounts.set(best.artist, (artistCounts.get(best.artist) || 0) + 1);
     selected.push({
       ...best.song,
@@ -675,7 +901,7 @@ export function validateAndNormalizeVector(vector, expectedDimensions = EMBEDDIN
   const norm = Math.sqrt(sumSq);
   if (norm === 0) return null;
   if (Math.abs(norm - 1.0) < 1e-4) {
-    return Array.isArray(vector) ? vector : Array.from(vector);
+    return vector;
   }
   const normalized = new Float32Array(length);
   for (let i = 0; i < length; i++) {
@@ -689,6 +915,8 @@ export function validateAndNormalizeVector(vector, expectedDimensions = EMBEDDIN
  * with strict space separation (never mixing metadata and audio vectors) and honest fallback
  * to contextual playback signals when absent or incompatible.
  */
+export const STAGE3_768D_ENABLED = false;
+
 export async function buildUpNextRecommendations({
   currentSong,
   librarySongs = [],
@@ -701,6 +929,14 @@ export async function buildUpNextRecommendations({
   getEmbedding,
   gemmaVectors: gemmaVectorsOption,
   sessionSteer,
+  rankerWeights,
+  fullScanBelow = DEFAULT_FULL_SCAN_THRESHOLD,
+  stage1Limit = DEFAULT_STAGE1_LIMIT,
+  enableStage3Rerank = STAGE3_768D_ENABLED,
+  getWhitened768Vector,
+  stage3TopK = 200,
+  collabGraph = null,
+  collabWeight = 0,
 } = {}) {
   // An empty map means "no Gemma vectors yet": keep the old MusiCNN/metadata path untouched.
   const gemmaVectors = gemmaVectorsOption?.size ? gemmaVectorsOption : null;
@@ -800,12 +1036,50 @@ export async function buildUpNextRecommendations({
     now: Date.now(),
   });
   const transStats = playbackEvents.length ? pairTransitionStats(playbackEvents) : null;
+  const activeCollabWeight = Number(collabWeight || 0) || 0;
+  const useCollab = Boolean(collabGraph?.neighbors?.size && activeCollabWeight > 0);
+  const sessionAnchors = useCollab ? extractRecentAnchorKeys(currentSessionEvents(playbackEvents), 2) : [];
+  const collabAnchorKeys = useCollab
+    ? [currentKey, ...sessionAnchors.filter(key => key !== currentKey)]
+    : [];
 
-  // 4. Rank full eligible catalog using acoustic + boundary seam continuity + contextual affinity.
+  // 4. Stage-1 candidate generation at large catalog scales (>= 8K); full scan below.
   const hasEmbedding = Boolean(currentVector && currentMeta);
+  let activeCandidates = candidates;
+  if (candidates.length >= fullScanBelow) {
+    const seqWeight = Number.isFinite(profile?.sequenceWeight) ? Math.min(1, Math.max(0, profile.sequenceWeight)) : 1;
+    const preparedInterests = profile?.interests?.length > 1
+      ? prepareInterestsLogSumExp(profile.interests, {
+        sessionVector: seqWeight > 0.05 ? profile.recentVector : null,
+        beta: 6.0 * seqWeight,
+        tau: 10.0,
+      })
+      : null;
+    const queryVectors = buildStage1QueryVectors(profile, {
+      sessionSteer: activeSteer,
+      extraQueries: currentVector ? [{ vector: currentVector, weight: 1.15 }] : [],
+      sequenceWeight: seqWeight,
+      preparedInterests,
+    });
+    if (queryVectors.length > 0) {
+      const collabBoostKeys = useCollab ? topCooccurrenceCandidates(collabGraph, collabAnchorKeys, 120) : [];
+      const stage1 = selectStage1Candidates(candidates, {
+        queryVectors,
+        targetSize: stage1Limit,
+        fullScanBelow,
+        alwaysIncludeKeys: [...likedSongKeys, ...collabBoostKeys],
+        indexOptions: {
+          getVector: (song, key) => resolveCandidateVector(song, key, profile, gemmaVectors),
+          vectorSource: gemmaVectors || candidates,
+          vectorMapSize: gemmaVectors?.size || 0,
+        },
+      });
+      activeCandidates = stage1.candidates;
+    }
+  }
 
   const scored = [];
-  for (const candidate of candidates) {
+  for (const candidate of activeCandidates) {
     const candKey = candidate.songKey || getSongKey(candidate);
     let candMeta = null;
     let candVector = null;
@@ -881,9 +1155,12 @@ export async function buildUpNextRecommendations({
       profile,
       likedSongKeys,
       excludeSongKeys: Array.from(recentKeys),
-      limit: candidates.length,
+      limit: Math.min(scored.length, Math.max(limit * 10, 200)),
       gemmaVectors,
       sessionSteer: null,
+      rankerWeights,
+      fullScanBelow: Infinity,
+      ...(useCollab ? { collabGraph, collabWeight: activeCollabWeight, collabAnchorKeys } : {}),
     }
   );
   const contextualScoreByKey = new Map(rankedContextual.map((item, idx) => [
@@ -925,6 +1202,24 @@ export async function buildUpNextRecommendations({
     finalScored.forEach(item => { item.score = scores.get(item.song.songKey || getSongKey(item.song)) ?? item.score; });
   }
   finalScored.sort((a, b) => b.score - a.score);
+
+  // Optional behind-flag Stage 3: whitened-768D re-check over Stage 2 top-200.
+  // Off by default because eval_recs_v3 measured -0.0091 unseen-artist Tag Jaccard@5 lift.
+  if (enableStage3Rerank && typeof getWhitened768Vector === 'function' && finalScored.length > 0) {
+    const query768 = await getWhitened768Vector(currentKey);
+    if (query768 && !signal?.aborted) {
+      const topSlice = finalScored.slice(0, Math.min(stage3TopK, finalScored.length));
+      for (const item of topSlice) {
+        const key = item.song.songKey || getSongKey(item.song);
+        const cand768 = await getWhitened768Vector(key);
+        if (cand768 && cand768.length === query768.length) {
+          const sim768 = cosineSimilarity(query768, cand768);
+          item.score = (item.score * 0.75) + (sim768 * 0.25);
+        }
+      }
+      finalScored.sort((a, b) => b.score - a.score);
+    }
+  }
 
   // Apply artist diversity: max 2 tracks per artist unless pool is small
   const result = [];

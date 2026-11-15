@@ -66,11 +66,13 @@ export function startTopLevelLogin(options = {}) {
 
 export async function checkServerSession({ fetchImpl = fetch } = {}) {
   const baseUrl = getAuthApiBaseUrl();
-  if (!baseUrl || typeof fetchImpl !== 'function') return { authenticatedSession: false };
+  const sameOrigin = isSameOriginAuthAvailable();
+  if (!baseUrl || !sameOrigin || typeof fetchImpl !== 'function') return { authenticatedSession: false };
   try {
     const res = await fetchImpl(`${baseUrl}/session`, {
       method: 'GET',
       credentials: 'include',
+      cache: 'no-store',
       headers: { 'Cache-Control': 'no-store' },
     });
     if (!res?.ok) return { authenticatedSession: false };
@@ -133,17 +135,18 @@ export function clearStoredRefreshToken() {
  * Exchange an OAuth authorization code with the Cloudflare Worker.
  * Keeps any returned refresh token only in volatile memory (never in localStorage).
  */
-export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage') {
+export async function exchangeCodeWithWorker(code, redirectUri = 'postmessage', { fetchImpl = fetch } = {}) {
   const baseUrl = getAuthApiBaseUrl();
   if (!baseUrl) throw new Error('Cloudflare Auth Worker URL is not configured.');
+  const sameOrigin = isSameOriginAuthAvailable();
 
-  const res = await fetch(`${baseUrl}/exchange`, {
+  const res = await fetchImpl(`${baseUrl}/exchange`, {
     method: 'POST',
-    credentials: 'include',
+    credentials: sameOrigin ? 'include' : 'omit',
+    cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-      ...(isSameOriginAuthAvailable() ? { 'X-Sisic-SW': '1' } : {}),
+      ...(sameOrigin ? { 'Cache-Control': 'no-store', 'X-Sisic-SW': '1' } : {}),
     },
     body: JSON.stringify({ code, redirect_uri: redirectUri }),
   });
@@ -174,11 +177,11 @@ export async function refreshAccessTokenWithWorker(refreshToken = getStoredRefre
 
   const res = await fetchImpl(`${baseUrl}/refresh`, {
     method: 'POST',
-    credentials: 'include',
+    credentials: sameOrigin ? 'include' : 'omit',
+    cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-      ...(sameOrigin ? { 'X-Sisic-SW': '1' } : {}),
+      ...(sameOrigin ? { 'Cache-Control': 'no-store', 'X-Sisic-SW': '1' } : {}),
     },
     body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
   });
@@ -223,11 +226,11 @@ export async function revokeGoogleToken(token = getStoredRefreshToken(), { fetch
       const endpoint = sameOrigin ? `${baseUrl}/logout` : `${baseUrl}/revoke`;
       const workerRes = await fetchImpl(endpoint, {
         method: 'POST',
-        credentials: 'include',
+        credentials: sameOrigin ? 'include' : 'omit',
+        cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
-          'Cache-Control': 'no-store',
-          ...(sameOrigin ? { 'X-Sisic-SW': '1' } : {}),
+          ...(sameOrigin ? { 'Cache-Control': 'no-store', 'X-Sisic-SW': '1' } : {}),
         },
         body: JSON.stringify(targetToken ? { token: targetToken } : {}),
       });

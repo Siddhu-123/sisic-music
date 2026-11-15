@@ -38,8 +38,14 @@ export function PlayerBar({
     toggleShuffle,
   } = player;
 
+  const djStatusLabel = player.djModeEnabled
+    ? (player.djPlan
+      ? `DJ · ${(player.djPlan.style || 'SEAM').toUpperCase()}`
+      : 'ADAPTIVE DJ')
+    : 'DJ OFF';
+
   return (
-    <div className="player-bar">
+    <div className="player-bar player-bar--floating">
       <div className="player-song-info">
         {currentSong ? (
           <>
@@ -55,17 +61,22 @@ export function PlayerBar({
                 <span className="player-artist">{currentSong.artist}</span>
               </span>
             </button>
-            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info" style={{ marginLeft: 'auto' }}>
+            <button className="icon-btn player-info-btn" onClick={event => { event.stopPropagation(); onOpenSongInfo?.(currentSong); }} aria-label="Song info" title="Song info">
               <Info size={16} />
             </button>
           </>
         ) : (
-          <span className="player-artist">Nothing playing</span>
+          <span className="player-artist">Ready for signal · Select a track</span>
         )}
       </div>
 
       <div className="player-controls">
         <div className="player-buttons">
+          {currentSong && (
+            <span className={`player-spectrum ${isPlaying ? 'is-playing' : ''}`} aria-hidden="true">
+              <i /><i /><i /><i /><i /><i />
+            </span>
+          )}
           <button
             className={`icon-btn ${shuffleMode !== 'off' ? 'icon-btn--active' : ''}`}
             onClick={toggleShuffle}
@@ -97,20 +108,32 @@ export function PlayerBar({
         </div>
       </div>
 
-      <div className="player-volume">
-        <button className="icon-btn" onClick={player.toggleMute} aria-label={player.muted ? 'Unmute' : 'Mute'}>{player.muted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}</button>
-        <input
-          type="range"
-          className="volume-bar"
-          min={0}
-          max={1}
-          step={0.01}
-          value={player.muted ? 0 : volume}
-          onChange={event => changeVolume(Number(event.target.value))}
-          aria-label="Volume"
-        />
+      <div className="player-dock-right">
+        <button
+          type="button"
+          className={`player-dj-pill ${player.djModeEnabled ? 'player-dj-pill--active' : ''}`}
+          onClick={() => player.setDjModeEnabled(!player.djModeEnabled)}
+          title={player.djPlan?.candidateTitle ? `Next DJ blend: ${player.djPlan.candidateTitle}` : 'Toggle Adaptive DJ seam transitions'}
+          aria-pressed={Boolean(player.djModeEnabled)}
+        >
+          <span className="player-dj-pill__dot" aria-hidden="true" />
+          {djStatusLabel}
+        </button>
+        <div className="player-volume">
+          <button className="icon-btn" onClick={player.toggleMute} aria-label={player.muted ? 'Unmute' : 'Mute'}>{player.muted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}</button>
+          <input
+            type="range"
+            className="volume-bar"
+            min={0}
+            max={1}
+            step={0.01}
+            value={player.muted ? 0 : volume}
+            onChange={event => changeVolume(Number(event.target.value))}
+            aria-label="Volume"
+          />
+        </div>
+        <PlaybackSettings player={player} />
       </div>
-      <PlaybackSettings player={player} />
 
       {isExpanded && (
         <Suspense fallback={<div className="view-loading" role="status">Loading player…</div>}>

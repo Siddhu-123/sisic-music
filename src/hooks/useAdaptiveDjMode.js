@@ -19,14 +19,14 @@ import {
   scoreDjTransition,
 } from '../services/djModeService.js';
 
-export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) {
+export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys, rankerWeights = null) {
   const observations = useMemo(() => buildSkipObservations(playbackEvents), [playbackEvents]);
   const latest = useRef(null);
   const djSetRef = useRef(null);
   const playedRef = useRef([]); // { key, artist } of songs DJ mode has worked from, newest last
   const commentaryMemoryRef = useRef({ recent: [] });
 
-  useEffect(() => { latest.current = { player, songs, playbackEvents, likedSongKeys, observations }; });
+  useEffect(() => { latest.current = { player, songs, playbackEvents, likedSongKeys, observations, rankerWeights }; });
   useEffect(() => {
     if (!player.djModeEnabled || !player.isPlaying) return undefined;
     let cancelled = false;
@@ -50,7 +50,7 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys) 
         if (cancelled) return;
         const transitionAtSeconds = chooseDjTransitionTime(prediction, p.duration, fadeSeconds, p.djHistory);
         const ranked = rankDjCandidates({ source, songs: state.songs, playbackEvents: state.playbackEvents, positionSeconds: transitionAtSeconds,
-          likedSongKeys: state.likedSongKeys, history: p.djHistory, transitionScores: new Map(cached.map(score => [score.cacheKey, score])) });
+          likedSongKeys: state.likedSongKeys, history: p.djHistory, transitionScores: new Map(cached.map(score => [score.cacheKey, score])), rankerWeights: state.rankerWeights });
 
         const findSong = key => state.songs.find(s => (s.songKey || getSongKey(s)) === key);
         if (playedRef.current.at(-1)?.key !== p.currentSongKey) playedRef.current = [...playedRef.current, { key: p.currentSongKey, artist: source.artist }].slice(-4);

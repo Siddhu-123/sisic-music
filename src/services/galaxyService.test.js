@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGalaxy, chooseGalaxySpace, clusterVectors, frameCoordinates, labelCluster } from './galaxyService.js';
+import {
+  buildGalaxy,
+  chooseGalaxySpace,
+  clusterVectors,
+  computeGalaxyTasteOverlay,
+  describeGalaxyTrackAndTransition,
+  frameCoordinates,
+  labelCluster,
+} from './galaxyService.js';
 
 function audioVector(index, dims = 200) {
   const vector = new Array(dims).fill(0.01);
@@ -63,4 +71,75 @@ test('a genre wins a tie against a mood when naming a cluster', () => {
   ];
   // "Study" also reads as the Focus mood for all three; the genre should still name the cluster.
   assert.equal(labelCluster(songs), 'Jazz');
+});
+
+test('galaxy reads vectors from gemmaVectors map and computes focus/shift overlay', () => {
+  const songs = Array.from({ length: 16 }, (_, i) => ({
+    songKey: `s${i}`,
+    track: `Song ${i}`,
+    artist: i < 8 ? 'A' : 'B',
+  }));
+  const gemmaVectors = new Map(songs.map((s, i) => [
+    s.songKey,
+    {
+      songKey: s.songKey,
+      embeddingModel: 'sisic-recs-v3/softwhiten-128d-int8',
+      dimensions: 32,
+      vector: audioVector(i < 8 ? 0 : 1, 32),
+    },
+  ]));
+  const galaxy = buildGalaxy(songs, { gemmaVectors });
+  assert.equal(galaxy.mode, 'audio');
+  assert.equal(galaxy.audio.count, 16);
+
+  const now = Date.now();
+  const events = [
+    { songKey: 's8', eventType: 'playback-complete', positionSeconds: 180, durationSeconds: 180, createdAt: now - 1000 * 60 * 60 * 24 * 12 },
+    { songKey: 's0', eventType: 'playback-replay', positionSeconds: 180, durationSeconds: 180, createdAt: now - 1000 * 60 * 60 },
+    { songKey: 's14', eventType: 'user-skip', positionSeconds: 2, durationSeconds: 180, createdAt: now - 1000 * 30 },
+  ];
+  const overlay = computeGalaxyTasteOverlay(galaxy.points, {
+    mode: galaxy.mode,
+    gemmaVectors,
+    playbackEvents: events,
+    likedSongKeys: ['s0'],
+    now,
+  });
+  assert.equal(overlay.hasSignal, true);
+  assert.ok(overlay.edges.length > 0);
+  const risingFocus = overlay.metricsByKey.get('s0');
+  const skipped = overlay.metricsByKey.get('s14');
+  assert.ok(risingFocus.focus > skipped.focus);
+  assert.ok(risingFocus.delta > skipped.delta);
+  assert.equal(skipped.status, 'skipped');
+});
+
+test('describeGalaxyTrackAndTransition extracts traits and seam/sound transition metrics', () => {
+  const prevPoint = {
+    songKey: 'a', track: 'Warmup', artist: 'Artist A', bpm: 120, energy: 0.45,
+    genre: 'Electronic', clusterId: 0,
+  };
+  const currentPoint = {
+    songKey: 'b', track: 'Peak Set', artist: 'Artist B', bpm: 128, musicalKey: 'A minor',
+    energy: 0.82, genre: 'Electronic', clusterId: 1,
+  };
+  const gemmaVectors = new Map([
+    ['a', { songKey: 'a', vector: audioVector(0, 16), startVector: audioVector(0, 8), endVector: audioVector(1, 8), dimensions: 16 }],
+    ['b', { songKey: 'b', vector: audioVector(0, 16), startVector: audioVector(1, 8), endVector: audioVector(2, 8), dimensions: 16 }],
+  ]);
+  const info = describeGalaxyTrackAndTransition(currentPoint, {
+    prevPoint,
+    cluster: { label: 'Electronic · High Energy', songs: [currentPoint, prevPoint] },
+    gemmaVectors,
+  });
+  assert.equal(info.genre, 'Electronic');
+  assert.equal(info.bpm, 128);
+  assert.equal(info.musicalKey, 'A minor');
+  assert.equal(info.energyPct, 82);
+  assert.equal(info.clusterLabel, 'Electronic · High Energy');
+  assert.equal(info.transition.fromTrack, 'Warmup');
+  assert.equal(info.transition.sameCluster, false);
+  assert.equal(info.transition.bpmDelta, 8);
+  assert.ok(info.transition.soundMatchPct > 90);
+  assert.ok(info.transition.seamMatchPct > 90);
 });

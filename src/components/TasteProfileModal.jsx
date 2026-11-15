@@ -40,10 +40,22 @@ function binVector(vector = []) {
 
 const spaceLabel = space => (space.vectorType === 'learned-audio' ? `Sound · ${space.model}` : 'Title, artist & mood tags');
 
-export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [], likedSongKeys = [], onPlayMix }) {
+export function TasteProfileModal({
+  isOpen,
+  onClose,
+  librarySummary,
+  songs = [],
+  likedSongKeys = [],
+  externalHistoryPack = null,
+  personalRankerState = null,
+  onImportListeningHistory = null,
+  onPlayMix,
+}) {
   const dialogRef = useDialogFocus(isOpen, onClose);
   const fileInputRef = useRef(null);
+  const historyInputRef = useRef(null);
   const [imported, setImported] = useState(null);
+  const [importingHistory, setImportingHistory] = useState(false);
   // Captured once when the modal mounts; the time-of-day label should not flicker while it is open.
   const [currentBucket] = useState(() => getPlaybackContext(Date.now()).timeBucket);
   const [notice, setNotice] = useState({ tone: 'info', text: '' });
@@ -129,6 +141,27 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [],
     }
     setImported({ passport: result.passport, fileName: file.name });
     setNotice({ tone: result.errors.length ? 'warn' : 'info', text: result.errors.length ? `Imported with ${result.errors.length} part(s) skipped: ${result.errors[0]}` : `Imported ${file.name}. Nothing leaves your device.` });
+  };
+
+  const handleImportHistoryFile = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || typeof onImportListeningHistory !== 'function') return;
+    setImportingHistory(true);
+    setNotice({ tone: 'info', text: `Importing ${file.name}...` });
+    try {
+      const result = await onImportListeningHistory(file);
+      const eventsCount = result?.merged?.events?.length || 0;
+      const likesCount = result?.merged?.likedSongKeys?.length || 0;
+      setNotice({
+        tone: 'info',
+        text: `Imported ${file.name} · ${eventsCount.toLocaleString()} merged history events & ${likesCount} likes active.`,
+      });
+    } catch (error) {
+      setNotice({ tone: 'error', text: error?.message || 'Could not import that listening history archive.' });
+    } finally {
+      setImportingHistory(false);
+    }
   };
 
   const playMix = (mix, label) => {
@@ -493,7 +526,37 @@ export function TasteProfileModal({ isOpen, onClose, librarySummary, songs = [],
               <span>Import a passport</span>
             </button>
             <input ref={fileInputRef} type="file" accept="application/json,.json" className="passport-file-input" onChange={handleImportFile} aria-label="Import a taste passport file" />
+            {typeof onImportListeningHistory === 'function' && (
+              <>
+                <button
+                  type="button"
+                  className="taste-export-btn passport-btn--ghost"
+                  disabled={importingHistory}
+                  onClick={() => historyInputRef.current?.click()}
+                >
+                  <Upload size={15} />
+                  <span>{importingHistory ? 'Importing history...' : 'Import Spotify / YTM history'}</span>
+                </button>
+                <input
+                  ref={historyInputRef}
+                  type="file"
+                  accept=".zip,.json,application/zip,application/json"
+                  className="passport-file-input"
+                  onChange={handleImportHistoryFile}
+                  aria-label="Import Spotify or YouTube Music history archive"
+                />
+              </>
+            )}
           </div>
+
+          {externalHistoryPack?.events?.length > 0 && (
+            <p className="passport-notice passport-notice--info" role="status">
+              Active external history: {externalHistoryPack.events.length.toLocaleString()} events
+              {externalHistoryPack.sources?.spotify?.matchedStreams ? ` · Spotify ${externalHistoryPack.sources.spotify.matchedStreams.toLocaleString()}` : ''}
+              {externalHistoryPack.sources?.youtubeMusic?.matchedStreams ? ` · YTM ${externalHistoryPack.sources.youtubeMusic.matchedStreams.toLocaleString()}` : ''}
+              {personalRankerState?.collabEnabled ? ` · Co-occurrence graph active (${personalRankerState.collabGraph?.edgeCount?.toLocaleString?.() || 0} edges)` : ''}
+            </p>
+          )}
 
           {notice.text && <p className={`passport-notice passport-notice--${notice.tone}`} role="status">{notice.text}</p>}
 

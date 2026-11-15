@@ -1,6 +1,6 @@
 import React, { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, LogOut, MoreHorizontal, Plus, Trash2 } from 'lucide-react';
+import { BarChart3, Home, Search, Library, Music2, RefreshCw, TrendingUp, X, FolderOpen, HardDriveDownload, FileDown, Sliders, Sparkles, Compass, Copy, LogOut, MoreHorizontal, Plus, Trash2, ListMusic } from 'lucide-react';
 import {
   addSongToPlaylist,
   createPlaylist,
@@ -30,6 +30,8 @@ import { AsyncArtworkImage, DownloadStatusPanel, ImportStatusPanel, MacWorkerTas
 import { PlaylistTile } from './components/PlaylistTile.jsx';
 import { VirtualSongGrid } from './components/VirtualSongGrid.jsx';
 import { ThemeToggle } from './components/ThemeToggle.jsx';
+import { StudioTopBar, TasteDeckHud } from './components/TasteDeckHud.jsx';
+import { hydrateFromDevCache } from './services/devCacheHydration.js';
 import { ToastContainer } from './components/Toast.jsx';
 import { useToast } from './hooks/useToast.js';
 import { useDialogFocus } from './hooks/useDialogFocus.js';
@@ -37,6 +39,15 @@ import { asSongRecord, getSongKey, normalizeText } from './songIdentity.js';
 import { collectAudioFiles, importAudioFiles } from './services/importService.js';
 import { enrichPlaybackEvent } from './services/contextualRecommendationService.js';
 import { computeUpNextRecommendationsAsync } from './services/recsWorkerClient.js';
+import {
+  applyPersonalRankerState,
+  loadExternalHistoryPack,
+  loadPersonalRankerState,
+  refreshPersonalRanker,
+  resolvePersonalRankerCollab,
+  saveExternalHistoryPack,
+} from './services/personalRanker.js';
+import { importExternalListeningFile, mergeExternalHistoryPack } from './services/externalHistoryImporter.js';
 import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, RECS_V3_DIMENSIONS, RECS_V3_MODEL, importGemmaVectors, loadPreferredSongVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
 import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
@@ -49,6 +60,7 @@ import {
 import './App.css';
 import './responsive-ui.css';
 import './player-reference.css';
+import './obsidian-studio.css';
 
 const ExploreView = lazy(() => import('./components/ExploreView.jsx').then(module => ({ default: module.ExploreView })));
 const DeletePlaylistModal = lazy(() => import('./components/DeletePlaylistModal.jsx').then(module => ({ default: module.DeletePlaylistModal })));
@@ -168,13 +180,6 @@ function formatBytes(bytes = 0) {
     unitIndex++;
   }
   return `${value >= 10 || unitIndex < 2 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
-}
-
-function currentGreeting() {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'Good morning';
-  if (hour < 18) return 'Good afternoon';
-  return 'Good evening';
 }
 
 function timestampValue(value) {
@@ -302,13 +307,13 @@ function App() {
     } catch (e) {
       console.warn('Unable to read initial theme:', e);
     }
-    return 'light';
+    return 'dark';
   });
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', theme === 'dark' ? '#12141a' : '#e7e8ec');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#07090f' : '#e7e8ec');
   }, [theme]);
 
   const toggleTheme = useCallback(() => {
@@ -359,6 +364,8 @@ function App() {
   const [isDeletingPlaylist, setIsDeletingPlaylist] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [gemmaVectors, setGemmaVectors] = useState(() => new Map());
+  const [personalRankerState, setPersonalRankerState] = useState(null);
+  const [externalHistoryPack, setExternalHistoryPack] = useState(null);
   const [gemmaServiceStatus, setGemmaServiceStatus] = useState(null);
   const [gemmaConfigRevision, setGemmaConfigRevision] = useState(0);
   const [songInfo, setSongInfo] = useState(null);
@@ -367,6 +374,7 @@ function App() {
   const [isEqOpen, setIsEqOpen] = useState(false);
   const [recommendationTarget, setRecommendationTarget] = useState(null);
   const [isTasteProfileOpen, setIsTasteProfileOpen] = useState(false);
+  const [showPlaylistsDrawer, setShowPlaylistsDrawer] = useState(false);
   const [isMobileMoreOpen, setIsMobileMoreOpen] = useState(false);
   const [syncRetryTick, setSyncRetryTick] = useState(0);
   const [hasPendingJobs, setHasPendingJobs] = useState(false);
@@ -374,9 +382,29 @@ function App() {
   const fileInputRef = useRef(null);
   const gemmaFileInputRef = useRef(null);
   const autoGemmaSyncFailureToastRef = useRef(false);
+  const playlistsDrawerRef = useRef(null);
   const mobileMoreRef = useRef(null);
   const storageDialogRef = useDialogFocus(showStoragePanel, () => setShowStoragePanel(false));
   const playlistDialogRef = useDialogFocus(Boolean(playlistPicker), () => setPlaylistPicker(null), { canClose: !playlistPicker?.busy });
+
+  useEffect(() => {
+    if (!showPlaylistsDrawer) return undefined;
+    const handleEscape = event => {
+      if (event.key === 'Escape') setShowPlaylistsDrawer(false);
+    };
+    const handlePointerDownOutside = event => {
+      if (!playlistsDrawerRef.current?.contains(event.target)
+        && !event.target?.closest?.('[data-playlists-drawer-trigger]')) {
+        setShowPlaylistsDrawer(false);
+      }
+    };
+    document.addEventListener('keydown', handleEscape);
+    document.addEventListener('pointerdown', handlePointerDownOutside);
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+      document.removeEventListener('pointerdown', handlePointerDownOutside);
+    };
+  }, [showPlaylistsDrawer]);
 
   useEffect(() => {
     if (!isMobileMoreOpen) return undefined;
@@ -460,6 +488,26 @@ function App() {
   useEffect(() => {
     reloadGemmaVectors().catch(error => console.error('Failed to load EmbeddingGemma vectors:', error));
   }, [reloadGemmaVectors]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+    const previewRequested = typeof window !== 'undefined' && window.location.search.includes('ui-preview');
+    if (!previewRequested && !isAuthenticated && !hasAuthorizedSession) return undefined;
+    let cancelled = false;
+    hydrateFromDevCache().then(result => {
+      if (cancelled || !result) return;
+      if (result.driveIndexSongs?.length) {
+        setDriveIndexSongs(prev => (prev.length > 0 ? prev : result.driveIndexSongs));
+      }
+      if (result.drivePlaybackEvents?.length) {
+        setDrivePlaybackEvents(prev => (prev.length > 0 ? prev : result.drivePlaybackEvents));
+      }
+      if (result.hydrated || result.vectorCount > 0) {
+        reloadGemmaVectors().catch(err => console.error('Failed to reload hydrated vectors:', err));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [hasAuthorizedSession, isAuthenticated, reloadGemmaVectors]);
 
   useEffect(() => {
     if (!libraryLoaded) return undefined;
@@ -1322,14 +1370,32 @@ function App() {
     return null;
   }, [addToast, ensureLocalSong, jobBySongKey, queueSongForDownload]);
 
+  const mergedLikedSongKeys = useMemo(() => {
+    const ext = externalHistoryPack?.likedSongKeys;
+    if (!ext?.length) return likedSongKeys;
+    return [...new Set([...(likedSongKeys || []), ...ext])];
+  }, [externalHistoryPack?.likedSongKeys, likedSongKeys]);
+
+  const mergedRankerPlaybackEvents = useMemo(() => {
+    const ext = externalHistoryPack?.events;
+    const native = librarySummary.playbackEvents || [];
+    if (!ext?.length) return native;
+    return [...ext, ...native].sort((a, b) => Date.parse(a?.createdAt || 0) - Date.parse(b?.createdAt || 0));
+  }, [externalHistoryPack?.events, librarySummary.playbackEvents]);
+
+  const collabScoring = useMemo(() => resolvePersonalRankerCollab(personalRankerState), [personalRankerState]);
+
   const handleGetRecommendations = useCallback(async ({ currentSong, manualQueue = [], signal }) => {
     const hasGemmaVectors = gemmaVectors.size > 0;
+    const learnedWeights = personalRankerState?.rankerEnabled ? personalRankerState.rankerWeights : undefined;
     const recs = await computeUpNextRecommendationsAsync({
       currentSong,
       librarySongs: exploreLibrarySongs,
       playbackEvents: librarySummary.playbackEvents,
       ...(hasGemmaVectors ? { gemmaVectors } : {}),
-      likedSongKeys,
+      ...(learnedWeights ? { rankerWeights: learnedWeights } : {}),
+      ...(collabScoring.collabGraph ? { collabGraph: collabScoring.collabGraph, collabWeight: collabScoring.collabWeight } : {}),
+      likedSongKeys: mergedLikedSongKeys,
       recentlyPlayedKeys: Array.from(countedPlaybackRef.current || []),
       manualQueue,
       limit: 6,
@@ -1341,7 +1407,44 @@ function App() {
       } : {}),
     });
     return signal?.aborted ? [] : recs;
-  }, [exploreLibrarySongs, gemmaVectors, librarySummary.playbackEvents, likedSongKeys]);
+  }, [collabScoring.collabGraph, collabScoring.collabWeight, exploreLibrarySongs, gemmaVectors, librarySummary.playbackEvents, mergedLikedSongKeys, personalRankerState]);
+
+  const handleImportListeningHistory = useCallback(async file => {
+    if (!file) return null;
+    const imported = await importExternalListeningFile(file, exploreLibrarySongs);
+    const merged = mergeExternalHistoryPack(externalHistoryPack, imported);
+    await saveExternalHistoryPack(merged);
+    setExternalHistoryPack(merged);
+    return { imported, merged };
+  }, [exploreLibrarySongs, externalHistoryPack]);
+
+  useEffect(() => {
+    let active = true;
+    loadPersonalRankerState().then(saved => {
+      if (!active || !saved) return;
+      applyPersonalRankerState(saved);
+      setPersonalRankerState(saved);
+    }).catch(() => {});
+    loadExternalHistoryPack().then(pack => {
+      if (active && pack) setExternalHistoryPack(pack);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!exploreLibrarySongs.length || !mergedRankerPlaybackEvents.length) return undefined;
+    const timer = setTimeout(() => {
+      refreshPersonalRanker({
+        songs: exploreLibrarySongs,
+        playbackEvents: mergedRankerPlaybackEvents,
+        likedSongKeys: mergedLikedSongKeys,
+        gemmaVectors: gemmaVectors.size ? gemmaVectors : null,
+      }).then(nextState => {
+        if (nextState) setPersonalRankerState(nextState);
+      }).catch(() => {});
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [exploreLibrarySongs, gemmaVectors, mergedLikedSongKeys, mergedRankerPlaybackEvents]);
 
   useEffect(() => {
     configurePlayback({
@@ -1352,7 +1455,13 @@ function App() {
     });
   }, [configurePlayback, handleGetRecommendations, isAuthenticated, resolvePlayableSong]);
 
-  useAdaptiveDjMode(player, exploreLibrarySongs, librarySummary.playbackEvents, likedSongKeys);
+  useAdaptiveDjMode(
+    player,
+    exploreLibrarySongs,
+    librarySummary.playbackEvents,
+    likedSongKeys,
+    personalRankerState?.rankerEnabled ? personalRankerState.rankerWeights : null,
+  );
 
   useEffect(() => {
     if (!currentSongKey || !isPlaying) return;
@@ -1908,67 +2017,81 @@ function App() {
   );
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar__top-row">
-          <button
-            type="button"
-            className="sidebar__logo"
-            onClick={() => { setView(VIEWS.HOME); setSelectedPlaylistKey(null); setSearchQuery(''); }}
-            aria-label="Go to Sisic Music home"
-          >
-            <span>♪</span> Sisic Music
-          </button>
-          <div className="sidebar__top-actions">
-            {(isAuthenticated || hasAuthorizedSession) && (
-              <button
-                type="button"
-                className="sidebar__signout-btn"
-                onClick={() => { player.stop(); logout(); }}
-                disabled={isAuthorizing}
-                title="Sign out of Google Drive"
-                aria-label="Sign out of Google Drive"
-              >
-                <LogOut size={15} />
-              </button>
-            )}
-            <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          </div>
-        </div>
+    <div className="app-shell app-shell--studio">
+      <aside className="sidebar sidebar--studio-rail" aria-label="Studio navigation">
+        <button
+          type="button"
+          className="sidebar__logo"
+          onClick={() => { setView(VIEWS.HOME); setSelectedPlaylistKey(null); setSearchQuery(''); setShowPlaylistsDrawer(false); }}
+          aria-label="Go to Sisic Music home"
+          title="Sisic Studio · Home"
+        >
+          <span className="sidebar__logo-mark">♪</span>
+          <span className="sidebar__rail-label">Sisic Music</span>
+        </button>
 
         <nav className="sidebar__nav" aria-label="Main navigation">
           {navItems.map(item => (
             <button
               key={item.id}
-              className={`sidebar__nav-item ${view === item.id ? 'sidebar__nav-item--active' : ''}`}
-              onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); }}
+              type="button"
+              className={`sidebar__nav-item ${view === item.id && !selectedPlaylistKey ? 'sidebar__nav-item--active' : ''}`}
+              onClick={() => { setView(item.id); setSelectedPlaylistKey(null); setSearchQuery(''); setShowPlaylistsDrawer(false); }}
               aria-current={view === item.id ? 'page' : undefined}
+              aria-label={item.label}
+              title={item.label}
             >
-              <item.icon size={20} />
-              {item.label}
+              <item.icon size={19} />
+              <span className="sidebar__rail-label">{item.label}</span>
+              {item.id === VIEWS.DUPLICATES && duplicateSongs.length > 0 && (
+                <span className="sidebar__rail-badge">{duplicateSongs.length}</span>
+              )}
             </button>
           ))}
           <button
-            className="sidebar__nav-item"
-            onClick={() => setIsTasteProfileOpen(true)}
-            aria-label="View personal taste profile"
+            type="button"
+            data-playlists-drawer-trigger="true"
+            className={`sidebar__nav-item ${showPlaylistsDrawer || selectedPlaylistKey ? 'sidebar__nav-item--active' : ''}`}
+            onClick={() => setShowPlaylistsDrawer(open => !open)}
+            aria-expanded={showPlaylistsDrawer}
+            aria-label="Toggle playlists drawer"
+            title={`Playlists (${visiblePlaylists.length})`}
           >
-            <Compass size={20} />
-            Taste Profile
+            <ListMusic size={19} />
+            <span className="sidebar__rail-label">Playlists</span>
           </button>
           <button
-            className="sidebar__nav-item"
-            onClick={() => setIsEqOpen(true)}
-            aria-label="Open audio equalizer"
+            type="button"
+            className={`sidebar__nav-item ${isTasteProfileOpen ? 'sidebar__nav-item--active' : ''}`}
+            onClick={() => { setShowPlaylistsDrawer(false); setIsTasteProfileOpen(true); }}
+            aria-label="View personal taste profile"
+            title="Taste Profile"
           >
-            <Sliders size={20} />
-            Equalizer
+            <Compass size={19} />
+            <span className="sidebar__rail-label">Taste Profile</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar__nav-item ${isEqOpen ? 'sidebar__nav-item--active' : ''}`}
+            onClick={() => { setShowPlaylistsDrawer(false); setIsEqOpen(true); }}
+            aria-label="Open audio equalizer"
+            title="Equalizer"
+          >
+            <Sliders size={19} />
+            <span className="sidebar__rail-label">Equalizer</span>
           </button>
         </nav>
 
-        <button className="sidebar__import-btn" onClick={() => fileInputRef.current?.click()} disabled={isImporting}>
+        <button
+          type="button"
+          className="sidebar__import-btn"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isImporting}
+          aria-label={isImporting ? 'Importing music' : 'Import music'}
+          title={isImporting ? 'Importing…' : 'Import music'}
+        >
           <FolderOpen size={18} />
-          {isImporting ? 'Importing…' : 'Import music'}
+          <span className="sidebar__rail-label">{isImporting ? 'Importing…' : 'Import music'}</span>
         </button>
         <input
           ref={fileInputRef}
@@ -1986,51 +2109,118 @@ function App() {
           onChange={handleImportGemmaVectors}
         />
 
-          <div className="sidebar__playlists">
-            <div className="sidebar__section-label">Playlists</div>
-            <button className="panel-action-btn" onClick={() => openPlaylistPicker(null)} aria-label="Create playlist"><Plus size={14} /> New playlist</button>
-            <div className="sidebar__playlist-list">
-              {visiblePlaylists.map(playlist => (
-                <div key={playlist.playlistKey} className="sidebar__playlist-row">
-                  <button
-                    className={`playlist-item ${selectedPlaylistKey === playlist.playlistKey ? 'playlist-item--active' : ''}`}
-                    onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); }}
-                  >
-                    <span className="sidebar__playlist-name">{playlist.name}</span>
-                  </button>
-                  {isDeletablePlaylist(playlist) && (
-                    <button
-                      type="button"
-                      className="sidebar__playlist-delete-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setPlaylistToDelete(playlist);
-                      }}
-                      title={`Delete "${playlist.name}"`}
-                      aria-label={`Delete "${playlist.name}" playlist`}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
+        <div className="sidebar__rail-footer">
+          <div className="sidebar__rail-theme-wrap" title="Toggle light / dark theme">
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
           </div>
+          {(isAuthenticated || hasAuthorizedSession) && (
+            <button
+              type="button"
+              className="sidebar__signout-btn"
+              onClick={() => { player.stop(); logout(); }}
+              disabled={isAuthorizing}
+              title="Sign out of Google Drive"
+              aria-label="Sign out of Google Drive"
+            >
+              <LogOut size={15} />
+            </button>
+          )}
+          <button
+            type="button"
+            className="sidebar__sync-counter"
+            onClick={() => setShowStoragePanel(true)}
+            title={`${driveReadySongs.length.toLocaleString()} synced tracks ready · Open storage summary`}
+            aria-label={`Synced ${driveReadySongs.length.toLocaleString()} songs`}
+          >
+            <span className="sidebar__sync-dot" aria-hidden="true" />
+            <span>SYNCED</span>
+            <strong>{driveReadySongs.length.toLocaleString()}</strong>
+          </button>
+        </div>
       </aside>
 
-      <main className="main-view" onDragOver={event => event.preventDefault()} onDrop={handleDrop}>
-        <SyncBanner
+      {showPlaylistsDrawer && (
+        <aside ref={playlistsDrawerRef} className="studio-playlists-drawer" aria-label="Playlists">
+          <div className="studio-playlists-drawer__head">
+            <span className="studio-playlists-drawer__title">Playlists ({visiblePlaylists.length})</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button type="button" className="panel-action-btn" onClick={() => { openPlaylistPicker(null); setShowPlaylistsDrawer(false); }} aria-label="Create playlist">
+                <Plus size={14} /> New
+              </button>
+              <button type="button" className="icon-btn" onClick={() => setShowPlaylistsDrawer(false)} aria-label="Close playlists drawer">
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+          <div className="sidebar__playlist-list">
+            {visiblePlaylists.map(playlist => (
+              <div key={playlist.playlistKey} className="sidebar__playlist-row">
+                <button
+                  type="button"
+                  className={`playlist-item ${selectedPlaylistKey === playlist.playlistKey ? 'playlist-item--active' : ''}`}
+                  onClick={() => { setSelectedPlaylistKey(playlist.playlistKey); setView(VIEWS.LIBRARY); setShowPlaylistsDrawer(false); }}
+                >
+                  <span className="sidebar__playlist-name">{playlist.name}</span>
+                </button>
+                {isDeletablePlaylist(playlist) && (
+                  <button
+                    type="button"
+                    className="sidebar__playlist-delete-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPlaylistToDelete(playlist);
+                    }}
+                    title={`Delete "${playlist.name}"`}
+                    aria-label={`Delete "${playlist.name}" playlist`}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </aside>
+      )}
+
+      <main className={`main-view ${view === VIEWS.CONSTELLATION ? 'main-view--constellation' : ''}`} onDragOver={event => event.preventDefault()} onDrop={handleDrop}>
+        <StudioTopBar
+          isAuthenticated={isAuthenticated}
           isSyncing={isSyncing}
-          syncStatus={bannerStatus}
-          error={Boolean(bannerError)}
-          onSync={syncLibrary}
-          actionLabel={!isAuthenticated ? 'Reconnect Drive' : localDbError ? 'Reset local library' : ''}
-          onAction={!isAuthenticated ? login : localDbError ? handleResetLocalLibrary : undefined}
-          actionDisabled={isAuthorizing}
+          hasLocalData={allSongs.length > 0}
+          vectorCount={gemmaVectors.size}
+          readyCount={driveReadySongs.length}
+          searchQuery={searchQuery}
+          onSearchChange={value => {
+            setSearchQuery(value);
+            if (value.trim() && view !== VIEWS.LIBRARY && view !== VIEWS.DUPLICATES) {
+              setSelectedPlaylistKey(null);
+              setView(VIEWS.LIBRARY);
+            }
+          }}
+          onSearchSubmit={() => {
+            if (view !== VIEWS.LIBRARY && view !== VIEWS.DUPLICATES) {
+              setSelectedPlaylistKey(null);
+              setView(VIEWS.LIBRARY);
+            }
+          }}
+          onOpenTasteProfile={() => setIsTasteProfileOpen(true)}
+          onOpenStorage={() => setShowStoragePanel(true)}
+          onReconnect={login}
         />
+        {(isSyncing || (bannerError && (localDbError || actionError || player.error || !String(authError || '').startsWith('Drive connection paused')))) && (
+          <SyncBanner
+            isSyncing={isSyncing}
+            syncStatus={bannerStatus}
+            error={Boolean(bannerError)}
+            onSync={syncLibrary}
+            actionLabel={!isAuthenticated ? 'Reconnect Drive' : localDbError ? 'Reset local library' : ''}
+            onAction={!isAuthenticated ? login : localDbError ? handleResetLocalLibrary : undefined}
+            actionDisabled={isAuthorizing}
+          />
+        )}
         <ImportStatusPanel jobs={importJobs} embeddingJobs={embeddingJobs} />
 
-        {(view === VIEWS.HOME || view === VIEWS.DOWNLOADS) && (
+        {view === VIEWS.DOWNLOADS && (
         <section className="drive-summary" aria-label="Drive storage summary">
           <div>
             <span className="drive-summary__label">Drive folder</span>
@@ -2061,9 +2251,16 @@ function App() {
 
         {view === VIEWS.HOME && (
           <>
-            <header className="main-view__header">
-              <h1 className="main-view__title">{currentGreeting()}</h1>
-            </header>
+            <TasteDeckHud
+              songs={allSongs}
+              playbackEvents={librarySummary.playbackEvents}
+              gemmaVectors={gemmaVectors}
+              likedSongKeys={likedSongKeys}
+              queue={player.queue}
+              currentSong={player.currentSong}
+              onPlaySong={(song, list) => handlePlaySong(song, list)}
+              onOpenTasteProfile={() => setIsTasteProfileOpen(true)}
+            />
 
             {visiblePlaylists.length > 0 && (
               <section className="home-section">
@@ -2282,6 +2479,9 @@ function App() {
           <Suspense fallback={<div className="view-loading" role="status">Loading music clusters…</div>}>
             <ConstellationView
               songs={galaxySongs}
+              gemmaVectors={gemmaVectors}
+              playbackEvents={librarySummary.playbackEvents}
+              likedSongKeys={likedSongKeys}
               currentSong={player.currentSong}
               onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
               onPlayCluster={(clusterSongs) => clusterSongs.length && handlePlaySong(clusterSongs[0], clusterSongs)}
@@ -2514,7 +2714,10 @@ function App() {
             onClose={() => setIsTasteProfileOpen(false)}
             librarySummary={librarySummary}
             songs={allSongs}
-            likedSongKeys={likedSongKeys}
+            likedSongKeys={mergedLikedSongKeys}
+            externalHistoryPack={externalHistoryPack}
+            personalRankerState={personalRankerState}
+            onImportListeningHistory={handleImportListeningHistory}
             onPlayMix={mixSongs => {
               if (!mixSongs.length) return;
               setIsTasteProfileOpen(false);

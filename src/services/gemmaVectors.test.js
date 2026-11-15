@@ -211,6 +211,28 @@ test('matchExportToLibrary uses filenames for untagged files and pruning keeps e
   }
 });
 
+test('matchExportToLibrary strips import-source and Unknown Artist filename prefixes safely', () => {
+  const library = [
+    { songKey: 'k1', artist: 'Rex Orange County', track: 'Pluto Projector', filename: 'sisic-import-source-30cac848-7871-4f6b-97ed-f1c852632e74-Rex Orange County - Pluto Projector.mp3' },
+    { songKey: 'k2', artist: 'Unknown Artist', track: 'Pathikichu', filename: 'Unknown Artist - Pathikichu.mp3' },
+    { songKey: 'unknown artist::martin 1', artist: 'Unknown Artist', track: 'Martin 1', filename: 'Unknown Artist - Martin 1.mp3' },
+    { songKey: 'unknown artist::martin 3', artist: 'Unknown Artist', track: 'Martin 3', filename: 'Unknown Artist - Martin 3.mp3' },
+  ];
+  const records = [
+    { songKey: 'other1', artist: '', title: 'Pluto Projector', filename: 'Rex Orange County - Pluto Projector.mp3' },
+    { songKey: 'other2', artist: 'Anirudh Ravichander', title: 'Pathikichu', filename: 'Pathikichu.mp3' },
+    { songKey: 'unknown artist::martin 3', artist: '', title: 'Martin 3', filename: 'Martin 3.mp3' },
+    { songKey: 'unknown artist::martin 1', artist: '', title: 'Martin 1', filename: 'Martin 1.mp3' },
+  ];
+  const { matches, unmatched } = matchExportToLibrary(records, library);
+  const bySong = Object.fromEntries(matches.map(m => [m.song.songKey, m.record.songKey]));
+  assert.equal(bySong.k1, 'other1');
+  assert.equal(bySong.k2, 'other2');
+  assert.equal(bySong['unknown artist::martin 1'], 'unknown artist::martin 1');
+  assert.equal(bySong['unknown artist::martin 3'], 'unknown artist::martin 3');
+  assert.equal(unmatched.length, 0);
+});
+
 test('imports Recommender v3 int8 base64 vectors and boundary vectors with high cosine fidelity', async () => {
   const originalBulkPut = db.songVectors.bulkPut;
   const originalPut = db.songVectors.put;

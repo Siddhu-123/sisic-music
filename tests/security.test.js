@@ -114,14 +114,15 @@ test('Finding 1: exchangeCodeWithWorker and refreshAccessTokenWithWorker keep re
     assert.equal(local.getItem(REFRESH_TOKEN_STORAGE_KEY), null);
     assert.equal(session.getItem(REFRESH_TOKEN_STORAGE_KEY), null);
     assert.equal(getStoredRefreshToken(), 'volatile-refresh-456');
-    assert.equal(fetchCalls[0].options.credentials, 'include');
-    assert.equal(fetchCalls[0].options.headers['Cache-Control'], 'no-store');
+    assert.equal(fetchCalls[0].options.credentials, 'omit');
+    assert.equal(fetchCalls[0].options.cache, 'no-store');
 
     const refreshed = await refreshAccessTokenWithWorker();
     assert.equal(refreshed.access_token, 'access-123');
     assert.equal(local.getItem(REFRESH_TOKEN_STORAGE_KEY), null);
     assert.equal(session.getItem(REFRESH_TOKEN_STORAGE_KEY), null);
-    assert.equal(fetchCalls[1].options.credentials, 'include');
+    assert.equal(fetchCalls[1].options.credentials, 'omit');
+    assert.equal(fetchCalls[1].options.cache, 'no-store');
   } finally {
     clearStoredRefreshToken();
     if (prevEnv === undefined) delete process.env.VITE_AUTH_WORKER_URL;

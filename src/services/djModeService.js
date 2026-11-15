@@ -1,5 +1,11 @@
 import { getSongKey } from '../songIdentity.js';
 import {
+  hasCustomSkipPredictor,
+  pairTransitionStats,
+  predictSkip,
+  transitionPenalty,
+} from './behaviourLearning.js';
+import {
   buildContextualTasteProfile,
   getPlaybackContext,
   rankContextualSongs,
@@ -257,7 +263,7 @@ function styleSimilarity(source, candidate) {
   }
 }
 
-export function rankDjCandidates({ source, songs = [], similarityFor = styleSimilarity, playbackEvents = [], likedSongKeys = [], transitionScores = new Map(), history = {}, positionSeconds, now = Date.now(), currentContext = getPlaybackContext(now, typeof navigator === 'undefined' ? '' : navigator.userAgent) } = {}) {
+export function rankDjCandidates({ source, songs = [], similarityFor = styleSimilarity, playbackEvents = [], likedSongKeys = [], transitionScores = new Map(), history = {}, positionSeconds, now = Date.now(), currentContext = getPlaybackContext(now, typeof navigator === 'undefined' ? '' : navigator.userAgent), rankerWeights } = {}) {
   const sourceKey = keyOf(source);
   const profile = buildContextualTasteProfile(songs, playbackEvents, { now, currentContext, likedSongKeys });
   const contextual = rankContextualSongs(songs.filter(song => song.driveFileId), {
@@ -266,10 +272,34 @@ export function rankDjCandidates({ source, songs = [], similarityFor = styleSimi
     excludeSongKeys: [sourceKey, ...(history.candidateKeys || [])],
     now,
     limit: 60,
+    rankerWeights,
+    currentContext,
   });
+  const useLearnedSkip = hasCustomSkipPredictor();
+  const transStats = useLearnedSkip && playbackEvents.length ? pairTransitionStats(playbackEvents) : null;
+  const hourOfDay = Number.isFinite(currentContext?.hour) ? currentContext.hour : new Date(now).getHours();
   return contextual.map((song, index) => {
     const transition = transitionScores.get(transitionCacheKey(source, song, positionSeconds)) || scoreDjTransition(source, song, positionSeconds, { similarity: similarityFor(source, song) });
-    return { song, contextualRank: index, contextualScore: song.tasteScore ?? song.recommendationScore ?? 0, transition, score: (song.tasteScore ?? song.recommendationScore ?? 0) + transition.score * .34 };
+    const candKey = keyOf(song);
+    const skipRisk = useLearnedSkip
+      ? predictSkip({
+        affinity: song.recommendationScore ?? 0,
+        steerScore: 0,
+        transitionPenalty: transStats && sourceKey && candKey ? transitionPenalty(transStats, sourceKey, candKey) : 0,
+        hourOfDay,
+        sourceType: 'dj',
+        positionInQueue: index,
+      })
+      : 0;
+    const baseScore = song.tasteScore ?? song.recommendationScore ?? 0;
+    return {
+      song,
+      contextualRank: index,
+      contextualScore: baseScore,
+      transition,
+      skipRisk,
+      score: baseScore + transition.score * .34 - (skipRisk * 0.22),
+    };
   }).sort((a, b) => b.score - a.score || a.contextualRank - b.contextualRank);
 }
 

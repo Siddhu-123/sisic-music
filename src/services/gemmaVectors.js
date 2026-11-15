@@ -1,5 +1,6 @@
 import { db, getSongVectors, saveSongVectors } from '../db.js';
 import { findSimilarSongMatch, getSongKey, tokenSet } from '../songIdentity.js';
+import { DEFAULT_FULL_SCAN_THRESHOLD, selectStage1Candidates } from './candidateIndex.js';
 
 export const GEMMA2_MODEL = 'embeddinggemma-2@fp32/clip30/v1';
 export const GEMMA2_DIMENSIONS = 256;
@@ -69,6 +70,12 @@ function filenameTitle(filename = '') {
 }
 
 const baseName = name => filenameTitle(name).toLowerCase();
+const strippedBaseName = name => baseName(name)
+  .replace(/^sisic-import-source-[0-9a-f-]+-/, '')
+  .replace(/^unknown artist\s*-\s*/, '')
+  .replace(/^\d{1,2}\s*-\s*/, '')
+  .replace(/\s+\d$/, '')
+  .trim();
 
 // "Artist - Title.mp3" files with no artist tag: take the artist from the name, as Drive import does.
 function recordParts(record) {
@@ -76,18 +83,39 @@ function recordParts(record) {
   if (record.artist) return { artist: record.artist, track: title };
   const stem = filenameTitle(record.filename);
   const [artist, ...rest] = stem.split(' - ');
-  return rest.length ? { artist: artist.trim(), track: rest.join(' - ').trim() } : { artist: '', track: title };
+  if (rest.length) return { artist: artist.trim(), track: rest.join(' - ').trim() };
+  const titleParts = String(title).split(' - ');
+  return titleParts.length > 1
+    ? { artist: titleParts[0].trim(), track: titleParts.slice(1).join(' - ').trim() }
+    : { artist: '', track: title };
 }
 
 export function matchExportToLibrary(records = [], librarySongs = []) {
   const byKey = new Map();
   const byFile = new Map();
+  const byUniqueTrackKey = new Map();
   const byArtistToken = new Map(); // 'high' needs artist overlap, so only songs sharing a token can match
+  const addFileRef = (key, song) => {
+    if (!key) return;
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(song);
+  };
   for (const song of librarySongs) {
     const key = song.songKey || getSongKey(song);
-    if (key && !byKey.has(key)) byKey.set(key, song);
+    if (key) {
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(song);
+      const trackPart = key.split('::')[1] || '';
+      if (trackPart) {
+        if (!byUniqueTrackKey.has(trackPart)) byUniqueTrackKey.set(trackPart, song);
+        else byUniqueTrackKey.set(trackPart, null);
+      }
+    }
     const file = song.filename || song.fileName;
-    if (file && !byFile.has(baseName(file))) byFile.set(baseName(file), song);
+    if (file) {
+      addFileRef(baseName(file), song);
+      addFileRef(strippedBaseName(file), song);
+    }
     const tokens = tokenSet(song.artist);
     if (!tokens.size) tokens.add('');
     for (const token of tokens) {
@@ -102,21 +130,56 @@ export function matchExportToLibrary(records = [], librarySongs = []) {
     for (const token of tokens) for (const song of byArtistToken.get(token) || []) seen.add(song);
     return [...seen];
   };
-  const matches = [];
-  const unmatched = [];
-  const claimed = new Set(); // first record wins; duplicates (other files of the same song) are dropped
+  const matchesByRecord = new Map();
+  const claimed = new Set(); // first highest-tier record wins per library songKey
+  const songIdOf = song => song && (song.songKey || getSongKey(song));
+  const claimAll = (record, list) => {
+    let any = false;
+    for (const s of list || []) {
+      const id = songIdOf(s);
+      if (id && !claimed.has(id)) {
+        claimed.add(id);
+        if (!matchesByRecord.has(record)) matchesByRecord.set(record, []);
+        matchesByRecord.get(record).push({ record, song: s });
+        any = true;
+      }
+    }
+    return any;
+  };
+
+  // Tier 1: exact songKey match across all records before any filename/fuzzy fallback.
   for (const record of records) {
     const key = recordSongKey(record);
-    let song = (key ? byKey.get(key) : null) || (record.filename ? byFile.get(baseName(record.filename)) : null) || null;
-    if (!song) {
-      const parts = recordParts(record);
-      // 'high' only: a medium match can attach a live/remix vector to the studio track.
-      const match = findSimilarSongMatch(parts, candidatesFor(parts.artist), 'high');
-      song = match?.song || null;
+    if (key) claimAll(record, byKey.get(key));
+  }
+  // Tier 2: exact filename match (allows duplicate library entries sharing one audio file to match).
+  for (const record of records) {
+    const recFileExact = record.filename ? baseName(record.filename) : '';
+    if (recFileExact) claimAll(record, byFile.get(recFileExact));
+  }
+  // Tier 3: prefix/suffix-stripped filename match.
+  for (const record of records) {
+    const recFileStripped = record.filename ? strippedBaseName(record.filename) : '';
+    if (recFileStripped) claimAll(record, byFile.get(recFileStripped));
+  }
+  // Tier 4: high-confidence artist+title similarity, then unique track fallback for untagged files.
+  const unmatched = [];
+  for (const record of records) {
+    if (matchesByRecord.has(record)) continue;
+    const key = recordSongKey(record);
+    const parts = recordParts(record);
+    let song = findSimilarSongMatch(parts, candidatesFor(parts.artist), 'high')?.song || null;
+    if (!song && !record.artist && key?.startsWith('unknown artist::')) {
+      const trackPart = key.split('::')[1] || '';
+      const uniqueTrackSong = trackPart ? byUniqueTrackKey.get(trackPart) : null;
+      if (uniqueTrackSong) song = uniqueTrackSong;
     }
-    const matchedKey = song && (song.songKey || getSongKey(song));
-    if (song && !claimed.has(matchedKey)) { claimed.add(matchedKey); matches.push({ record, song }); }
-    else unmatched.push(record);
+    if (!song || !claimAll(record, [song])) unmatched.push(record);
+  }
+  const matches = [];
+  for (const record of records) {
+    const bucket = matchesByRecord.get(record);
+    if (bucket) matches.push(...bucket);
   }
   return { matches, unmatched };
 }
@@ -177,6 +240,7 @@ export async function importGemmaVectors(payload, librarySongs = []) {
       startVector,
       endVector,
       ...(tagVector ? { tagVector, tagDimensions: tagDims } : {}),
+      ...(Number.isInteger(record.clusterId) ? { clusterId: record.clusterId } : {}),
       clipCount: Number.isFinite(Number(record.clipCount)) ? Number(record.clipCount) : 0,
       artist: record.artist || song.artist || '',
       title: record.title || record.track || song.track || '',
@@ -188,6 +252,17 @@ export async function importGemmaVectors(payload, librarySongs = []) {
   }
   // One bulkPut per 500 rows instead of a transaction per song (a full export is ~5,000 rows).
   const imported = await saveSongVectors(rows);
+  if (isV3 && Array.isArray(payload.clusterCentroids) && db?.metadata) {
+    const centroids = payload.clusterCentroids
+      .map(c => decodeInt8Base64Unit(c?.vectorI8, c?.vectorScale, targetDims))
+      .filter(Boolean);
+    if (centroids.length === payload.clusterCentroids.length && centroids.length > 0) {
+      await db.metadata.put({
+        key: `gemmaClusterCentroids:${targetModel}`,
+        value: { centroids, dimensions: targetDims, updatedAt: new Date().toISOString() },
+      }).catch(() => {});
+    }
+  }
   return { imported, unmatched: unmatched.length, skipped };
 }
 
@@ -273,13 +348,29 @@ export async function queryTextVector({ baseUrl, token, text, fetchImpl = fetch 
   return response.json();
 }
 
-export function gemmaNeighbors(seedKey, rows, k = 12) {
+export function gemmaNeighbors(seedKey, rows, k = 12, { fullScanBelow = DEFAULT_FULL_SCAN_THRESHOLD, stage1Limit = 3000 } = {}) {
   const seed = rows.find(row => row.songKey === seedKey && (row.embeddingModel === RECS_V3_MODEL || row.embeddingModel === GEMMA2_MODEL));
   const seedModel = seed?.embeddingModel || GEMMA2_MODEL;
   const dims = seed?.dimensions || seed?.vector?.length || (seedModel === RECS_V3_MODEL ? RECS_V3_DIMENSIONS : GEMMA2_DIMENSIONS);
   const vector = seed && normalizeVector(seed.vector, dims);
   if (!vector) return [];
-  return rows.flatMap(row => {
+
+  let pool = rows;
+  if (rows.length >= fullScanBelow) {
+    const stage1 = selectStage1Candidates(rows, {
+      queryVectors: [{ vector, weight: 1 }],
+      targetSize: Math.max(stage1Limit, k * 20),
+      fullScanBelow,
+      excludeKeys: [seedKey],
+      indexOptions: {
+        getKey: r => r.songKey,
+        getVector: r => (r.embeddingModel === seedModel ? r.vector : null),
+      },
+    });
+    pool = stage1.candidates;
+  }
+
+  return pool.flatMap(row => {
     if (row.songKey === seedKey || row.embeddingModel !== seedModel) return [];
     const candidate = normalizeVector(row.vector, dims);
     if (!candidate) return [];

@@ -129,8 +129,9 @@ export function buildInterests(items = [], {
   minShare = 0.12,
   minClusterSize = 3,
   kappa = 4.0,
-  minRelativeGain = 0.3,
-  minAbsoluteGain = 0.04,
+  // Calibrated for isotropic 128D SoftWhiten vectors where distinct tastes sit near cos ~ 0.
+  minRelativeGain = 0.05,
+  minAbsoluteGain = 0.02,
   seed = 11,
   gemmaVectors,
 } = {}) {
@@ -156,7 +157,7 @@ export function buildInterests(items = [], {
       valid.forEach((item, i) => {
         if (fit.assignments[i] === c) { members.push(item.index); weight += item.weight; }
       });
-      const shrink = members.length / (members.length + Math.max(0, Number(kappa) || 0));
+      const shrink = weight / (weight + Math.max(0, Number(kappa) || 0));
       const shrunk = globalVector
         ? unit(vector.map((value, d) => (shrink * value) + ((1 - shrink) * globalVector[d])))
         : vector;
@@ -198,26 +199,68 @@ export function interestAffinity(vector, interests = []) {
   return best;
 }
 
+/** Precomputes session-activated log-weights once per ranking pass (zero per-song allocation). */
+export function prepareInterestsLogSumExp(interests = [], {
+  sessionVector = null,
+  beta = 3.0,
+  tau = 8.0,
+} = {}) {
+  if (!interests?.length) return null;
+  const candidates = interests.filter(interest => interest?.vector
+    && Number.isFinite(interest.weight) && interest.weight > 0);
+  if (!candidates.length) return null;
+
+  const activation = new Float64Array(candidates.length);
+  let maxActivation = -Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const interest = candidates[i];
+    const sessionFit = sessionVector ? dot(sessionVector, interest.vector) : 0;
+    const val = Math.log(interest.weight) + (sessionVector ? beta * sessionFit : 0);
+    activation[i] = val;
+    if (val > maxActivation) maxActivation = val;
+  }
+  const probs = new Float64Array(candidates.length);
+  let totalActivation = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const p = Math.exp(activation[i] - maxActivation);
+    probs[i] = p;
+    totalActivation += p;
+  }
+  const logProbs = new Float64Array(candidates.length);
+  for (let i = 0; i < candidates.length; i++) {
+    probs[i] /= totalActivation;
+    logProbs[i] = Math.log(probs[i] || 1e-12);
+  }
+  return { candidates, probs, logProbs, tau };
+}
+
+/** Evaluates a precomputed LogSumExp multi-interest model without array allocations. */
+export function scorePreparedInterestsLogSumExp(vector, prepared) {
+  if (!vector || !prepared) return null;
+  const { candidates, logProbs, tau } = prepared;
+  const n = candidates.length;
+  let maxScaled = -Infinity;
+  const scaled = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = candidates[i].vector;
+    const len = Math.min(vector.length, v.length);
+    let sim = 0;
+    for (let d = 0; d < len; d++) sim += vector[d] * v[d];
+    const s = logProbs[i] + tau * sim;
+    scaled[i] = s;
+    if (s > maxScaled) maxScaled = s;
+  }
+  let sumExp = 0;
+  for (let i = 0; i < n; i++) sumExp += Math.exp(scaled[i] - maxScaled);
+  return (maxScaled + Math.log(sumExp)) / tau;
+}
+
 /** Smooth, session-aware aggregation of similarity across a listener's interests. */
 export function scoreInterestsLogSumExp(vector, interests, {
   sessionVector = null,
   beta = 3.0,
   tau = 8.0,
 } = {}) {
-  if (!vector || !interests?.length) return null;
-  const candidates = interests.filter(interest => interest?.vector
-    && Number.isFinite(interest.weight) && interest.weight > 0);
-  if (!candidates.length) return null;
-
-  const activation = candidates.map(interest => {
-    const sessionFit = sessionVector ? dot(sessionVector, interest.vector) : 0;
-    return Math.log(interest.weight) + (sessionVector ? beta * sessionFit : 0);
-  });
-  const maxActivation = Math.max(...activation);
-  const activated = activation.map(value => Math.exp(value - maxActivation));
-  const totalActivation = activated.reduce((sum, value) => sum + value, 0);
-  const similarities = candidates.map(interest => dot(vector, interest.vector));
-  const scaled = similarities.map((similarity, i) => Math.log(activated[i] / totalActivation) + tau * similarity);
-  const maxScaled = Math.max(...scaled);
-  return (maxScaled + Math.log(scaled.reduce((sum, value) => sum + Math.exp(value - maxScaled), 0))) / tau;
+  const prepared = prepareInterestsLogSumExp(interests, { sessionVector, beta, tau });
+  return scorePreparedInterestsLogSumExp(vector, prepared);
 }

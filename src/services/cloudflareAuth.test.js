@@ -4,6 +4,8 @@ import {
   getStoredRefreshToken,
   setStoredRefreshToken,
   clearStoredRefreshToken,
+  exchangeCodeWithWorker,
+  refreshAccessTokenWithWorker,
   REFRESH_TOKEN_STORAGE_KEY,
 } from './cloudflareAuth.js';
 
@@ -28,5 +30,34 @@ test('manages refresh token in storage safely', () => {
     assert.equal(getStoredRefreshToken(), null);
   } finally {
     globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('standalone auth worker requests omit credentials and disallowed CORS headers', async () => {
+  const prevUrl = globalThis.process.env.VITE_AUTH_WORKER_URL;
+  globalThis.process.env.VITE_AUTH_WORKER_URL = 'https://auth.example.workers.dev';
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'tok', expires_in: 3600 }),
+    };
+  };
+
+  try {
+    await exchangeCodeWithWorker('code-123', 'postmessage', { fetchImpl });
+    await refreshAccessTokenWithWorker('rt-123', { fetchImpl });
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      assert.equal(call.init.credentials, 'omit');
+      assert.equal(call.init.headers['Cache-Control'], undefined);
+      assert.equal(call.init.headers['X-Sisic-SW'], undefined);
+      assert.equal(call.init.headers['Content-Type'], 'application/json');
+    }
+  } finally {
+    if (prevUrl === undefined) delete globalThis.process.env.VITE_AUTH_WORKER_URL;
+    else globalThis.process.env.VITE_AUTH_WORKER_URL = prevUrl;
   }
 });
