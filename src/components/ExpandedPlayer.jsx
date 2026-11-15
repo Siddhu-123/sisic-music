@@ -206,9 +206,6 @@ export function ExpandedPlayer({
               </div>
 
               <div className="expanded-controls">
-                <button className= "key">
-                  
-                </button>
                 <button
                   className={`icon-btn ${shuffleMode !== 'off' ? 'icon-btn--active' : ''}`}
                   onClick={toggleShuffle}
