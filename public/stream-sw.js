@@ -1,8 +1,11 @@
 const MAX_FILE_METADATA_ENTRIES = 128;
+const TOKEN_REQUEST_TIMEOUT_MS = 2500;
+const TOKEN_REQUEST_RETRY_MS = 600;
 
 let driveAccessToken = '';
 let driveTokenVersion = '';
 let cookieRefreshPromise = null;
+let tokenRequestPromise = null;
 const fileMetadataCache = new Map();
 const tokenWaiters = new Set();
 
@@ -52,19 +55,34 @@ function rememberFileMetadata(fileId, metadata) {
 
 async function requestDriveToken() {
   if (driveAccessToken) return true;
-  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-  if (!clients.length) return false;
-  const result = new Promise(resolve => {
-    const waiter = tokenAvailable => {
-      clearTimeout(timeout);
-      tokenWaiters.delete(waiter);
-      resolve(tokenAvailable);
-    };
-    const timeout = setTimeout(() => waiter(false), 350);
-    tokenWaiters.add(waiter);
+  if (tokenRequestPromise) return await tokenRequestPromise;
+  tokenRequestPromise = (async () => {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (!clients.length) return false;
+    let retryTimer = null;
+    let timeout = null;
+    const result = new Promise(resolve => {
+      const waiter = tokenAvailable => {
+        clearTimeout(timeout);
+        clearTimeout(retryTimer);
+        tokenWaiters.delete(waiter);
+        resolve(tokenAvailable);
+      };
+      timeout = setTimeout(() => waiter(false), TOKEN_REQUEST_TIMEOUT_MS);
+      // Locked iOS Safari pages can take >350ms to thaw their event loop and respond.
+      retryTimer = setTimeout(() => {
+        if (!driveAccessToken) {
+          clients.forEach(client => client.postMessage({ type: 'SISIC_DRIVE_TOKEN_REQUEST' }));
+        }
+      }, TOKEN_REQUEST_RETRY_MS);
+      tokenWaiters.add(waiter);
+    });
+    clients.forEach(client => client.postMessage({ type: 'SISIC_DRIVE_TOKEN_REQUEST' }));
+    return await result;
+  })().finally(() => {
+    tokenRequestPromise = null;
   });
-  clients.forEach(client => client.postMessage({ type: 'SISIC_DRIVE_TOKEN_REQUEST' }));
-  return await result;
+  return await tokenRequestPromise;
 }
 
 async function notifyDriveAuthFailure(message, failedVersion = driveTokenVersion) {

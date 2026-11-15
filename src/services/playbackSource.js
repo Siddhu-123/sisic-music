@@ -2,7 +2,7 @@ import { driveService } from './GoogleDriveService.js';
 import { getDriveAppBaseUrl, getDriveStreamWorkerUrl, isAudioStreamResponse, isDriveStreamWorker, streamFailureMessage } from './driveStream.js';
 
 const STREAM_WORKER_READY_TIMEOUT_MS = 5000;
-const STREAM_TOKEN_READY_TIMEOUT_MS = 1500;
+const STREAM_TOKEN_READY_TIMEOUT_MS = 2500;
 async function waitForStreamWorker(signal) {
   signal?.throwIfAborted();
   if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return null;
@@ -110,6 +110,10 @@ async function probeDriveStream(streamUrl, signal) {
 export async function resolvePlaybackUrl(song, signal) {
   signal?.throwIfAborted();
   if (!song?.driveFileId) throw new Error(`"${song?.track || 'This song'}" is queued for Mac preparation.`);
+  if (!driveService.isAuthenticated && driveService.hasAuthorizedSession) {
+    await driveService.refreshTokenSilently?.().catch(() => false);
+    signal?.throwIfAborted();
+  }
   if (!driveService.isAuthenticated) throw Object.assign(new Error('Reconnect Google Drive to continue streaming.'), { name: 'AuthenticationError' });
   const worker = await waitForStreamWorker(signal);
   signal?.throwIfAborted();

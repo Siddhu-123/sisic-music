@@ -2,6 +2,11 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { PlaybackController } from '../services/PlaybackController.js';
 import { resolvePlaybackUrl } from '../services/playbackSource.js';
 import { shouldIgnoreGlobalPlaybackShortcut } from '../services/playbackShortcuts.js';
+import {
+  buildMediaMetadataInit,
+  registerMediaSessionActions,
+  syncMediaSessionState,
+} from '../services/playbackMediaSession.js';
 
 export const ACTIONS = ['loadAndPlay', 'configurePlayback', 'togglePlay', 'play', 'pause', 'seek', 'changeVolume', 'toggleMute', 'setRpm',
   'setPitchModifier', 'setPitchRange', 'beginScratch', 'setScratchAngularVelocity', 'endScratch', 'setNeedleLifted', 'clearError',
@@ -48,44 +53,34 @@ export function useAudioPlayer() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [controller, state.duration, state.progress]);
 
-  useEffect(() => {
-    const session = navigator.mediaSession;
-    if (!session) return;
-    const song = state.currentSong;
-    if (typeof MediaMetadata === 'function') session.metadata = song ? new MediaMetadata({
-      title: song.track || 'Unknown track', artist: song.artist || 'Unknown artist', album: song.album || 'Sisic Music',
-      artwork: song.coverArtUrl ? [{ src: song.coverArtUrl }] : [],
-    }) : null;
-    const seekSeconds = seconds => controller.seek(seconds / (controller.audio?.duration || 1) * 100);
-    const actions = {
-      play: controller.play, pause: controller.pause, stop: controller.stop,
-      previoustrack: controller.playPrev, nexttrack: () => controller.playNext({ reason: 'user-media-session' }),
-      seekto: details => seekSeconds(details.seekTime),
-      seekbackward: details => seekSeconds((controller.audio?.currentTime || 0) - (details.seekOffset || 10)),
-      seekforward: details => seekSeconds((controller.audio?.currentTime || 0) + (details.seekOffset || 10)),
-    };
-    // Browsers support different action subsets. One unsupported action must not block the others.
-    for (const [name, handler] of Object.entries(actions)) {
-      try { session.setActionHandler(name, song ? handler : null); } catch { /* unsupported action */ }
-    }
-    return () => {
-      for (const name of Object.keys(actions)) { try { session.setActionHandler(name, null); } catch { /* unsupported */ } }
-      session.metadata = null;
-      session.playbackState = 'none';
-    };
-  }, [controller, state.currentSong]);
+  const hasSong = Boolean(state.currentSong);
+  const songTitle = state.currentSong?.track || '';
+  const songArtist = state.currentSong?.artist || '';
+  const songAlbum = state.currentSong?.album || '';
+  const songCover = state.currentSong?.coverArtUrl || '';
 
   useEffect(() => {
     const session = navigator.mediaSession;
-    if (!session) return;
-    session.playbackState = state.currentSong ? (state.isPlaying ? 'playing' : 'paused') : 'none';
-    try {
-      session.setPositionState?.(state.duration > 0 ? {
-        duration: state.duration, position: Math.min(state.duration, state.progress / 100 * state.duration),
-        playbackRate: (state.rpm / 45) * state.pitchModifier,
-      } : undefined);
-    } catch { /* position reporting is optional */ }
-  }, [state.currentSong, state.isPlaying, state.duration, state.progress, state.rpm, state.pitchModifier]);
+    if (!session || !hasSong) return;
+    return registerMediaSessionActions(session, controller);
+  }, [controller, hasSong]);
+
+  useEffect(() => {
+    const session = navigator.mediaSession;
+    if (!session || typeof MediaMetadata !== 'function') return;
+    session.metadata = hasSong
+      ? new MediaMetadata(buildMediaMetadataInit({
+        track: songTitle,
+        artist: songArtist,
+        album: songAlbum,
+        coverArtUrl: songCover,
+      }))
+      : null;
+  }, [hasSong, songTitle, songArtist, songAlbum, songCover]);
+
+  useEffect(() => {
+    syncMediaSessionState(navigator.mediaSession, state);
+  }, [state]);
 
   return { ...state, audioRef: controller.audioRef, ...Object.fromEntries(ACTIONS.map(name => [name, controller[name]])) };
 }

@@ -60,7 +60,7 @@ export class AudioGraphManager {
       if (!AudioCtx) return null;
       this.audioContext = new AudioCtx();
     }
-    if (this.audioContext.state === 'suspended') {
+    if (this.audioContext.state !== 'running' && this.audioContext.state !== 'closed') {
       this.audioContext.resume().catch(() => {});
     }
     return this.audioContext;

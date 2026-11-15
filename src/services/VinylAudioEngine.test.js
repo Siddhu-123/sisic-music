@@ -80,3 +80,25 @@ test('ordinary playback stays native and pause completes immediately while backg
   engine.pause(); engine.handleVisibilityChange(true);
   assert.equal(engine.element.paused, true); assert.equal(engine.timeUpdateTimer, null);
 });
+
+test('play proceeds immediately without blocking on a suspended or interrupted AudioContext', async t => {
+  const engine = nativeFixture(t); const loading = engine.loadUrl('a'); engine.element.ready(); await loading;
+  let resumeCalls = 0;
+  engine.graph.audioContext = {
+    state: 'interrupted',
+    resume: () => { resumeCalls += 1; return new Promise(() => {}); },
+  };
+  await engine.play();
+  assert.equal(resumeCalls, 1);
+  assert.equal(engine.isPlaying, true);
+  assert.equal(engine.element.paused, false);
+
+  engine.handleVisibilityChange(false);
+  assert.equal(resumeCalls, 2);
+});
+
+test('zero band gain keeps native playback without building an AudioContext', t => {
+  const engine = nativeFixture(t);
+  engine.setBandGain(0, 0);
+  assert.equal(engine.graph.audioContext, null);
+});

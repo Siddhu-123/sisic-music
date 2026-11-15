@@ -48,3 +48,36 @@ test('an expired request cannot clear a newer service-worker token', async () =>
   assert.equal(vm.runInContext('driveTokenVersion', context), 'new-version');
   assert.equal(vm.runInContext('Boolean(driveAccessToken)', context), true);
 });
+
+test('requestDriveToken waits for throttled background client replies past 350ms', async () => {
+  const messages = [];
+  const context = {
+    URL,
+    setTimeout,
+    clearTimeout,
+    self: {
+      addEventListener() {},
+      location: { origin: 'https://example.test' },
+      clients: {
+        async matchAll() {
+          return [{
+            postMessage(payload) {
+              messages.push(payload.type);
+            },
+          }];
+        },
+      },
+    },
+  };
+  vm.createContext(context);
+  const source = fs.readFileSync(new URL('../public/stream-sw.js', import.meta.url), 'utf8');
+  vm.runInContext(source, context);
+
+  const timer = setTimeout(() => {
+    vm.runInContext("driveAccessToken = 'woken-token'; tokenWaiters.forEach(resolve => resolve(true));", context);
+  }, 450);
+  const resolved = await vm.runInContext('requestDriveToken()', context);
+  clearTimeout(timer);
+  assert.equal(resolved, true);
+  assert.ok(messages.includes('SISIC_DRIVE_TOKEN_REQUEST'));
+});

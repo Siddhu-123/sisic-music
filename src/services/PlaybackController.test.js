@@ -1311,4 +1311,64 @@ test('DJ transition still executes near tail when standby only has metadata (rea
   }
 });
 
+test('locked/backgrounded playback reuses the unlocked primary deck instead of playing standby', async t => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { hidden: true };
+  t.after(() => {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  });
+
+  const { c } = fixture(t);
+  c.setQueueAndPlay([songs[0], songs[1]]);
+  await settle();
+  const primary = c.audio;
+  const standby = c.standby;
+  let standbyPlayAttempts = 0;
+  standby.play = async () => {
+    standbyPlayAttempts += 1;
+    throw Object.assign(new Error('gesture required'), { name: 'NotAllowedError' });
+  };
+
+  primary.currentTime = 100;
+  primary.paused = true;
+  primary.emit('ended');
+  await settle();
+
+  assert.equal(standbyPlayAttempts, 0);
+  assert.equal(c.audio, primary);
+  assert.equal(c.state.currentSongKey, 'b');
+  assert.equal(c.state.isPlaying, true);
+  assert.equal(c.audio.src, 'b');
+  assert.equal(c.state.error, '');
+});
+
+test('if screen locks mid-transition and standby play throws NotAllowedError, playback falls back to the primary deck', async t => {
+  const previousDocument = globalThis.document;
+  globalThis.document = { hidden: false };
+  t.after(() => {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  });
+
+  const { c } = fixture(t);
+  c.setQueueAndPlay([songs[0], songs[1]]);
+  await settle();
+  const primary = c.audio;
+  const standby = c.standby;
+  standby.play = async () => {
+    globalThis.document.hidden = true;
+    throw Object.assign(new Error('gesture required'), { name: 'NotAllowedError' });
+  };
+
+  c.playNext();
+  await settle();
+
+  assert.equal(c.audio, primary);
+  assert.equal(c.state.currentSongKey, 'b');
+  assert.equal(c.state.isPlaying, true);
+  assert.equal(c.audio.src, 'b');
+  assert.equal(c.state.error, '');
+});
+
 

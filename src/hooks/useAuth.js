@@ -201,7 +201,7 @@ export function useAuth() {
       setSyncStatus('');
     });
 
-    const handleServiceWorkerMessage = event => {
+    const handleServiceWorkerMessage = async event => {
       const action = workerAuthMessageAction(event.data, {
         isAuthenticated: driveService.isAuthenticated,
         tokenVersion: driveService.tokenVersion,
@@ -209,7 +209,23 @@ export function useAuth() {
       if (action === 'sync-token') {
         driveService.syncTokenToServiceWorker(event.source);
       } else if (action === 'reauthorize') {
+        const refreshed = navigator.onLine !== false
+          ? await driveService.refreshTokenSilently().catch(() => false)
+          : false;
+        if (refreshed && driveService.isAuthenticated) {
+          setIsAuthenticated(true);
+          setError('');
+          driveService.syncTokenToServiceWorker(event.source);
+          return;
+        }
         driveService.requireAuthentication(new Error(event.data.message || 'Google Drive authorization ended.'));
+      } else if (event.data?.type === 'SISIC_DRIVE_TOKEN_REQUEST' && driveService.hasAuthorizedSession && navigator.onLine !== false) {
+        const refreshed = await driveService.refreshTokenSilently().catch(() => false);
+        if (refreshed && driveService.isAuthenticated) {
+          setIsAuthenticated(true);
+          setError('');
+          driveService.syncTokenToServiceWorker(event.source);
+        }
       }
     };
     const handleStoredToken = () => {
@@ -218,12 +234,17 @@ export function useAuth() {
       setHasAuthorizedSession(true);
       setError('');
     };
+    const handleControllerChange = () => {
+      driveService.syncTokenToServiceWorker();
+    };
     navigator.serviceWorker?.addEventListener('message', handleServiceWorkerMessage);
+    navigator.serviceWorker?.addEventListener('controllerchange', handleControllerChange);
     window.addEventListener('storage', handleStoredToken);
 
     return () => {
       unsubscribe();
       navigator.serviceWorker?.removeEventListener('message', handleServiceWorkerMessage);
+      navigator.serviceWorker?.removeEventListener('controllerchange', handleControllerChange);
       window.removeEventListener('storage', handleStoredToken);
     };
   }, []);

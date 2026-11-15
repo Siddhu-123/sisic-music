@@ -164,8 +164,10 @@ export class PlaybackController {
     audio.setRpm(this.state.rpm);
     audio.setPitchModifier(this.state.pitchModifier);
     audio.setEqEnabled?.(this.state.eqEnabled);
-    if (this.state.eqPreset === 'custom') this.state.eqGains.forEach((gain, i) => audio.setBandGain(i, gain));
-    else audio.applyPreset(this.state.eqPreset);
+    if (this.state.eqPreset === 'custom') {
+      if (typeof audio.setEqGains === 'function') audio.setEqGains(this.state.eqGains);
+      else this.state.eqGains.forEach((gain, i) => audio.setBandGain(i, gain));
+    } else audio.applyPreset(this.state.eqPreset);
   }
   persist = () => {
     try {
@@ -360,6 +362,7 @@ export class PlaybackController {
     const cancel = () => { abort.abort(); if (this.loadAbort === abort) this.audio?.clear(); };
     signal?.addEventListener('abort', cancel, { once: true });
     const latest = () => this.active && request === this.sequence && !abort.signal.aborted;
+    const isHidden = () => typeof document !== 'undefined' && Boolean(document.hidden);
     const outgoing = this.audio;
     let incoming = outgoing;
     this.loading = true;
@@ -371,18 +374,29 @@ export class PlaybackController {
       // Await the existing preload rather than start a second stream for the same song.
       if (sameSource(this.preloadSong, song) && this.preloadPending) await this.preloadPending;
       if (!latest()) return false;
-      if (sameSource(this.preloaded, song) && this.standby) {
+      const hidden = isHidden();
+      if (sameSource(this.preloaded, song) && this.standby && !hidden) {
         incoming = this.standby;
         this.pendingAudio = incoming;
         this.standby = null;
         this.preloaded = null;
         this.preloadSong = null;
       } else {
+        let preloadedUrl = '';
+        if (hidden && sameSource(this.preloaded, song) && this.standby?.src) {
+          // Keep background/lock-screen playback on the already-unlocked active audio element
+          // because Safari/WebKit rejects .play() on an un-gestured standby <audio> element.
+          preloadedUrl = this.standby.src;
+          this.standby.clear();
+          this.preloaded = null;
+          this.preloadSong = null;
+        }
         mix = null;
         crossfade = 0;
-        outgoing.clear();
-        const url = await this.resolveUrl(song, abort.signal);
+        if (!hidden && !preloadedUrl) outgoing.clear();
+        const url = preloadedUrl || await this.resolveUrl(song, abort.signal);
         if (!latest()) return false;
+        if (hidden) outgoing.clear();
         await incoming.loadUrl(url);
       }
       if (!latest()) return false;
@@ -390,7 +404,7 @@ export class PlaybackController {
       if (startAt > 0) incoming.seek(bounded(startAt, Math.max(0, incoming.duration - 0.25)));
       const style = mix ? (mix.style || 'beat-blend') : 'plain';
       let canFade = false;
-      if (crossfade > 0 && this.desiredPlaying && incoming !== outgoing && !outgoing.paused) {
+      if (!isHidden() && crossfade > 0 && this.desiredPlaying && incoming !== outgoing && !outgoing.paused) {
         const incomingContext = incoming.ensureContext();
         const outgoingContext = outgoing.ensureContext();
         canFade = Boolean(incomingContext && outgoingContext);
@@ -437,7 +451,29 @@ export class PlaybackController {
         const inDownbeat = mix.candidateRhythm?.firstDownbeat != null ? mix.candidateRhythm.firstDownbeat : 0;
         incoming.seek(inDownbeat);
       }
-      if (this.desiredPlaying) await incoming.play();
+      if (this.desiredPlaying) {
+        try {
+          await incoming.play();
+        } catch (playError) {
+          if (playError?.name === 'NotAllowedError' && incoming !== outgoing && isHidden() && incoming.src) {
+            const fallbackUrl = incoming.src;
+            incoming.clear();
+            this.standby = incoming;
+            this.pendingAudio = null;
+            incoming = outgoing;
+            mix = null;
+            crossfade = 0;
+            canFade = false;
+            await incoming.loadUrl(fallbackUrl);
+            if (!latest()) return false;
+            this.applySettings(incoming);
+            if (startAt > 0) incoming.seek(bounded(startAt, Math.max(0, incoming.duration - 0.25)));
+            await incoming.play();
+          } else {
+            throw playError;
+          }
+        }
+      }
       if (!latest()) return false;
       if (!this.desiredPlaying) incoming.pause({ immediate: true });
       if (incoming !== outgoing) {
@@ -673,7 +709,9 @@ export class PlaybackController {
         : remaining;
       const standbyReady = this.standby?.element?.readyState >= 3
         || (djDue && remaining <= 1.0 && this.standby?.element?.readyState >= 1);
-      if (duration > 0 && remaining > 0 && (djDue || remaining <= Math.min(this.state.crossfadeSeconds, duration / 2))
+      const hidden = typeof document !== 'undefined' && Boolean(document.hidden);
+      const allowOverlap = djDue || (!hidden && remaining <= Math.min(this.state.crossfadeSeconds, duration / 2));
+      if (duration > 0 && remaining > 0 && allowOverlap
         && this.preloaded && this.desiredPlaying && !this.loading && !this.transitioning && !this.audio.isScratching
         && !this.audio.needleLifted && !this.audio.element?.seeking && this.state.repeatMode !== 'one'
         && this.state.sleepTimer?.mode !== 'track' && this.audio.element?.readyState >= 3 && standbyReady) {

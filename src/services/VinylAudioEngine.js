@@ -242,7 +242,7 @@ export class VinylAudioEngine {
     });
   }
 
-  _releaseCurrentSource() {
+  _releaseCurrentSource({ clearElement = true } = {}) {
     this.playRequest += 1;
     this.playRequested = false;
     this.pendingLoadCancel?.();
@@ -265,8 +265,10 @@ export class VinylAudioEngine {
     if (this.element) {
       this.nativePauseSuppressed = true;
       this.element.pause();
-      this.element.removeAttribute('src');
-      this.element.load();
+      if (clearElement) {
+        this.element.removeAttribute('src');
+        this.element.load();
+      }
       this.nativePauseSuppressed = false;
     }
     this.duration = 0;
@@ -279,7 +281,7 @@ export class VinylAudioEngine {
     if (!nextUrl) throw new Error('No audio source was provided.');
 
     const requestId = ++this.sourceRequest;
-    this._releaseCurrentSource();
+    this._releaseCurrentSource({ clearElement: false });
     this.element.src = nextUrl;
     await new Promise((resolve, reject) => {
       let settled = false;
@@ -499,8 +501,11 @@ export class VinylAudioEngine {
     const source = this.sourceRequest;
     this.playRequested = true;
     const context = this.graph.audioContext;
-    if (context?.state === 'suspended') await context.resume();
-    if (request !== this.playRequest || source !== this.sourceRequest) throw abortError();
+    if (context && context.state !== 'running' && context.state !== 'closed') {
+      // Do not block element.play() on context.resume(): on iOS Lock Screen WebAudio
+      // stays suspended/interrupted without a foreground gesture while native audio plays.
+      context.resume().catch(() => {});
+    }
     this._cancelRateRamp();
     this._syncDuration();
     if (this.duration && this.position >= this.duration - 0.01) this.seek(0);
@@ -680,7 +685,7 @@ export class VinylAudioEngine {
   }
 
   setBandGain(index, gain) {
-    this.ensureContext();
+    if (this.graph.audioContext || Number(gain) !== 0) this.ensureContext();
     this.graph.setBandGain(index, gain);
   }
 
@@ -736,7 +741,7 @@ export class VinylAudioEngine {
       this._cancelRateRamp();
       if (this.isPlaying) this._nativePlaybackRate(this.targetMotorRate);
       this.setNeedleLifted(false);
-    } else if (this.isPlaying && this.graph.audioContext?.state === 'suspended') {
+    } else if (this.isPlaying && this.graph.audioContext && this.graph.audioContext.state !== 'running' && this.graph.audioContext.state !== 'closed') {
       this.graph.audioContext.resume().catch(() => {});
     }
   }
