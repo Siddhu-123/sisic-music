@@ -225,7 +225,7 @@ export function ExploreView({
           <div className="explore-section__heading">
             <div>
               <h2>{activeMix?.title || 'Explore results'}</h2>
-              <p>{activeMix?.subtitle || `${filteredSongs.length} matching songs`}</p>
+              <p>{activeMix?.subtitle || `${filteredSongs.length} matching ${filteredSongs.length === 1 ? 'song' : 'songs'}`}</p>
             </div>
             {activeMix && <button className="explore-clear" type="button" onClick={() => setActiveMixId('')}>Clear mix</button>}
           </div>

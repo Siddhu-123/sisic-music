@@ -48,17 +48,17 @@
 .tile-face__vignette{position:absolute;left:0;top:-33.3333cqw;width:100cqw;height:176cqw;pointer-events:none;background:url("data:image/svg+xml;utf8,<svg viewBox='0 0 300 528' xmlns='http://www.w3.org/2000/svg' preserveAspectRatio='none'><g transform='matrix(-17 17.45 -15.808 -15.4 150 264)' opacity='1'><rect height='251.11' width='151.78' fill='url(%23grad)' id='quad' shape-rendering='crispEdges'/><use href='%23quad' transform='scale(1 -1)'/><use href='%23quad' transform='scale(-1 1)'/><use href='%23quad' transform='scale(-1 -1)'/></g><defs><linearGradient id='grad' gradientUnits='userSpaceOnUse' x2='5' y2='5'><stop stop-color='rgba(0,0,0,0)' offset='0.80752'/><stop stop-color='rgba(0,0,0,1)' offset='1'/></linearGradient></defs></svg>") center/100% 100% no-repeat}
 /* Single blurred album backdrop + diagonal mask preserves Group 25 color bleed and top-right rim with 1 shared decode. */
 .tile-face__layer--single{filter:blur(1.25cqw);-webkit-mask-image:linear-gradient(26deg,#000 58%,rgba(0,0,0,.68) 78%,rgba(0,0,0,.22) 95%);mask-image:linear-gradient(26deg,#000 58%,rgba(0,0,0,.68) 78%,rgba(0,0,0,.22) 95%)}
-.tile-face__cover{position:absolute;left:7.6667cqw;top:8.3333cqw;width:84.6667cqw;height:80.3333cqw;overflow:hidden;border-radius:3cqw;opacity:.9;background:rgba(255,255,255,.1)}
+.tile-face__cover{position:absolute;left:7.6667cqw;top:6cqw;width:84.6667cqw;height:73cqw;overflow:hidden;border-radius:3cqw;opacity:.92;background:rgba(255,255,255,.1)}
 .tile-face__cover-img{position:absolute;left:-13.6667cqw;top:-8.3333cqw;width:112cqw!important;height:112cqw!important;max-width:none;object-fit:cover;aspect-ratio:auto!important}
-/* Glass name box: Figma 177x55 at (13,268), radius 10; hairline rim brightest on the left and upper-right edges.
-   Sits over .tile-face__layer--single which is already blurred (1.25cqw), so avoid a redundant per-tile backdrop-filter readback pass. */
-.tile-face__meta{position:absolute;z-index:2;left:4.3333cqw;top:89.3333cqw;width:59cqw;height:18.3333cqw;overflow:hidden;border-radius:3.3333cqw;background:linear-gradient(180deg,rgba(20,24,34,.46),rgba(10,14,22,.64));-webkit-backdrop-filter:none;backdrop-filter:none}
+/* Full-width glass metadata plate: holds up to 2 wrapped title lines so soundtrack/film titles stay legible. */
+.tile-face__meta{position:absolute;z-index:2;left:4cqw;right:4cqw;bottom:3.6cqw;width:auto;height:auto;min-height:19.5cqw;overflow:hidden;border-radius:3.3333cqw;padding:2.4cqw 4.2cqw;display:flex;flex-direction:column;justify-content:center;gap:1.2cqw;background:linear-gradient(180deg,rgba(16,20,32,.72),rgba(8,11,20,.88));-webkit-backdrop-filter:none;backdrop-filter:none}
 .tile-face__meta-bg{position:absolute;inset:0;padding:1px;border-radius:inherit;pointer-events:none;background:conic-gradient(rgba(255,255,255,.1),rgba(255,255,255,.14) 50deg,rgba(255,255,255,.52) 76deg,rgba(255,255,255,.42) 92deg,rgba(255,255,255,.1) 108deg,rgba(255,255,255,.08) 245deg,rgba(255,255,255,.42) 262deg,rgba(255,255,255,.52) 280deg,rgba(255,255,255,.1) 300deg,rgba(255,255,255,.1));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
-.tile-face__title,.tile-face__artist{position:relative;margin:0;padding:0;color:#fff;font-weight:400;line-height:normal;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:49.6667cqw;text-shadow:none}
-.tile-face__title{margin:1.6667cqw 0 0 6.3333cqw;font-size:6.6667cqw}
-.tile-face__artist{margin-left:6.3333cqw;font-size:4cqw}
-.tile-face__status{position:absolute;z-index:2;right:8.3333cqw;bottom:5.3333cqw;max-width:28cqw;margin:0;color:rgba(255,255,255,.92);font-size:4cqw;line-height:1;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tile-face .song-card__playing-bars{position:absolute;z-index:3;left:10.3333cqw;top:11cqw}
+.tile-face__title,.tile-face__artist{position:relative;margin:0;padding:0;color:#fff;text-shadow:none}
+.tile-face__title{max-width:100%;font-size:clamp(11px,5.4cqw,16px);font-weight:600;line-height:1.22;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tile-face__subrow{position:relative;display:flex;align-items:center;justify-content:space-between;gap:2.5cqw;min-width:0}
+.tile-face__artist{flex:1 1 auto;min-width:0;max-width:none;font-size:clamp(10px,3.8cqw,12px);font-weight:400;line-height:1.2;color:rgba(255,255,255,.78);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile-face__status{position:static;flex:0 0 auto;max-width:38%;margin:0;color:#b8ecff;font-size:clamp(9.5px,3.6cqw,11.5px);font-weight:600;line-height:1.1;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile-face .song-card__playing-bars{position:absolute;z-index:3;left:10.3333cqw;top:8.6cqw}
 .tile-face .song-card__playing-bars span{height:24px;transform-origin:bottom center;animation:tile-bar-bounce 1s ease-in-out infinite}
 .tile-face .song-card__playing-bars--paused span{animation:none;transform:scaleY(.45)}
 @keyframes tile-bar-bounce{0%,100%{transform:scaleY(.333)}50%{transform:scaleY(1)}}

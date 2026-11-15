@@ -35,7 +35,7 @@ export const PlaylistTile = memo(function PlaylistTile({ playlist, songs, onOpen
         <TileFace
           song={artSong}
           title={playlist.name}
-          subtitle={`${count} songs`}
+          subtitle={`${count} ${count === 1 ? 'song' : 'songs'}`}
           statusText="Playlist"
           cover={cover}
         />

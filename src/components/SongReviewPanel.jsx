@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CheckCircle2, Clock3, ExternalLink, Link2, RefreshCw, ShieldAlert, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
+import { CheckCircle2, Clock3, ExternalLink, Link2, Play, RefreshCw, ShieldAlert, Square, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react';
 import { useDialogFocus } from '../hooks/useDialogFocus.js';
 import { formatDurationSeconds, getKnownDurationSeconds, MAX_DOWNLOAD_DURATION_SECONDS } from '../services/downloadPolicy.js';
 
@@ -67,8 +67,10 @@ export function SongReviewPanel({
   busy = false,
 }) {
   const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [activePreviewId, setActivePreviewId] = useState('');
+  const [hoverPreviewId, setHoverPreviewId] = useState('');
+  const [pinnedPreviewId, setPinnedPreviewId] = useState('');
   const [rejectedIds, setRejectedIds] = useState(() => new Set());
+  const activePreviewId = pinnedPreviewId || hoverPreviewId;
   const sourceUrl = song.sourceUrl || song.selectedSourceUrl || '';
   const job = song.downloadJob;
   const candidates = Array.isArray(job?.reviewCandidates)
@@ -124,7 +126,7 @@ export function SongReviewPanel({
             <div className="song-review-candidates__header">
               <div>
                 <h3 id="song-review-candidates-title">Worker could not decide</h3>
-                <p>Choose the result that is actually the song. Hover a result to preview its first 20 seconds. Your choices improve future ranking.</p>
+                <p>Choose the result that is actually the song. Tap Preview to watch its first 20 seconds, or open on YouTube. Your choices improve future ranking.</p>
               </div>
               <span>{visibleCandidates.length} to review</span>
             </div>
@@ -139,16 +141,18 @@ export function SongReviewPanel({
                   const thumbnail = candidateThumbnail(candidate);
                   const isDurationFiltered = Boolean(candidate.durationLimitExceeded);
                   const isFiltered = candidate.selectionStatus === 'safety-filtered';
+                  const isPinnedPreview = pinnedPreviewId === key;
                   const score = Number(candidate.score);
                   return (
                     <article className="song-review-candidate" key={key}>
                       <div
                         className="song-review-candidate__media"
                         tabIndex={previewUrl ? 0 : -1}
-                        onMouseEnter={() => previewUrl && setActivePreviewId(key)}
-                        onMouseLeave={() => setActivePreviewId('')}
-                        onFocus={event => { if (event.target === event.currentTarget && previewUrl) setActivePreviewId(key); }}
-                        onBlur={() => setActivePreviewId('')}
+                        onMouseEnter={() => previewUrl && setHoverPreviewId(key)}
+                        onMouseLeave={() => setHoverPreviewId('')}
+                        onFocus={event => { if (event.target === event.currentTarget && previewUrl) setHoverPreviewId(key); }}
+                        onBlur={() => setHoverPreviewId('')}
+                        onClick={() => previewUrl && setPinnedPreviewId(current => (current === key ? '' : key))}
                         aria-label={previewUrl ? `Preview ${candidate.title}` : undefined}
                       >
                         {activePreviewId === key && previewUrl ? (
@@ -173,8 +177,8 @@ export function SongReviewPanel({
                           href={candidateUrl(candidate)}
                           target="_blank"
                           rel="noreferrer"
-                          onMouseEnter={() => previewUrl && setActivePreviewId(key)}
-                          onMouseLeave={() => setActivePreviewId('')}
+                          onMouseEnter={() => previewUrl && setHoverPreviewId(key)}
+                          onMouseLeave={() => setHoverPreviewId('')}
                         >
                           {candidate.title || 'Untitled YouTube result'}
                           <ExternalLink size={13} />
@@ -186,10 +190,21 @@ export function SongReviewPanel({
                         </div>
                         <small>{candidateReason(candidate)}</small>
                         <div className="song-review-candidate__actions">
-                          <button className="btn-primary" onClick={() => onSelectCandidate?.(song, candidate)} disabled={busy || !candidateUrl(candidate)}>
+                          <button type="button" className="btn-primary" onClick={() => onSelectCandidate?.(song, candidate)} disabled={busy || !candidateUrl(candidate)}>
                             <CheckCircle2 size={15} /> Use this source
                           </button>
-                          <button className="panel-action-btn" onClick={() => rejectCandidate(candidate)} disabled={busy}>
+                          {previewUrl && (
+                            <button
+                              type="button"
+                              className={`panel-action-btn song-review-candidate__preview-btn ${isPinnedPreview ? 'is-active' : ''}`}
+                              aria-pressed={isPinnedPreview}
+                              onClick={() => setPinnedPreviewId(current => (current === key ? '' : key))}
+                            >
+                              {isPinnedPreview ? <Square size={14} /> : <Play size={14} />}
+                              <span>{isPinnedPreview ? 'Stop preview' : 'Preview 20s'}</span>
+                            </button>
+                          )}
+                          <button type="button" className="panel-action-btn" onClick={() => rejectCandidate(candidate)} disabled={busy}>
                             <ThumbsDown size={15} /> Not this
                           </button>
                           <a className="song-review-candidate__open" href={candidateUrl(candidate)} target="_blank" rel="noreferrer">Open on YouTube</a>

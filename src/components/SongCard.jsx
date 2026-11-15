@@ -58,10 +58,12 @@ export function TileFace({ song, statusText, statusTitle, title = song.track, su
       {children}
       <div className="tile-face__meta">
         <span className="tile-face__meta-bg" aria-hidden="true" />
-        <p className="tile-face__title">{title}</p>
-        <p className="tile-face__artist">{subtitle}</p>
+        <p className="tile-face__title" title={title}>{title}</p>
+        <div className="tile-face__subrow">
+          <p className="tile-face__artist" title={subtitle}>{subtitle}</p>
+          {statusText ? <p className="tile-face__status" title={statusTitle}>{statusText}</p> : null}
+        </div>
       </div>
-      <p className="tile-face__status" title={statusTitle}>{statusText}</p>
     </div>
   );
 }
