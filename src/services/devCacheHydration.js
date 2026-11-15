@@ -1,5 +1,6 @@
 import { bulkSeedSnapshotToDb, db } from '../db.js';
 import { importGemmaVectors, RECS_V3_MODEL } from './gemmaVectors.js';
+import { EXTERNAL_HISTORY_STORAGE_KEY, saveExternalHistoryPack } from './personalRanker.js';
 import { asSongRecord } from '../songIdentity.js';
 
 let pendingHydration = null;
@@ -17,13 +18,15 @@ export async function hydrateFromDevCache({ force = false, fetchImpl = fetch } =
 
   pendingHydration = (async () => {
     try {
-      const [existingCount, existingVecCount, existingV3Count, existingEventCount] = await Promise.all([
+      const [existingCount, existingVecCount, existingV3Count, existingEventCount, existingExtMeta] = await Promise.all([
         db.songs.count(),
         db.songVectors.count(),
         db.songVectors.where('embeddingModel').equals(RECS_V3_MODEL).count(),
         db.playbackEvents.count(),
+        db.metadata.get(EXTERNAL_HISTORY_STORAGE_KEY),
       ]);
-      if (existingCount >= 4000 && existingV3Count > 0 && existingEventCount > 0 && !force) {
+      const hasExternalHistory = Boolean(existingExtMeta?.value?.events?.length);
+      if (existingCount >= 4000 && existingV3Count > 0 && existingEventCount > 0 && hasExternalHistory && !force) {
         return { hydrated: false, songCount: existingCount, vectorCount: existingVecCount, eventCount: existingEventCount };
       }
 
@@ -71,8 +74,15 @@ export async function hydrateFromDevCache({ force = false, fetchImpl = fetch } =
         importedVectors = vecRes?.imported || 0;
       }
 
+      let externalHistoryHydrated = false;
+      if ((!hasExternalHistory || force) && snapshot.mergedHistoryPack?.events?.length) {
+        await saveExternalHistoryPack(snapshot.mergedHistoryPack);
+        externalHistoryHydrated = true;
+      }
+
       return {
         hydrated: true,
+        externalHistoryHydrated,
         songCount: normalizedSongs.length,
         vectorCount: importedVectors,
         eventCount: snapshot.playbackEvents?.length || 0,

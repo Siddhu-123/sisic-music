@@ -21,6 +21,7 @@ function sisicDevCachePlugin() {
           const playlistsDoc = readJson('sisic-playlists.json');
           const playbackDoc = readJson('sisic-playback-log.json');
           const vectorsDoc = readJson('embeddinggemma2/vectors-v3.json');
+          const mergedHistoryDoc = readJson('sisic-merged-history.json');
 
           const payload = {
             available: Boolean(songsDoc?.songs?.length),
@@ -28,6 +29,7 @@ function sisicDevCachePlugin() {
             playlists: Array.isArray(playlistsDoc?.playlists) ? playlistsDoc.playlists : [],
             playbackEvents: Array.isArray(playbackDoc?.events) ? playbackDoc.events : [],
             vectorsPayload: vectorsDoc?.model && Array.isArray(vectorsDoc?.songs) ? vectorsDoc : null,
+            mergedHistoryPack: mergedHistoryDoc?.events?.length ? mergedHistoryDoc : null,
           };
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');

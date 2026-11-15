@@ -499,13 +499,18 @@ function App() {
     hydrateFromDevCache().then(result => {
       if (cancelled || !result) return;
       if (result.driveIndexSongs?.length) {
-        setDriveIndexSongs(prev => (prev.length > 0 ? prev : result.driveIndexSongs));
+        setDriveIndexSongs(prev => (result.driveIndexSongs.length > prev.length ? result.driveIndexSongs : prev));
       }
       if (result.drivePlaybackEvents?.length) {
         setDrivePlaybackEvents(prev => (prev.length > 0 ? prev : result.drivePlaybackEvents));
       }
       if (result.hydrated || result.vectorCount > 0) {
         reloadGemmaVectors().catch(err => console.error('Failed to reload hydrated vectors:', err));
+      }
+      if (result.externalHistoryHydrated) {
+        loadExternalHistoryPack().then(pack => {
+          if (pack) setExternalHistoryPack(pack);
+        }).catch(() => {});
       }
     });
     return () => { cancelled = true; };
@@ -735,8 +740,12 @@ function App() {
   // Keep driveSongKeySet and driveReadySongs derived from the same authoritative source
   // so Ready, Playlist coverage, and downloads stay consistent offline or before Drive sync.
   const effectiveDriveSongs = useMemo(() => {
+    const dbReady = allSongs.filter(song => song?.songKey && song.driveFileId && !deletedSongKeySet.has(song.songKey));
+    if (import.meta.env.DEV && dbReady.length > driveIndexSongs.length) {
+      return dbReady;
+    }
     if (driveIndexSongs.length > 0) return driveIndexSongs;
-    return allSongs.filter(song => song?.songKey && song.driveFileId && !deletedSongKeySet.has(song.songKey));
+    return dbReady;
   }, [allSongs, deletedSongKeySet, driveIndexSongs]);
 
   const driveSongKeySet = useMemo(() => {
