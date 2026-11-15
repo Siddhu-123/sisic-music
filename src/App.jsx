@@ -48,6 +48,12 @@ import {
   saveExternalHistoryPack,
 } from './services/personalRanker.js';
 import { importExternalListeningFile, mergeExternalHistoryPack } from './services/externalHistoryImporter.js';
+import {
+  mergeExternalAndNativeEvents,
+  mergeLikedSongKeys,
+  resolveEffectiveLibrarySongs,
+  selectCanonicalDriveSongs,
+} from './services/libraryViewModel.js';
 import { GEMMA2_DIMENSIONS, GEMMA2_MODEL, RECS_V3_DIMENSIONS, RECS_V3_MODEL, importGemmaVectors, loadPreferredSongVectors, syncGemmaVectorsFromService } from './services/gemmaVectors.js';
 import { getGemmaServiceConfig } from './services/gemmaServiceConfig.js';
 import { useAdaptiveDjMode } from './hooks/useAdaptiveDjMode.js';
@@ -499,7 +505,7 @@ function App() {
     hydrateFromDevCache().then(result => {
       if (cancelled || !result) return;
       if (result.driveIndexSongs?.length) {
-        setDriveIndexSongs(prev => (result.driveIndexSongs.length > prev.length ? result.driveIndexSongs : prev));
+        setDriveIndexSongs(prev => selectCanonicalDriveSongs(prev, result.driveIndexSongs, { isDev: import.meta.env.DEV }));
       }
       if (result.drivePlaybackEvents?.length) {
         setDrivePlaybackEvents(prev => (prev.length > 0 ? prev : result.drivePlaybackEvents));
@@ -728,7 +734,7 @@ function App() {
   ), [driveDuplicateSongs]);
 
   const effectiveAllSongs = useMemo(
-    () => (import.meta.env.DEV && driveIndexSongs.length > allSongs.length ? driveIndexSongs : allSongs),
+    () => resolveEffectiveLibrarySongs({ dbSongs: allSongs, driveIndexSongs, isDev: import.meta.env.DEV }),
     [allSongs, driveIndexSongs],
   );
 
@@ -944,8 +950,7 @@ function App() {
         // Completed jobs may be compacted out of the queue. Refresh the song
         // index once so an open tab picks up replacement Drive file IDs.
         const refreshedSongs = await driveService.readSongIndex(DRIVE_FOLDER_ID, { forceRefresh: true });
-        const nextSongs = refreshedSongs.songs || [];
-        setDriveIndexSongs(prev => (import.meta.env.DEV && prev.length > nextSongs.length ? prev : nextSongs));
+        setDriveIndexSongs(prev => selectCanonicalDriveSongs(prev, refreshedSongs.songs, { isDev: import.meta.env.DEV }));
       }
       setHasPendingJobs(pending);
     } catch (error) {
@@ -961,8 +966,7 @@ function App() {
       try {
         const result = await driveService.loadDriveIndexes(DRIVE_FOLDER_ID);
         if (cancelled) return;
-        const nextSongs = result.songs || [];
-        setDriveIndexSongs(prev => (import.meta.env.DEV && prev.length > nextSongs.length ? prev : nextSongs));
+        setDriveIndexSongs(prev => selectCanonicalDriveSongs(prev, result.songs, { isDev: import.meta.env.DEV }));
         setDriveDeletedSongs(result.deleted || []);
         setDriveDuplicateSongs(result.duplicates || []);
         setDrivePlaybackEvents(result.playbackEvents || []);
@@ -1388,18 +1392,20 @@ function App() {
     return null;
   }, [addToast, ensureLocalSong, jobBySongKey, queueSongForDownload]);
 
-  const mergedLikedSongKeys = useMemo(() => {
-    const ext = externalHistoryPack?.likedSongKeys;
-    if (!ext?.length) return likedSongKeys;
-    return [...new Set([...(likedSongKeys || []), ...ext])];
-  }, [externalHistoryPack?.likedSongKeys, likedSongKeys]);
+  const canonicalLikedKeys = useMemo(
+    () => mergeLikedSongKeys(likedSongKeys, externalHistoryPack?.likedSongKeys),
+    [externalHistoryPack?.likedSongKeys, likedSongKeys],
+  );
 
-  const mergedRankerPlaybackEvents = useMemo(() => {
-    const ext = externalHistoryPack?.events;
-    const native = librarySummary.playbackEvents || [];
-    if (!ext?.length) return native;
-    return [...ext, ...native].sort((a, b) => Date.parse(a?.createdAt || 0) - Date.parse(b?.createdAt || 0));
-  }, [externalHistoryPack?.events, librarySummary.playbackEvents]);
+  const canonicalPlaybackEvents = useMemo(
+    () => mergeExternalAndNativeEvents(externalHistoryPack?.events, librarySummary.playbackEvents),
+    [externalHistoryPack?.events, librarySummary.playbackEvents],
+  );
+
+  const canonicalLibrarySummary = useMemo(
+    () => ({ ...librarySummary, playbackEvents: canonicalPlaybackEvents }),
+    [canonicalPlaybackEvents, librarySummary],
+  );
 
   const collabScoring = useMemo(() => resolvePersonalRankerCollab(personalRankerState), [personalRankerState]);
 
@@ -1409,11 +1415,11 @@ function App() {
     const recs = await computeUpNextRecommendationsAsync({
       currentSong,
       librarySongs: exploreLibrarySongs,
-      playbackEvents: mergedRankerPlaybackEvents,
+      playbackEvents: canonicalPlaybackEvents,
       ...(hasGemmaVectors ? { gemmaVectors } : {}),
       ...(learnedWeights ? { rankerWeights: learnedWeights } : {}),
       ...(collabScoring.collabGraph ? { collabGraph: collabScoring.collabGraph, collabWeight: collabScoring.collabWeight } : {}),
-      likedSongKeys: mergedLikedSongKeys,
+      likedSongKeys: canonicalLikedKeys,
       recentlyPlayedKeys: Array.from(countedPlaybackRef.current || []),
       manualQueue,
       limit: 6,
@@ -1425,7 +1431,7 @@ function App() {
       } : {}),
     });
     return signal?.aborted ? [] : recs;
-  }, [collabScoring.collabGraph, collabScoring.collabWeight, exploreLibrarySongs, gemmaVectors, mergedLikedSongKeys, mergedRankerPlaybackEvents, personalRankerState]);
+  }, [canonicalLikedKeys, canonicalPlaybackEvents, collabScoring.collabGraph, collabScoring.collabWeight, exploreLibrarySongs, gemmaVectors, personalRankerState]);
 
   const handleImportListeningHistory = useCallback(async file => {
     if (!file) return null;
@@ -1450,19 +1456,19 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!exploreLibrarySongs.length || !mergedRankerPlaybackEvents.length) return undefined;
+    if (!exploreLibrarySongs.length || !canonicalPlaybackEvents.length) return undefined;
     const timer = setTimeout(() => {
       refreshPersonalRanker({
         songs: exploreLibrarySongs,
-        playbackEvents: mergedRankerPlaybackEvents,
-        likedSongKeys: mergedLikedSongKeys,
+        playbackEvents: canonicalPlaybackEvents,
+        likedSongKeys: canonicalLikedKeys,
         gemmaVectors: gemmaVectors.size ? gemmaVectors : null,
       }).then(nextState => {
         if (nextState) setPersonalRankerState(nextState);
       }).catch(() => {});
     }, 1200);
     return () => clearTimeout(timer);
-  }, [exploreLibrarySongs, gemmaVectors, mergedLikedSongKeys, mergedRankerPlaybackEvents]);
+  }, [canonicalLikedKeys, canonicalPlaybackEvents, exploreLibrarySongs, gemmaVectors]);
 
   useEffect(() => {
     configurePlayback({
@@ -1968,8 +1974,7 @@ function App() {
     if (!DRIVE_FOLDER_ID) return;
     try {
       const result = await driveService.syncSongIndex(DRIVE_FOLDER_ID);
-      const nextSongs = result.songs || [];
-      setDriveIndexSongs(prev => (import.meta.env.DEV && prev.length > nextSongs.length ? prev : nextSongs));
+      setDriveIndexSongs(prev => selectCanonicalDriveSongs(prev, result.songs, { isDev: import.meta.env.DEV }));
       addToast(`Reconciled ${result.songs?.length || 0} Drive songs`);
     } catch (error) {
       console.error('Drive reconciliation failed:', error);
@@ -2272,9 +2277,9 @@ function App() {
           <>
             <TasteDeckHud
               songs={effectiveAllSongs}
-              playbackEvents={mergedRankerPlaybackEvents}
+              playbackEvents={canonicalPlaybackEvents}
               gemmaVectors={gemmaVectors}
-              likedSongKeys={mergedLikedSongKeys}
+              likedSongKeys={canonicalLikedKeys}
               queue={player.queue}
               currentSong={player.currentSong}
               onPlaySong={(song, list) => handlePlaySong(song, list)}
@@ -2375,9 +2380,9 @@ function App() {
             <ExploreView
               browseSongs={exploreBrowseSongs}
               librarySongs={exploreLibrarySongs}
-              playbackEvents={mergedRankerPlaybackEvents}
+              playbackEvents={canonicalPlaybackEvents}
               {...(gemmaVectors.size ? { gemmaVectors } : {})}
-              likedSongKeys={mergedLikedSongKeys}
+              likedSongKeys={canonicalLikedKeys}
               catalogueLoading={catalogueLoading}
               renderSong={renderSongCard}
               onRecommendationShown={handleRecommendationShown}
@@ -2499,8 +2504,8 @@ function App() {
             <ConstellationView
               songs={galaxySongs}
               gemmaVectors={gemmaVectors}
-              playbackEvents={mergedRankerPlaybackEvents}
-              likedSongKeys={mergedLikedSongKeys}
+              playbackEvents={canonicalPlaybackEvents}
+              likedSongKeys={canonicalLikedKeys}
               currentSong={player.currentSong}
               isQueueOpen={showQueue}
               onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
@@ -2732,9 +2737,9 @@ function App() {
           <TasteProfileModal
             isOpen
             onClose={() => setIsTasteProfileOpen(false)}
-            librarySummary={{ ...librarySummary, playbackEvents: mergedRankerPlaybackEvents }}
+            librarySummary={canonicalLibrarySummary}
             songs={effectiveAllSongs}
-            likedSongKeys={mergedLikedSongKeys}
+            likedSongKeys={canonicalLikedKeys}
             externalHistoryPack={externalHistoryPack}
             personalRankerState={personalRankerState}
             onImportListeningHistory={handleImportListeningHistory}
