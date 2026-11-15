@@ -485,6 +485,8 @@ function App() {
     setGemmaVectors(new Map(rows.map(row => [row.songKey, row])));
   }, []);
 
+  const isUiPreview = import.meta.env.DEV && typeof window !== 'undefined' && window.location.search.includes('ui-preview');
+
   useEffect(() => {
     reloadGemmaVectors().catch(error => console.error('Failed to load EmbeddingGemma vectors:', error));
   }, [reloadGemmaVectors]);
@@ -2207,7 +2209,7 @@ function App() {
           onOpenStorage={() => setShowStoragePanel(true)}
           onReconnect={login}
         />
-        {(isSyncing || (bannerError && (localDbError || actionError || player.error || !String(authError || '').startsWith('Drive connection paused')))) && (
+        {(isSyncing || (bannerError && (localDbError || actionError || player.error || (!isUiPreview && !String(authError || '').startsWith('Drive connection paused'))))) && (
           <SyncBanner
             isSyncing={isSyncing}
             syncStatus={bannerStatus}
@@ -2483,6 +2485,7 @@ function App() {
               playbackEvents={librarySummary.playbackEvents}
               likedSongKeys={likedSongKeys}
               currentSong={player.currentSong}
+              isQueueOpen={showQueue}
               onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
               onPlayCluster={(clusterSongs) => clusterSongs.length && handlePlaySong(clusterSongs[0], clusterSongs)}
               onAddToQueue={(song) => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}

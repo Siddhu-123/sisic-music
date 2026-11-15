@@ -329,12 +329,15 @@ export function ConstellationView({
   playbackEvents = [],
   likedSongKeys = [],
   currentSong,
+  isQueueOpen = false,
   onPlaySong,
   onAddToQueue,
   onPlayCluster,
 }) {
   const canvasRef = useRef(null);
   const wrapperRef = useRef(null);
+  const popoverRef = useRef(null);
+  const [popoverOpen, setPopoverOpen] = useState(false);
   const rotationRef = useRef({ x: 0.08, y: 0.0 });
   const targetRotYRef = useRef(null);
   const targetRotXRef = useRef(null);
@@ -378,6 +381,25 @@ export function ConstellationView({
   const [perfMode, setPerfMode] = useState(readInitialPerfMode);
   const [prevTrackKey, setPrevTrackKey] = useState('');
   const [webglReady, setWebglReady] = useState(true);
+  const effectivePopoverOpen = popoverOpen && !isQueueOpen;
+
+  useEffect(() => {
+    if (!effectivePopoverOpen) return undefined;
+    const handlePointerDown = event => {
+      if (popoverRef.current && !popoverRef.current.contains(event.target)) {
+        setPopoverOpen(false);
+      }
+    };
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') setPopoverOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [effectivePopoverOpen]);
 
   const activeFocusCluster = selectedClusterId >= 0 ? selectedClusterId : hoveredClusterId;
   const readyCount = useMemo(() => songs.filter(song => song.driveFileId).length, [songs]);
@@ -1159,7 +1181,12 @@ export function ConstellationView({
           >
             <Navigation size={12} style={{ marginRight: 5 }} />{povMode ? 'First-person' : 'Overview'}
           </button>
-          <details className="constellation-popover">
+          <details
+            ref={popoverRef}
+            className="constellation-popover"
+            open={effectivePopoverOpen}
+            onToggle={event => setPopoverOpen(event.currentTarget.open)}
+          >
             <summary className="filter-chip" title="Filter map source, space, and FPS preset">
               <SlidersHorizontal size={12} style={{ marginRight: 5 }} />Filter &amp; GPU
             </summary>

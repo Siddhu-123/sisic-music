@@ -1722,8 +1722,146 @@
 }
 
 :root[data-theme="light"] .constellation-mode-btn.is-active {
-  background: rgba(77, 88, 200, 0.14) !important;
-  color: #4d58c8 !important;
-  box-shadow: inset 0 0 0 1px rgba(77, 88, 200, 0.35);
+  background: rgba(8, 145, 178, 0.14) !important;
+  color: #0891b2 !important;
+  box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.35);
+}
+
+/* Sticky Taste Profile Modal Header */
+.taste-profile-modal .taste-modal-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(9, 13, 24, 0.88);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  margin: -24px -24px 20px;
+  padding: 18px 24px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] .taste-profile-modal .taste-modal-header {
+  background: rgba(255, 255, 255, 0.92);
+  border-bottom-color: rgba(15, 23, 42, 0.1);
+}
+
+.queue-panel {
+  z-index: 65;
+}
+
+/* ==========================================================================
+   Daylight Signal Studio — Light Mode Parity (Eliminates Neumorphic Fallback)
+   ========================================================================== */
+:root[data-theme="light"] {
+  --obsidian-bg: #f3f6fb;
+  --obsidian-surface: #ffffff;
+  --obsidian-panel: rgba(255, 255, 255, 0.92);
+  --obsidian-panel-hover: #ffffff;
+  --obsidian-hairline: rgba(15, 23, 42, 0.1);
+  --obsidian-hairline-cyan: rgba(8, 145, 178, 0.3);
+  --obsidian-cyan: #0891b2;
+  --obsidian-cyan-deep: #0284c7;
+  --obsidian-amber: #d97706;
+
+  --green: #0891b2;
+  --green-dark: #0284c7;
+  --accent-blue: #0891b2;
+  --accent-cyan: #0891b2;
+  --accent-amber: #d97706;
+  --accent-purple: #7c3aed;
+
+  --bg: var(--obsidian-bg);
+  --bg-main: var(--obsidian-bg);
+  --bg-elevated: var(--obsidian-surface);
+  --bg-raised: #ffffff;
+  --bg-card: var(--obsidian-panel);
+  --bg-card-hover: #ffffff;
+  --text: #0f172a;
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --border: var(--obsidian-hairline);
+  --border-light: rgba(15, 23, 42, 0.12);
+  --player-bg: rgba(255, 255, 255, 0.94);
+
+  --shadow-light: rgba(255, 255, 255, 0.8);
+  --shadow-dark: rgba(15, 23, 42, 0.1);
+  --shadow-raised: 0 12px 30px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --shadow-soft: 0 4px 14px rgba(15, 23, 42, 0.05);
+  --shadow-inset: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+  --focus-ring: 0 0 0 2px rgba(8, 145, 178, 0.3);
+  --radius: 14px;
+}
+
+:root[data-theme="light"] body,
+:root[data-theme="light"] .app-shell,
+:root[data-theme="light"] .login-screen {
+  background:
+    radial-gradient(900px 420px at 14% -8%, rgba(8, 145, 178, 0.08), transparent 65%),
+    radial-gradient(760px 380px at 88% 0%, rgba(217, 119, 6, 0.06), transparent 62%),
+    #f3f6fb;
+  color: var(--text);
+}
+
+:root[data-theme="light"] .sidebar,
+:root[data-theme="light"] .mobile-nav {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(15, 23, 42, 0.1);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.07);
+}
+
+:root[data-theme="light"] .sidebar__nav-item,
+:root[data-theme="light"] .sidebar__signout-btn,
+:root[data-theme="light"] .theme-toggle,
+:root[data-theme="light"] .icon-btn,
+:root[data-theme="light"] .panel-action-btn,
+:root[data-theme="light"] .filter-chip,
+:root[data-theme="light"] .neumorphic-button {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
+  color: #1e293b;
+}
+
+:root[data-theme="light"] .sidebar__nav-item--active,
+:root[data-theme="light"] .filter-chip--active {
+  background: rgba(8, 145, 178, 0.12);
+  border-color: rgba(8, 145, 178, 0.38);
+  color: #0e7490;
+  box-shadow: none;
+}
+
+:root[data-theme="light"] .studio-command-search,
+:root[data-theme="light"] .studio-telemetry-pill,
+:root[data-theme="light"] .taste-deck-card,
+:root[data-theme="light"] .playlist-tile,
+:root[data-theme="light"] .song-card,
+:root[data-theme="light"] .drive-summary > div,
+:root[data-theme="light"] .login-card,
+:root[data-theme="light"] .taste-profile-modal,
+:root[data-theme="light"] .queue-panel,
+:root[data-theme="light"] .storage-panel,
+:root[data-theme="light"] .eq-modal,
+:root[data-theme="light"] .recs-modal,
+:root[data-theme="light"] .song-info-panel,
+:root[data-theme="light"] .song-review-panel {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .player-bar {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.1);
+}
+
+:root[data-theme="light"] .btn-primary,
+:root[data-theme="light"] .login-btn,
+:root[data-theme="light"] .play-btn {
+  background: linear-gradient(135deg, #0891b2, #0284c7);
+  color: #ffffff;
+  border: 1px solid rgba(8, 145, 178, 0.45);
+  box-shadow: 0 6px 18px rgba(8, 145, 178, 0.24);
 }
 
