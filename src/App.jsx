@@ -728,10 +728,10 @@ function App() {
   ), [driveDuplicateSongs]);
 
   // Stable list for the galaxy so it doesn't re-cluster on every player tick.
-  const galaxySongs = useMemo(
-    () => allSongs.filter(song => !duplicateSongKeySet.has(song.songKey)),
-    [allSongs, duplicateSongKeySet],
-  );
+  const galaxySongs = useMemo(() => {
+    const base = import.meta.env.DEV && driveIndexSongs.length > allSongs.length ? driveIndexSongs : allSongs;
+    return base.filter(song => !duplicateSongKeySet.has(song.songKey));
+  }, [allSongs, driveIndexSongs, duplicateSongKeySet]);
 
   const deletedSongKeySet = useMemo(() => {
     return new Set(driveDeletedSongs.map(song => song.songKey).filter(Boolean));
