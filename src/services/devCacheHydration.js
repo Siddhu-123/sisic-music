@@ -26,7 +26,7 @@ export async function hydrateFromDevCache({ force = false, fetchImpl = fetch } =
         db.metadata.get(EXTERNAL_HISTORY_STORAGE_KEY),
       ]);
       const hasExternalHistory = Boolean(existingExtMeta?.value?.events?.length);
-      if (existingCount >= 4000 && existingV3Count > 0 && existingEventCount > 0 && hasExternalHistory && !force) {
+      if (existingCount >= 4000 && existingV3Count >= 3900 && existingEventCount > 0 && hasExternalHistory && !force) {
         return { hydrated: false, songCount: existingCount, vectorCount: existingVecCount, eventCount: existingEventCount };
       }
 
@@ -69,7 +69,7 @@ export async function hydrateFromDevCache({ force = false, fetchImpl = fetch } =
       }
 
       let importedVectors = existingVecCount;
-      if ((existingV3Count === 0 || force) && snapshot.vectorsPayload) {
+      if ((existingV3Count < 3900 || force) && snapshot.vectorsPayload) {
         const vecRes = await importGemmaVectors(snapshot.vectorsPayload, normalizedSongs);
         importedVectors = vecRes?.imported || 0;
       }

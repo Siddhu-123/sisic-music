@@ -727,11 +727,16 @@ function App() {
     new Set(driveDuplicateSongs.map(song => song.songKey).filter(Boolean))
   ), [driveDuplicateSongs]);
 
+  const effectiveAllSongs = useMemo(
+    () => (import.meta.env.DEV && driveIndexSongs.length > allSongs.length ? driveIndexSongs : allSongs),
+    [allSongs, driveIndexSongs],
+  );
+
   // Stable list for the galaxy so it doesn't re-cluster on every player tick.
-  const galaxySongs = useMemo(() => {
-    const base = import.meta.env.DEV && driveIndexSongs.length > allSongs.length ? driveIndexSongs : allSongs;
-    return base.filter(song => !duplicateSongKeySet.has(song.songKey));
-  }, [allSongs, driveIndexSongs, duplicateSongKeySet]);
+  const galaxySongs = useMemo(
+    () => effectiveAllSongs.filter(song => !duplicateSongKeySet.has(song.songKey)),
+    [duplicateSongKeySet, effectiveAllSongs],
+  );
 
   const deletedSongKeySet = useMemo(() => {
     return new Set(driveDeletedSongs.map(song => song.songKey).filter(Boolean));
@@ -859,20 +864,20 @@ function App() {
 
   const librarySummary = useMemo(() => {
     const analytics = buildAnalyticsExport({
-      songs: allSongs,
+      songs: effectiveAllSongs,
       playlists: visiblePlaylists,
       playbackEvents,
       drivePlaybackEvents,
       syncOutbox,
     });
     return {
-      totalSongs: allSongs.length,
+      totalSongs: effectiveAllSongs.length,
       readySongs: driveReadySongs.length,
       playlistCount: visiblePlaylists.length,
       metrics: analytics.metrics,
       playbackEvents: analytics.playbackEvents,
     };
-  }, [allSongs, drivePlaybackEvents, driveReadySongs.length, playbackEvents, syncOutbox, visiblePlaylists]);
+  }, [drivePlaybackEvents, driveReadySongs.length, effectiveAllSongs, playbackEvents, syncOutbox, visiblePlaylists]);
 
   const selectedPlaylist = useMemo(() => {
     return visiblePlaylists.find(playlist => playlist.playlistKey === selectedPlaylistKey) || null;
@@ -939,7 +944,8 @@ function App() {
         // Completed jobs may be compacted out of the queue. Refresh the song
         // index once so an open tab picks up replacement Drive file IDs.
         const refreshedSongs = await driveService.readSongIndex(DRIVE_FOLDER_ID, { forceRefresh: true });
-        setDriveIndexSongs(refreshedSongs.songs || []);
+        const nextSongs = refreshedSongs.songs || [];
+        setDriveIndexSongs(prev => (import.meta.env.DEV && prev.length > nextSongs.length ? prev : nextSongs));
       }
       setHasPendingJobs(pending);
     } catch (error) {
@@ -955,7 +961,8 @@ function App() {
       try {
         const result = await driveService.loadDriveIndexes(DRIVE_FOLDER_ID);
         if (cancelled) return;
-        setDriveIndexSongs(result.songs || []);
+        const nextSongs = result.songs || [];
+        setDriveIndexSongs(prev => (import.meta.env.DEV && prev.length > nextSongs.length ? prev : nextSongs));
         setDriveDeletedSongs(result.deleted || []);
         setDriveDuplicateSongs(result.duplicates || []);
         setDrivePlaybackEvents(result.playbackEvents || []);
@@ -1402,7 +1409,7 @@ function App() {
     const recs = await computeUpNextRecommendationsAsync({
       currentSong,
       librarySongs: exploreLibrarySongs,
-      playbackEvents: librarySummary.playbackEvents,
+      playbackEvents: mergedRankerPlaybackEvents,
       ...(hasGemmaVectors ? { gemmaVectors } : {}),
       ...(learnedWeights ? { rankerWeights: learnedWeights } : {}),
       ...(collabScoring.collabGraph ? { collabGraph: collabScoring.collabGraph, collabWeight: collabScoring.collabWeight } : {}),
@@ -1418,7 +1425,7 @@ function App() {
       } : {}),
     });
     return signal?.aborted ? [] : recs;
-  }, [collabScoring.collabGraph, collabScoring.collabWeight, exploreLibrarySongs, gemmaVectors, librarySummary.playbackEvents, mergedLikedSongKeys, personalRankerState]);
+  }, [collabScoring.collabGraph, collabScoring.collabWeight, exploreLibrarySongs, gemmaVectors, mergedLikedSongKeys, mergedRankerPlaybackEvents, personalRankerState]);
 
   const handleImportListeningHistory = useCallback(async file => {
     if (!file) return null;
@@ -1961,7 +1968,8 @@ function App() {
     if (!DRIVE_FOLDER_ID) return;
     try {
       const result = await driveService.syncSongIndex(DRIVE_FOLDER_ID);
-      setDriveIndexSongs(result.songs || []);
+      const nextSongs = result.songs || [];
+      setDriveIndexSongs(prev => (import.meta.env.DEV && prev.length > nextSongs.length ? prev : nextSongs));
       addToast(`Reconciled ${result.songs?.length || 0} Drive songs`);
     } catch (error) {
       console.error('Drive reconciliation failed:', error);
@@ -2263,10 +2271,10 @@ function App() {
         {view === VIEWS.HOME && (
           <>
             <TasteDeckHud
-              songs={allSongs}
-              playbackEvents={librarySummary.playbackEvents}
+              songs={effectiveAllSongs}
+              playbackEvents={mergedRankerPlaybackEvents}
               gemmaVectors={gemmaVectors}
-              likedSongKeys={likedSongKeys}
+              likedSongKeys={mergedLikedSongKeys}
               queue={player.queue}
               currentSong={player.currentSong}
               onPlaySong={(song, list) => handlePlaySong(song, list)}
@@ -2367,9 +2375,9 @@ function App() {
             <ExploreView
               browseSongs={exploreBrowseSongs}
               librarySongs={exploreLibrarySongs}
-              playbackEvents={librarySummary.playbackEvents}
+              playbackEvents={mergedRankerPlaybackEvents}
               {...(gemmaVectors.size ? { gemmaVectors } : {})}
-              likedSongKeys={likedSongKeys}
+              likedSongKeys={mergedLikedSongKeys}
               catalogueLoading={catalogueLoading}
               renderSong={renderSongCard}
               onRecommendationShown={handleRecommendationShown}
@@ -2491,8 +2499,8 @@ function App() {
             <ConstellationView
               songs={galaxySongs}
               gemmaVectors={gemmaVectors}
-              playbackEvents={librarySummary.playbackEvents}
-              likedSongKeys={likedSongKeys}
+              playbackEvents={mergedRankerPlaybackEvents}
+              likedSongKeys={mergedLikedSongKeys}
               currentSong={player.currentSong}
               isQueueOpen={showQueue}
               onPlaySong={(song) => handlePlaySong(song, galaxySongs)}
@@ -2711,7 +2719,7 @@ function App() {
             isOpen
             onClose={() => setRecommendationTarget(null)}
             targetSong={recommendationTarget}
-            librarySongs={allSongs}
+            librarySongs={effectiveAllSongs}
             onRecommendationShown={handleRecommendationShown}
             onPlaySong={song => handlePlaySong(song, [song], { sourceType: 'mix', sourceId: getSongKey(recommendationTarget) })}
             onAddToQueue={song => { player.addToQueue(song); addToast(`Added "${song.track}" to queue`); }}
@@ -2724,8 +2732,8 @@ function App() {
           <TasteProfileModal
             isOpen
             onClose={() => setIsTasteProfileOpen(false)}
-            librarySummary={librarySummary}
-            songs={allSongs}
+            librarySummary={{ ...librarySummary, playbackEvents: mergedRankerPlaybackEvents }}
+            songs={effectiveAllSongs}
             likedSongKeys={mergedLikedSongKeys}
             externalHistoryPack={externalHistoryPack}
             personalRankerState={personalRankerState}
