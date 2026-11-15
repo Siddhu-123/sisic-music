@@ -322,6 +322,13 @@ export function chooseDjCandidate(ranked = [], { history = {}, random = Math.ran
 
 export function chooseDjTransitionTime(prediction, duration, fadeSeconds, history = {}) {
   const earliest = prediction.positionSeconds + 1;
+  // Without a finite early-skip ceiling, aim for the natural outro tail with enough headroom for timeupdate.
+  if (!Number.isFinite(prediction.predictedSkipAtSeconds) || prediction.predictedSkipAtSeconds > duration) {
+    const latestOutro = duration - fadeSeconds - 0.5;
+    if (latestOutro < earliest) return null;
+    const outroMargin = Math.min(duration * 0.25, Math.max(fadeSeconds + 1, 4));
+    return Math.min(latestOutro, Math.max(earliest, duration - outroMargin));
+  }
   const latest = Math.min(duration - fadeSeconds, prediction.predictedSkipAtSeconds - fadeSeconds);
   if (latest < earliest) return null;
   const recent = new Set(history.timingBuckets || []);
@@ -413,7 +420,8 @@ export function planDjMix({ source, candidate, positionSeconds, duration, predic
   const bars = pickMixBars(mixBars({ outroBars: abrupt ? 0 : out.outroBars, introBars: incoming.introBars, wantedBars: 16 }), history, random);
   const mixSeconds = bars * barSeconds;
   const predictedSkip = prediction?.predictedSkipAtSeconds;
-  const latestByEnd = duration - mixSeconds - 0.5;
+  // PlaybackController clamps beat-synced crossfades to >= 2 s, so reserve at least that much tail.
+  const latestByEnd = duration - Math.max(2, mixSeconds) - 0.5;
   const latestBySkip = Number.isFinite(predictedSkip) ? predictedSkip - mixSeconds : Infinity;
   // Prefer leaving where the outro begins; never later than the skip we are trying to beat.
   const wanted = Math.min(Number.isFinite(out.outroStart) && !abrupt ? out.outroStart : Infinity, latestBySkip, latestByEnd);

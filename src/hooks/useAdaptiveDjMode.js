@@ -36,20 +36,25 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys, 
       const state = latest.current;
       const p = state.player;
       if (!p.currentSong || p.djPlan || p.isBuffering || p.repeatMode === 'one' || p.sleepTimer?.mode === 'track') return;
+      if (!Number.isFinite(p.duration) || p.duration <= 4) return;
       const positionSeconds = p.progress / 100 * p.duration;
       const fadeSeconds = Math.max(2, Math.min(p.crossfadeSeconds || 4, 7));
-      if (positionSeconds < 8 || p.duration - positionSeconds <= fadeSeconds + 2) return;
-      const source = state.songs.find(song => song.songKey === p.currentSongKey) || p.currentSong;
+      const minElapsed = Math.min(8, Math.max(2, p.duration * 0.2));
+      if (positionSeconds < minElapsed || p.duration - positionSeconds <= 1.5) return;
+      const source = state.songs.find(song => (song.songKey || getSongKey(song)) === p.currentSongKey) || p.currentSong;
       const prediction = predictSkipProbability({ song: source, songs: state.songs, observations: state.observations, positionSeconds, durationSeconds: p.duration });
       p.setDjPrediction(prediction);
-      if (prediction.probability < DJ_SKIP_THRESHOLD) return;
+      // Plan early skip-rescue before a high-confidence predicted skip; otherwise mix seamlessly at the outro/tail.
+      const skipPredicted = prediction.probability >= DJ_SKIP_THRESHOLD;
+      const effectivePrediction = skipPredicted ? prediction : { ...prediction, predictedSkipAtSeconds: Infinity };
       busy = true;
       try {
         // IndexedDB is an optional optimization; unavailable storage must not stop DJ mode.
         const cached = await getDjTransitionScores(p.currentSongKey).catch(() => []);
         if (cancelled) return;
-        const transitionAtSeconds = chooseDjTransitionTime(prediction, p.duration, fadeSeconds, p.djHistory);
-        const ranked = rankDjCandidates({ source, songs: state.songs, playbackEvents: state.playbackEvents, positionSeconds: transitionAtSeconds,
+        const transitionAtSeconds = chooseDjTransitionTime(effectivePrediction, p.duration, fadeSeconds, p.djHistory);
+        const rankPosition = Number.isFinite(transitionAtSeconds) ? transitionAtSeconds : positionSeconds;
+        const ranked = rankDjCandidates({ source, songs: state.songs, playbackEvents: state.playbackEvents, positionSeconds: rankPosition,
           likedSongKeys: state.likedSongKeys, history: p.djHistory, transitionScores: new Map(cached.map(score => [score.cacheKey, score])), rankerWeights: state.rankerWeights });
 
         const findSong = key => state.songs.find(s => (s.songKey || getSongKey(s)) === key);
@@ -59,7 +64,12 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys, 
         let kind = null;
         let isFallback = false;
 
-        let nextKey = nextFromSet(djSetRef.current, p.currentSongKey);
+        const manualNext = (p.manualQueue || []).find(item => item?.driveFileId && (item.songKey || getSongKey(item)) !== p.currentSongKey);
+        if (manualNext) {
+          candidate = findSong(manualNext.songKey || getSongKey(manualNext)) || manualNext;
+        }
+
+        let nextKey = !candidate ? nextFromSet(djSetRef.current, p.currentSongKey) : null;
         if (nextKey) {
           const song = findSong(nextKey);
           if (song && song.driveFileId) {
@@ -99,9 +109,9 @@ export function useAdaptiveDjMode(player, songs, playbackEvents, likedSongKeys, 
 
         const candidateKey = candidate.songKey || getSongKey(candidate);
         const rankedItem = ranked.find(item => (item.song?.songKey || getSongKey(item.song)) === candidateKey);
-        const transition = choice?.transition || rankedItem?.transition || scoreDjTransition(source, candidate, transitionAtSeconds);
+        const transition = choice?.transition || rankedItem?.transition || scoreDjTransition(source, candidate, rankPosition);
 
-        const plan = planDjMix({ source, candidate, positionSeconds, duration: p.duration, prediction, transition, history: p.djHistory, fadeSeconds });
+        const plan = planDjMix({ source, candidate, positionSeconds, duration: p.duration, prediction: effectivePrediction, transition, history: p.djHistory, fadeSeconds });
         if (plan?.transitionAtSeconds == null) return;
 
         const current = latest.current.player;

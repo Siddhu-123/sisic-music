@@ -1491,8 +1491,8 @@ function App() {
   useAdaptiveDjMode(
     player,
     exploreLibrarySongs,
-    librarySummary.playbackEvents,
-    likedSongKeys,
+    canonicalPlaybackEvents,
+    canonicalLikedKeys,
     personalRankerState?.rankerEnabled ? personalRankerState.rankerWeights : null,
   );
 

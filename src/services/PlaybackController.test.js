@@ -1265,4 +1265,50 @@ test('addToQueue appends after existing upcoming songs while enqueueNext inserts
   assert.deepEqual(c.state.queue.map(s => s.songKey), ['a', 'head', 'b', 'c', 'd', 'tail']);
 });
 
+test('DJ transition still executes near tail when standby only has metadata (readyState 1) or on ended fallback', async t => {
+  // Subcase A: standby readyState === 1 near end (remaining <= 1.0) still fires djDue crossfade
+  {
+    const { c } = fixture(t);
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songs[0]]);
+    await settle();
+    c.audio.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      sourceSongKey: 'a',
+      candidate: songs[2],
+      transitionAtSeconds: 98,
+      crossfadeSeconds: 1.5,
+      style: 'echo-out',
+    }), true);
+    await settle();
+    c.standby.element.readyState = 1;
+    c.audio.currentTime = 99.2; // djDue && remaining === 0.8 <= 1.0
+    c.audio.emit('timeupdate');
+    await settle();
+    assert.equal(c.state.currentSongKey, 'c');
+  }
+
+  // Subcase B: if ended fires before timeupdate triggers, pending djPlan candidate still plays next
+  {
+    const { c } = fixture(t);
+    c.setDjModeEnabled(true);
+    c.setQueueAndPlay([songs[0]]);
+    await settle();
+    c.audio.currentTime = 10;
+    assert.equal(c.planDjTransition({
+      sourceSongKey: 'a',
+      candidate: songs[3],
+      transitionAtSeconds: 98,
+      crossfadeSeconds: 1.5,
+      style: 'echo-out',
+    }), true);
+    await settle();
+    c.audio.currentTime = 100;
+    c.audio.paused = true;
+    c.audio.emit('ended');
+    await settle();
+    assert.equal(c.state.currentSongKey, 'd');
+  }
+});
+
 

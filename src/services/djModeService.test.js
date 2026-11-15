@@ -540,4 +540,98 @@ test('rotation with scripted rng rotates between beat-blend and filter-blend wit
   assert.equal(echoPlan.style, 'echo-out');
 });
 
+test('chooseDjTransitionTime targets the natural outro tail when no early skip is predicted', () => {
+  const outro = chooseDjTransitionTime(
+    { positionSeconds: 15, predictedSkipAtSeconds: Infinity },
+    180,
+    1.5,
+    { timingBuckets: [175, 170, 165, 160] },
+  );
+  assert.ok(outro >= 175 && outro <= 178, `expected transition near 176s outro tail, got ${outro}`);
+  assert.equal(chooseDjTransitionTime({ positionSeconds: 178.2, predictedSkipAtSeconds: Infinity }, 180, 1.5), null);
+});
+
+test('useAdaptiveDjMode plans outro transitions with zero skip history and respects manualQueue', async () => {
+  const internals = React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  const prevH = internals.H;
+  const refs = [];
+  let cleanup = null;
+
+  const useRunOutroDjHook = (player, songList, events, likedKeys) => {
+    if (typeof cleanup === 'function') cleanup();
+    cleanup = null;
+    let refIdx = 0;
+    const effects = [];
+    internals.H = {
+      useRef(initial) {
+        const idx = refIdx++;
+        if (refs[idx] === undefined) refs[idx] = { current: initial };
+        return refs[idx];
+      },
+      useMemo(fn) { return fn(); },
+      useEffect(fn) { effects.push(fn); },
+    };
+    try {
+      useAdaptiveDjMode(player, songList, events, likedKeys);
+      for (const eff of effects) {
+        const res = eff();
+        if (typeof res === 'function') cleanup = res;
+      }
+    } finally {
+      internals.H = prevH;
+    }
+  };
+
+  const settleTicks = async () => {
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+  };
+
+  try {
+    // 1. Gridded track with NO playback events at all: still plans beat-sync mix at outroStart
+    const outSong = { ...gridded('g1', 120, 'C major', { outroStart: 184.5 }), track: 'G1', artist: 'Art1' };
+    const inSong = { ...gridded('g2', 120, 'C major'), track: 'G2', artist: 'Art2' };
+    const planned = [];
+    const player = {
+      djModeEnabled: true,
+      isPlaying: true,
+      currentSongKey: 'g1',
+      currentSong: outSong,
+      progress: (15 / 200) * 100,
+      duration: 200,
+      crossfadeSeconds: 0,
+      djVoiceEnabled: false,
+      djPlan: null,
+      djHistory: {},
+      manualQueue: [],
+      queueRevision: 0,
+      planDjTransition(p) { this.djPlan = p; planned.push(p); return true; },
+      setDjPrediction() {},
+    };
+    useRunOutroDjHook(player, [outSong, inSong], [], []);
+    await settleTicks();
+    assert.equal(planned.length, 1);
+    assert.equal(planned[0].beatSync, true);
+    assert.ok(planned[0].transitionAtSeconds >= 160 && planned[0].transitionAtSeconds <= 185);
+
+    // 2. Ungridded track with NO playback events: plans echo-out near tail (not +18s)
+    const plainA = { songKey: 'p1', track: 'Plain A', artist: 'Artist A', driveFileId: 'p1' };
+    const plainB = { songKey: 'p2', track: 'Plain B', artist: 'Artist B', driveFileId: 'p2' };
+    const plainC = { songKey: 'p3', track: 'Plain C', artist: 'Artist C', driveFileId: 'p3' };
+    player.currentSongKey = 'p1';
+    player.currentSong = plainA;
+    player.djPlan = null;
+    player.duration = 180;
+    player.progress = (15 / 180) * 100;
+    player.manualQueue = [plainC];
+    useRunOutroDjHook(player, [plainA, plainB, plainC], [], []);
+    await settleTicks();
+    assert.equal(planned.length, 2);
+    assert.equal(planned[1].style, 'echo-out');
+    assert.equal(planned[1].candidate.songKey, 'p3', 'manualQueue takes priority for next DJ mix target');
+    assert.ok(planned[1].transitionAtSeconds >= 174 && planned[1].transitionAtSeconds <= 178);
+  } finally {
+    if (typeof cleanup === 'function') cleanup();
+  }
+});
+
 

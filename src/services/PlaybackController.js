@@ -671,10 +671,12 @@ export class PlaybackController {
       const requestedFade = djDue
         ? Math.min(isSynced ? this.djPlan.crossfadeSeconds / Math.max(0.0625, this.audio.targetMotorRate || 1) : this.djPlan.crossfadeSeconds, remaining)
         : remaining;
+      const standbyReady = this.standby?.element?.readyState >= 3
+        || (djDue && remaining <= 1.0 && this.standby?.element?.readyState >= 1);
       if (duration > 0 && remaining > 0 && (djDue || remaining <= Math.min(this.state.crossfadeSeconds, duration / 2))
         && this.preloaded && this.desiredPlaying && !this.loading && !this.transitioning && !this.audio.isScratching
         && !this.audio.needleLifted && !this.audio.element?.seeking && this.state.repeatMode !== 'one'
-        && this.state.sleepTimer?.mode !== 'track' && this.audio.element?.readyState >= 3 && this.standby?.element?.readyState >= 3) {
+        && this.state.sleepTimer?.mode !== 'track' && this.audio.element?.readyState >= 3 && standbyReady) {
         let index = this.nextIndex();
         if (djDue && sameSource(this.djPlan.candidate, this.preloaded)) {
           const queue = insertAfter(this.state.queue, this.state.queueIndex, this.djPlan.candidate);
@@ -695,9 +697,25 @@ export class PlaybackController {
     if (type === 'ended') {
       if (this.loading) return;
       this.update({ isPlaying: false, isBuffering: false });
+      const pendingDj = this.djPlan
+        && keyOf(this.djPlan.source) === keyOf(this.state.currentSong)
+        && this.state.repeatMode !== 'one'
+        && this.state.sleepTimer?.mode !== 'track'
+        && playable(this.djPlan.candidate)
+        && !this.failed.has(keyOf(this.djPlan.candidate))
+        ? this.djPlan
+        : null;
       this.event('playback-complete', this.state.currentSong, { expectedFullPlay: true, message: 'Audio ended normally.' });
       if (this.state.sleepTimer?.mode === 'track') { this.expireSleep(); return; }
       if (this.state.repeatMode === 'one') { this.audio.seek(0); this.play(); }
+      else if (pendingDj) {
+        const queue = insertAfter(this.state.queue, this.state.queueIndex, pendingDj.candidate);
+        const queueIndex = queue.findIndex(song => keyOf(song) === this.state.currentSongKey);
+        this.update({ queue, queueIndex });
+        if (!this.select(queueIndex + 1)) {
+          this.desiredPlaying = false; this.update({ isPlaying: false }); this.persist();
+        }
+      }
       else if (!this.playNext({ reason: 'ended' })) { this.desiredPlaying = false; this.update({ isPlaying: false }); this.persist(); }
     } else if (type === 'error') {
       if (!this.loading) this.handleFailure(new Error(event.message || 'The audio stream failed.'));
